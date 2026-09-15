@@ -1,0 +1,21 @@
+{
+  "name": "@todex/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared TodeX protocol layer consumed by TodeX_desktop and TodeX_web via @todex/protocol/* path aliases.",
+  "scripts": {
+    "test": "npm run test:unit",
+    "test:unit": "tsc --ignoreConfig src/*.ts --outDir dist/unit/lib --module commonjs --target es2022 --moduleResolution node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --strict && node --test tests/unit/*.test.cjs",
+    "check:protocol": "tsc --ignoreConfig src/todex.ts src/netinfo.d.ts --outDir dist/protocol-check --module commonjs --target es2020 --esModuleInterop --skipLibCheck && node scripts/check-protocol.cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@noble/post-quantum": "^0.7.1"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.0"
+  }
+}

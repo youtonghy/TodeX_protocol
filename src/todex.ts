@@ -140,9 +140,31 @@ export type WorkspaceRecord = {
   permissionProfile?: string | null;
   personality?: string | null;
   localAdapterState?: LocalAdapterState;
+  /** Client-side flag set when the backend reports the directory is gone. */
+  pathMissing?: boolean;
   createdAt: number;
   updatedAt: number;
   sortOrder?: number;
+};
+
+/** A workspace record the backend refused to sync (for example because its
+ * directory no longer exists on disk). */
+export type WorkspaceSyncRejection = {
+  id: string;
+  name: string;
+  path: string;
+  code: string;
+  message: string;
+};
+
+/** Tombstone for a locally deleted workspace. Sync filters matching remote
+ * records out and re-issues the backend DELETE so deletions cannot be
+ * resurrected by the merge-based sync. */
+export type WorkspaceTombstone = {
+  id: string;
+  path: string;
+  backendConnectionId?: string | null;
+  deletedAt: number;
 };
 
 export type CapabilityHashTrigger = {
@@ -739,6 +761,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     permissionProfile: stringField(value, ['permissionProfile', 'permission_profile', 'permissions']) || null,
     personality: stringField(value, ['personality']) || null,
     localAdapterState,
+    pathMissing: booleanField(value, ['pathMissing', 'path_missing']) || undefined,
     createdAt,
     updatedAt,
     sortOrder: Number.isFinite(sortOrder) ? sortOrder : undefined,
@@ -756,6 +779,28 @@ export function parseWorkspaceSyncResponse(value: unknown): WorkspaceRecord[] {
     .filter((workspace): workspace is WorkspaceRecord => Boolean(workspace));
 }
 
+export function parseWorkspaceSyncRejected(value: unknown): WorkspaceSyncRejection[] {
+  const rawRejected = isObject(value) && Array.isArray(value.rejected) ? value.rejected : [];
+  const rejections: WorkspaceSyncRejection[] = [];
+  for (const item of rawRejected) {
+    if (!isObject(item)) {
+      continue;
+    }
+    const path = stringField(item, ['path']).trim();
+    if (!path) {
+      continue;
+    }
+    rejections.push({
+      id: stringField(item, ['id']).trim(),
+      name: stringField(item, ['name']).trim(),
+      path,
+      code: stringField(item, ['code']).trim(),
+      message: stringField(item, ['message']).trim(),
+    });
+  }
+  return rejections;
+}
+
 export function prepareWorkspaceSyncPayload(workspaces: WorkspaceRecord[]): WorkspaceRecord[] {
   return workspaces
     .map(normalizeWorkspaceRecord)
@@ -765,6 +810,7 @@ export function prepareWorkspaceSyncPayload(workspaces: WorkspaceRecord[]): Work
       backendConnectionId: undefined,
       threadId: '',
       localAdapterState: 'idle' as LocalAdapterState,
+      pathMissing: undefined,
       reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
     }))
     .sort((left, right) => right.updatedAt - left.updatedAt);
@@ -810,6 +856,35 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
       reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
     }))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+export function normalizeWorkspaceTombstone(value: unknown): WorkspaceTombstone | null {
+  if (!isObject(value)) {
+    return null;
+  }
+  const path = stringField(value, ['path']).trim();
+  const deletedAt = numberField(value, ['deletedAt', 'deleted_at']);
+  if (!path || !deletedAt) {
+    return null;
+  }
+  return {
+    id: stringField(value, ['id']).trim(),
+    path,
+    backendConnectionId: stringField(value, ['backendConnectionId', 'backend_connection_id']) || null,
+    deletedAt,
+  };
+}
+
+export function workspaceMatchesTombstone(record: WorkspaceRecord, tombstone: WorkspaceTombstone): boolean {
+  // A record recreated after the deletion carries a newer updatedAt and is
+  // not suppressed by the tombstone.
+  if (record.updatedAt > tombstone.deletedAt) {
+    return false;
+  }
+  if (tombstone.id && record.id === tombstone.id) {
+    return true;
+  }
+  return normalizeWorkspacePath(record.path) === normalizeWorkspacePath(tombstone.path);
 }
 
 export type KanbanTaskStatus = 'planned' | 'in-progress' | 'done';
@@ -1174,7 +1249,7 @@ function sameWorkspaceRecord(left: WorkspaceRecord, right: WorkspaceRecord): boo
   return normalizeWorkspacePath(left.path) === normalizeWorkspacePath(right.path);
 }
 
-function normalizeWorkspacePath(path: string): string {
+export function normalizeWorkspacePath(path: string): string {
   return path.trim().replace(/[\\/]+$/, '');
 }
 

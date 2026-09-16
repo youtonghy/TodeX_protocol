@@ -320,6 +320,65 @@ export type ProviderCommandsResponse = {
   catalogSource?: 'session' | 'discovery';
 };
 
+// --- Managed agent provider accounts (cc-switch model) ---
+
+export type ManagedProviderAgent = 'codex' | 'claude-code' | 'pi' | 'opencode';
+
+export const MANAGED_PROVIDER_AGENTS: ManagedProviderAgent[] = ['codex', 'claude-code', 'pi', 'opencode'];
+
+export type AgentProviderProfile = {
+  id: string;
+  name: string;
+  // Opaque per-agent config; secret values arrive masked as "__TODEX_MASKED__".
+  settingsConfig: Record<string, unknown>;
+  websiteUrl?: string;
+  category?: string;
+  notes?: string;
+  icon?: string;
+  iconColor?: string;
+  sortIndex?: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type AgentProviderInput = {
+  name: string;
+  settingsConfig: Record<string, unknown>;
+  websiteUrl?: string;
+  category?: string;
+  notes?: string;
+  icon?: string;
+  iconColor?: string;
+  sortIndex?: number;
+};
+
+export type AgentProviderSelection = {
+  providerId: string;
+  modelId: string | null;
+};
+
+export type AgentProviderLive =
+  | { kind: 'exclusive'; configured: boolean; config: unknown | null; matchesCurrent: boolean }
+  | {
+      kind: 'additive';
+      providers: Record<string, unknown>;
+      selection: AgentProviderSelection | null;
+      unmanagedProviders: string[];
+    };
+
+export type AgentProviderBucket = {
+  agent: ManagedProviderAgent;
+  mode: 'exclusive' | 'additive';
+  currentProviderId: string | null;
+  providers: AgentProviderProfile[];
+  live: AgentProviderLive;
+};
+
+export type AgentProvidersResponse = {
+  agents: Partial<Record<ManagedProviderAgent, AgentProviderBucket>>;
+  updatedAt: number;
+};
+
 export type CatalogScope = 'user' | 'project';
 
 export type SkillCatalogDescriptor = {
@@ -714,6 +773,64 @@ export class V2ApiClient {
     const query = new URLSearchParams({ provider, workspace });
     if (conversationId) query.set('conversationId', conversationId);
     return this.request(`/v2/providers/commands?${query}`);
+  }
+
+  async listAgentProviders(agent?: ManagedProviderAgent): Promise<AgentProvidersResponse> {
+    const query = agent ? `?agent=${encodeURIComponent(agent)}` : '';
+    return this.request(`/v2/agent-providers${query}`);
+  }
+
+  async getAgentProviderLive(agent: ManagedProviderAgent): Promise<AgentProviderLive> {
+    return this.request(`/v2/agent-providers/${encodeURIComponent(agent)}/live`);
+  }
+
+  async upsertAgentProvider(
+    agent: ManagedProviderAgent,
+    id: string,
+    input: AgentProviderInput,
+  ): Promise<AgentProviderBucket> {
+    return this.request(
+      `/v2/agent-providers/${encodeURIComponent(agent)}/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: JSON.stringify(input) },
+    );
+  }
+
+  async deleteAgentProvider(agent: ManagedProviderAgent, id: string): Promise<void> {
+    await this.request(
+      `/v2/agent-providers/${encodeURIComponent(agent)}/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  async activateAgentProvider(
+    agent: ManagedProviderAgent,
+    id: string,
+    modelId?: string,
+  ): Promise<AgentProviderBucket> {
+    return this.request(
+      `/v2/agent-providers/${encodeURIComponent(agent)}/${encodeURIComponent(id)}/activate`,
+      { method: 'POST', body: JSON.stringify(modelId ? { modelId } : {}) },
+    );
+  }
+
+  async importLiveAgentProvider(
+    agent: ManagedProviderAgent,
+    id: string,
+    name?: string,
+  ): Promise<AgentProviderBucket> {
+    return this.request(
+      `/v2/agent-providers/${encodeURIComponent(agent)}/import-live`,
+      { method: 'POST', body: JSON.stringify({ id, name }) },
+    );
+  }
+
+  async listAgentProviderModels(
+    agent: ManagedProviderAgent,
+    id: string,
+  ): Promise<{ models: Array<{ id: string; name: string }> }> {
+    return this.request(
+      `/v2/agent-providers/${encodeURIComponent(agent)}/${encodeURIComponent(id)}/models`,
+    );
   }
 
   async listSkillCatalog(provider: ProviderKind, workspace: string): Promise<SkillCatalog> {

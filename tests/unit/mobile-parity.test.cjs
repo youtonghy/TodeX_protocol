@@ -224,6 +224,51 @@ test('classifies nested Pi thought, tool, and assistant events', () => {
   }), 'workspace-1', 'turn-1');
   assert.equal(rawProviderTool.title, '工具调用');
 
+  // Pi streams `toolcall_start` (id + toolName only), then execution events on
+  // the same toolCallId. They must collapse into one card whose arguments are
+  // still present when `tool_execution_end` (which drops `args`) completes.
+  const piStart = parity.classifyV2ConversationEvent(event({
+    eventId: 'pi-tool-start',
+    type: 'tool.updated',
+    payload: {
+      provider: 'pi',
+      toolCallId: 'call-1',
+      toolName: 'bash',
+      delta: { type: 'toolcall_start', contentIndex: 0, id: 'call-1', toolName: 'bash' },
+      block: { category: 'tool', id: 'call-1', turnId: 'turn-1', phase: 'started' },
+    },
+  }), 'workspace-1', 'turn-1');
+  assert.equal(piStart.subtitle, '{"toolName":"bash"}');
+
+  const piExecuting = parity.classifyV2ConversationEvent(event({
+    eventId: 'pi-tool-exec',
+    type: 'tool.started',
+    payload: {
+      provider: 'pi',
+      toolCallId: 'call-1',
+      toolName: 'bash',
+      arguments: { command: 'ls' },
+      block: { category: 'tool', id: 'call-1', turnId: 'turn-1', phase: 'started' },
+    },
+  }), 'workspace-1', 'turn-1');
+  const piDone = parity.classifyV2ConversationEvent(event({
+    eventId: 'pi-tool-end',
+    type: 'tool.completed',
+    payload: {
+      provider: 'pi',
+      toolCallId: 'call-1',
+      toolName: 'bash',
+      arguments: { command: 'ls' },
+      result: { content: [{ type: 'text', text: 'file.txt' }] },
+      isError: false,
+      block: { category: 'tool', id: 'call-1', turnId: 'turn-1', phase: 'completed' },
+    },
+  }), 'workspace-1', 'turn-1');
+  assert.equal(piStart.id, piExecuting.id);
+  assert.equal(piExecuting.id, piDone.id);
+  assert.equal(piDone.subtitle.includes('"command":"ls"'), true);
+  assert.equal(piDone.subtitle.includes('file.txt'), true);
+
   const assistant = parity.classifyV2ConversationEvent(event({
     type: 'message.delta',
     payload: {
@@ -262,7 +307,9 @@ test('uses normalized block semantics before misleading payload fields', () => {
   assert.equal(firstTool.title, '工具调用');
   assert.notEqual(firstTool.id, secondTool.id);
   assert.equal(parity.shouldAppendV2ConversationEvent(normalized('tool', 'tool-1', 'started')), false);
-  assert.equal(parity.shouldAppendV2ConversationEvent(normalized('tool', 'tool-1', 'delta')), true);
+  // Tool blocks carry structured snapshots; appending them corrupts the JSON
+  // subtitle. Updates always replace the previous state.
+  assert.equal(parity.shouldAppendV2ConversationEvent(normalized('tool', 'tool-1', 'delta')), false);
   assert.equal(parity.shouldAppendV2ConversationEvent(normalized('tool', 'tool-1', 'completed')), false);
 
   const final = parity.classifyV2ConversationEvent(normalized('assistant_final', 'answer-1', 'completed', {

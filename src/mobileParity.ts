@@ -865,7 +865,9 @@ export function shouldAppendV2ConversationEvent(event: ConversationEvent): boole
   const type = canonicalConversationEventType(event);
   const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
   const block = payload ? conversationBlock(payload, '') : null;
-  if (block) return block.phase === 'delta';
+  // Tool blocks are structured snapshots ({toolName, arguments, result});
+  // appending them would corrupt the JSON subtitle instead of streaming text.
+  if (block) return block.phase === 'delta' && block.category !== 'tool';
   return type === 'assistant.delta'
     || type === 'reasoning.delta'
     || type === 'message.delta'

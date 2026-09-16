@@ -181,7 +181,8 @@ export function findCapabilityHashTrigger(text: string, cursor: number): Capabil
   const prefix = beforeCursor.slice(0, hashIndex);
   if (prefix && !/\s$/.test(prefix)) return null;
   const query = beforeCursor.slice(hashIndex + 1);
-  if (/\s/.test(query) || query.includes('#')) return null;
+  // Same charset the mobile `#` trigger accepts: no whitespace, `@`, or `#`.
+  if (/\s/.test(query) || query.includes('#') || query.includes('@')) return null;
   return { start: hashIndex, end, query };
 }
 

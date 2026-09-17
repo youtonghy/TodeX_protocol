@@ -744,6 +744,14 @@ function shortJsonValue(value: unknown): string {
   }
 }
 
+const EVENT_PREVIEW_CHARS = 220;
+const FAILURE_MESSAGE_CHARS = 4000;
+
+/** Bounded previews must mark the cut instead of clipping text mid-word. */
+function previewText(text: string, limit = EVENT_PREVIEW_CHARS): string {
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
 function textFromUnknown(value: unknown, depth = 0): string {
   if (depth > 5) return '';
   if (typeof value === 'string') return value;
@@ -1164,7 +1172,7 @@ export function classifyV2ConversationEvent(
       id: eventId,
       kind: 'system',
       title: '请求权限批准',
-      subtitle: (content || readString(payload, ['title']) || shortJsonValue(payload)).slice(0, 220),
+      subtitle: previewText(content || readString(payload, ['title']) || shortJsonValue(payload)),
       requestId: readString(payload, ['permissionId', 'requestId', 'providerRequestId']) || undefined,
       ...base,
     };
@@ -1174,7 +1182,11 @@ export function classifyV2ConversationEvent(
       id: eventId,
       kind: 'system',
       title: type,
-      subtitle: (content || shortJsonValue(payload)).slice(0, 220),
+      // turn.failed carries the user-facing failure reason; clipping it like a
+      // generic payload preview cuts real diagnostics mid-word.
+      subtitle: type === 'turn.failed'
+        ? previewText(content || shortJsonValue(payload), FAILURE_MESSAGE_CHARS)
+        : previewText(content || shortJsonValue(payload)),
       ...base,
     };
   }

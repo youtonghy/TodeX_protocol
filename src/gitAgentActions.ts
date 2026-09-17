@@ -51,7 +51,7 @@ export const gitAgentActionGroups: readonly GitAgentActionGroup[] = [
     title: '工作树',
     actions: [
       { id: 'list-worktrees', mode: 'direct', title: '查看工作树', description: '查看工作树路径、分支与更改状态' },
-      { id: 'create-worktree', mode: 'direct', title: '创建工作树', description: '填写分支与目录，创建工作树' },
+      { id: 'create-worktree', mode: 'direct', title: '创建工作树', description: '输入名称，创建 todex/xxx 工作树并转入' },
       { id: 'switch-worktree', mode: 'direct', title: '切换工作树', description: '打开目标工作树对应的工作区' },
       { id: 'manage-worktrees', mode: 'direct', title: '管理工作树', description: '查看状态并移除不再使用的工作树' },
     ],
@@ -75,7 +75,7 @@ const actionRequests: Record<GitAgentActionId, string> = {
   'create-branch': '请为当前任务创建分支。先检查当前分支和工作树状态；若对话中未明确分支名称或起点，请列出建议名称与可用起点并询问我。确定后按仓库命名规范创建分支，保留未提交更改，并报告结果。',
   'switch-branch': '请切换当前工作树的分支。若对话中未明确目标，请先列出可切换分支并询问我选择哪一个。切换时保留所有未提交更改；若更改会阻碍切换，请说明情况并询问我如何处理。完成后报告实际所在分支。',
   'list-worktrees': '请查看这个仓库的全部 Git 工作树，列出各自路径、分支和更改状态，标明当前工作树及可获得的锁定或失效状态。',
-  'create-worktree': '请为当前任务创建 Git 工作树。先查看已有工作树和分支；若对话中未明确目标目录、分支或起点，请列出合适的候选方案并询问我。确定后创建工作树并报告路径与分支。',
+  'create-worktree': '请为当前任务创建 Git 工作树，使用 todex/xxx 约定：分支 todex/xxx，目录为仓库主工作树同级的 todex/xxx。先查看已有工作树和分支；若对话中未明确名称或起点，请列出合适的候选方案并询问我。确定后创建工作树并报告路径与分支。',
   'switch-worktree': '请将当前任务切换到另一个已有 Git 工作树继续。若对话中未明确目标，请先列出工作树候选及分支并询问我。保留当前工作树的未提交更改，核实可用的任务工作目录切换能力，再执行切换；若无法改变会话工作目录，请说明限制和下一步，不能宣称已切换。',
   'manage-worktrees': '请检查这个仓库的工作树，列出路径、分支、更改状态及锁定或失效情况，并提供适用的管理操作供我选择。对移除或清理操作，先说明具体目标和影响并询问我，保留未提交更改，不要默认删除分支或远端内容。',
   handoff: '请将当前任务 handoff 到合适的工作树或检出目录。先检查当前分支、工作树和未提交更改；若对话中未明确交接目标，请列出候选目标并询问我。交接时完整保留未提交更改，并带上当前任务目标、已完成工作、重要决策、验证结果和下一步。核实可用的交接能力后执行；若无法迁移会话或工作目录，请给出交接内容和具体下一步，不要宣称已完成迁移。',

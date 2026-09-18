@@ -350,3 +350,75 @@ test('heuristic stubs reuse the full event entry id', () => {
     { turnId: 't', reasoning: 'chain' }), 'w');
   assert.equal(stubThought.id, fullThought.id);
 });
+
+test('hydrate merges stubs whose ids depend on replay-time turn context', () => {
+  // Heuristic events without an explicit turnId bind their entry id to the
+  // active turn; a partial detail range has no turn.started to rebuild it.
+  const stubbed = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'tool.completed', { detailStub: true, toolCallId: 'c1', toolCall: { id: 'c1', name: 'shell' } }),
+    event(3, 'reasoning.delta', { detailStub: true }),
+    event(4, 'message.delta', { turnId: 't', text: 'Answer' }),
+    event(5, 'turn.completed', { turnId: 't' })).state;
+  const toolStub = stubbed.timeline.find(entry => entry.id === 'v2-tool-c-t-c1');
+  const thinkStub = stubbed.timeline.find(entry => entry.id === 'v2-thought-c-t');
+  assert.ok(toolStub?.detailStub && thinkStub?.detailStub);
+  const hydrated = runtime.hydrateConversationRuntimeEvents(stubbed, [
+    event(2, 'tool.completed', { toolCallId: 'c1', toolCall: { id: 'c1', name: 'shell' }, result: 'ok' }),
+    event(3, 'reasoning.delta', { thinking: 'hmm' }),
+  ]);
+  assert.equal(hydrated.timeline.some(entry => entry.detailStub), false);
+  assert.equal(hydrated.timeline.filter(entry => entry.title === '工具调用').length, 1);
+  assert.equal(hydrated.timeline.filter(entry => entry.title === '思考中').length, 1);
+  const tool = hydrated.timeline.find(entry => entry.title === '工具调用');
+  assert.equal(tool.detailStub, undefined);
+  assert.ok(tool.subtitle.includes('shell'));
+  const think = hydrated.timeline.find(entry => entry.title === '思考中');
+  assert.equal(think.subtitle, 'hmm');
+});
+
+test('hydrate drops covered stubs that project to no content row', () => {
+  const stubbed = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'provider.event', { turnId: 't', detailStub: true,
+      block: { id: 'think-1', category: 'reasoning', phase: 'started', turnId: 't' } }),
+    event(3, 'turn.completed', { turnId: 't' })).state;
+  assert.equal(stubbed.timeline.filter(entry => entry.detailStub).length, 1);
+  const hydrated = runtime.hydrateConversationRuntimeEvents(stubbed, [
+    event(2, 'provider.event', { turnId: 't', delta: { type: 'thinking_start' },
+      block: { id: 'think-1', category: 'reasoning', phase: 'started', turnId: 't' } }),
+  ]);
+  assert.notEqual(hydrated, stubbed);
+  assert.equal(hydrated.timeline.some(entry => entry.detailStub), false);
+});
+
+test('hydrate never downgrades a row the full stream already advanced', () => {
+  const stubbed = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'provider.event', { turnId: 't', detailStub: true,
+      block: { id: 'call-1', category: 'tool', phase: 'started', turnId: 't' },
+      toolCallId: 'call-1', toolName: 'shell' }),
+    event(3, 'provider.event', { turnId: 't',
+      block: { id: 'call-1', category: 'tool', phase: 'completed', turnId: 't' },
+      toolCallId: 'call-1', result: 'RESULT' }),
+    event(4, 'turn.completed', { turnId: 't' })).state;
+  const entry = stubbed.timeline.find(item => item.category === 'tool');
+  assert.equal(entry.detailStub, undefined);
+  assert.ok(entry.subtitle.includes('RESULT'));
+  // The non-stubbed completed phase sits outside the fetched stub cluster.
+  const hydrated = runtime.hydrateConversationRuntimeEvents(stubbed, [
+    event(2, 'provider.event', { turnId: 't',
+      block: { id: 'call-1', category: 'tool', phase: 'started', turnId: 't' },
+      toolCallId: 'call-1', toolName: 'shell', arguments: { cmd: 'ls' } }),
+  ]);
+  const kept = hydrated.timeline.find(item => item.category === 'tool');
+  assert.ok(kept.subtitle.includes('RESULT'));
+});
+
+test('hydrate returns the same state when the range covers nothing', () => {
+  const stubbed = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'provider.event', { turnId: 't', detailStub: true,
+      block: { id: 'call-1', category: 'tool', phase: 'completed', turnId: 't' }, toolCallId: 'call-1' }),
+    event(3, 'turn.completed', { turnId: 't' })).state;
+  const hydrated = runtime.hydrateConversationRuntimeEvents(stubbed, [
+    event(3, 'turn.completed', { turnId: 't' }),
+  ]);
+  assert.equal(hydrated, stubbed);
+});

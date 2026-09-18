@@ -448,8 +448,11 @@ function missingRuntimeSequences(state: ConversationRuntime): number[] {
 /** Hydrate folded process entries after a `detail=summary` replay. Full events
  * for an expanded group's sequence range are projected on a scratch runtime —
  * their turn context comes from the events themselves — then merged back by
- * entry id. Only folded-step entries merge: visible output already arrived
- * complete, and assistant segment ids depend on context outside the range. */
+ * entry id, falling back to the covering stub's sequence when replay-time
+ * context changed the id. Only folded-step entries merge: visible output
+ * already arrived complete, and assistant segment ids depend on context
+ * outside the range. Fetched stubs that project to no row are dropped so a
+ * group cannot stay stuck on placeholders that will never resolve. */
 export function hydrateConversationRuntimeEvents(
   previous: ConversationRuntime,
   events: readonly ConversationEvent[],
@@ -463,19 +466,40 @@ export function hydrateConversationRuntimeEvents(
   const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
   for (const event of normalized) projectEvent(scratch, event);
   const details = scratch.timeline.filter(isStepProgressEntry);
-  if (!details.length) return previous;
+  const covered = new Set(normalized.map((event) => event.sequence));
   const timeline = [...previous.timeline];
+  let changed = false;
   for (const entry of details) {
     const { detailStub: _stub, ...hydrated } = entry;
     const index = timeline.findIndex(item => item.id === entry.id);
     if (index >= 0) {
+      // A hydrated block only spans the fetched range; never downgrade a row
+      // the full stream already advanced past this event.
+      const existing = timeline[index];
+      if (!existing.detailStub && (existing.sequence ?? 0) > (entry.sequence ?? 0)) continue;
       timeline[index] = hydrated;
+      changed = true;
+      continue;
+    }
+    // Stub ids can embed replay-time turn context a partial range cannot
+    // reproduce; the covering event still shares the same sequence.
+    const stubIndex = timeline.findIndex(item => item.detailStub && item.sequence === entry.sequence);
+    if (stubIndex >= 0) {
+      timeline[stubIndex] = hydrated;
+      changed = true;
       continue;
     }
     const sequence = entry.sequence ?? Number.MAX_SAFE_INTEGER;
     const position = timeline.findIndex(item => (item.sequence ?? 0) < sequence);
     if (position < 0) timeline.push(hydrated);
     else timeline.splice(position, 0, hydrated);
+    changed = true;
   }
-  return { ...previous, timeline };
+  // Placeholders whose covering events were fetched but project to no row are
+  // resolved stubs, not failures; leaving them would pin the group loading.
+  const nextTimeline = timeline.filter(item =>
+    !item.detailStub || item.sequence === undefined || !covered.has(item.sequence));
+  changed ||= nextTimeline.length !== timeline.length;
+  if (!changed) return previous;
+  return { ...previous, timeline: nextTimeline };
 }

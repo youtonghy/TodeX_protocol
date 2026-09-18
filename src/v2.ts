@@ -833,6 +833,17 @@ export class V2ApiClient {
     );
   }
 
+  async previewAgentProviderModels(
+    agent: ManagedProviderAgent,
+    id: string,
+    settingsConfig: Record<string, unknown>,
+  ): Promise<{ models: Array<{ id: string; name: string }> }> {
+    return this.request(
+      `/v2/agent-providers/${encodeURIComponent(agent)}/${encodeURIComponent(id)}/models`,
+      { method: 'POST', body: JSON.stringify({ settingsConfig }) },
+    );
+  }
+
   async listSkillCatalog(provider: ProviderKind, workspace: string): Promise<SkillCatalog> {
     const query = new URLSearchParams({ provider, workspace });
     return this.request(`/v2/catalog/skills?${query}`);

@@ -1177,6 +1177,11 @@ export class V2ConversationSocket {
     this.send('conversation.subscribe', { conversationId, afterSequence, limit });
   }
 
+  unsubscribe(conversationId: string): void {
+    if (!this.subscriptions.delete(conversationId)) return;
+    this.send('conversation.unsubscribe', { conversationId });
+  }
+
   sendPrompt(
     conversationId: string,
     text: string,

@@ -322,9 +322,9 @@ export type ProviderCommandsResponse = {
 
 // --- Managed agent provider accounts (cc-switch model) ---
 
-export type ManagedProviderAgent = 'codex' | 'claude-code' | 'pi' | 'opencode';
+export type ManagedProviderAgent = 'codex' | 'claude-code' | 'grok-build' | 'pi' | 'opencode';
 
-export const MANAGED_PROVIDER_AGENTS: ManagedProviderAgent[] = ['codex', 'claude-code', 'pi', 'opencode'];
+export const MANAGED_PROVIDER_AGENTS: ManagedProviderAgent[] = ['codex', 'claude-code', 'grok-build', 'pi', 'opencode'];
 
 export type AgentProviderProfile = {
   id: string;

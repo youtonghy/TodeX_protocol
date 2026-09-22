@@ -82,3 +82,102 @@ test('projection callbacks observe the latest committed recovery state', () => {
   const recovery = new ConversationRecovery(async () => ({ events: [], hasMore: false }), state => assert.equal(recovery.get('c'), state), error => assert.fail(error));
   recovery.receive('c', 'w', [started]);
 });
+
+/** In-memory journal helpers for the lazy-loading paths: `after` pages move
+ * forward, `before` pages return the newest events at or below the cursor. */
+const journalStore = (events) => ({
+  after: async (_id, afterSequence, limit) => {
+    const page = events.filter((entry) => entry.sequence > afterSequence).slice(0, limit);
+    return { events: page, hasMore: page.length ? page[page.length - 1].sequence < events[events.length - 1].sequence : false };
+  },
+  before: async (_id, beforeSequence, limit) => {
+    const page = events.filter((entry) => entry.sequence <= beforeSequence).slice(-limit);
+    return { events: page, hasMore: page.length ? page[0].sequence > 1 : false };
+  },
+});
+
+test('lazy open seeds a tail floor and loadEarlier prepends older pages', async () => {
+  const journal = [];
+  for (let sequence = 1; sequence <= 10; sequence += 1) {
+    journal.push(event(sequence, 'message.created', { role: 'user', content: `m${sequence}` }));
+  }
+  const store = journalStore(journal);
+  const forwardCalls = [];
+  const recovery = new ConversationRecovery(
+    async (id, after, limit) => { forwardCalls.push(after); return store.after(id, after, limit); },
+    () => {},
+    (error) => assert.fail(error),
+    store.before,
+  );
+  await recovery.open('c', 'w', { highWater: 10, pageLimit: 4 });
+  // Only the tail window projected; the forward replay never ran.
+  assert.deepEqual(forwardCalls, []);
+  let state = recovery.get('c');
+  assert.equal(state.appliedSequence, 10);
+  assert.deepEqual(state.timeline.map((entry) => entry.sequence), [10, 9, 8, 7]);
+  assert.equal(recovery.hasEarlierHistory('c'), true);
+
+  assert.equal(await recovery.loadEarlier('c', 'w', 4), true);
+  state = recovery.get('c');
+  assert.deepEqual(state.timeline.map((entry) => entry.sequence), [10, 9, 8, 7, 6, 5, 4, 3]);
+
+  assert.equal(await recovery.loadEarlier('c', 'w', 4), false);
+  state = recovery.get('c');
+  assert.deepEqual(state.timeline.map((entry) => entry.sequence), [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+  assert.equal(recovery.hasEarlierHistory('c'), false);
+  // Exhausted history stops paging.
+  assert.equal(await recovery.loadEarlier('c', 'w', 4), false);
+});
+
+test('lazy open keeps a racing live frame and drains it after the window', async () => {
+  const journal = [];
+  for (let sequence = 1; sequence <= 10; sequence += 1) {
+    journal.push(event(sequence, 'message.created', { role: 'user', content: `m${sequence}` }));
+  }
+  const store = journalStore(journal);
+  const recovery = new ConversationRecovery(store.after, () => {}, (error) => assert.fail(error), store.before);
+  const work = recovery.open('c', 'w', { highWater: 10, pageLimit: 4 });
+  // A live frame landing before the seed must not be dropped or trigger a
+  // full replay: it buffers above the floor and applies once contiguous.
+  recovery.receive('c', 'w', [event(11, 'message.created', { role: 'user', content: 'live' })]);
+  await work;
+  const state = recovery.get('c');
+  assert.equal(state.appliedSequence, 11);
+  assert.equal(state.timeline[0].sequence, 11);
+  assert.deepEqual(state.timeline.map((entry) => entry.sequence), [11, 10, 9, 8, 7]);
+});
+
+test('lazy open pages back until the running turn start is inside the window', async () => {
+  const journal = [
+    event(1, 'message.created', { role: 'user', content: 'old' }),
+    event(2, 'turn.completed', { turnId: 'old' }),
+    event(3, 'message.created', { role: 'user', content: 'older' }),
+    event(4, 'turn.started', { turnId: 't' }),
+    ...[5, 6, 7, 8, 9, 10].map((sequence) => event(sequence, 'message.delta', { turnId: 't', text: `d${sequence}` })),
+  ];
+  const store = journalStore(journal);
+  const recovery = new ConversationRecovery(store.after, () => {}, (error) => assert.fail(error), store.before);
+  await recovery.open('c', 'w', { highWater: 10, turnActive: true, pageLimit: 4 });
+  const state = recovery.get('c');
+  assert.equal(state.appliedSequence, 10);
+  assert.equal(state.activeTurnId, 't');
+  assert.equal(state.status, 'running');
+  // The scan covered sequences 1..10 minus the two oldest events.
+  assert.equal(recovery.hasEarlierHistory('c'), true);
+});
+
+test('lazy open falls back to a full replay when the backend lacks reverse paging', async () => {
+  const journal = [];
+  for (let sequence = 1; sequence <= 10; sequence += 1) {
+    journal.push(event(sequence, 'message.created', { role: 'user', content: `m${sequence}` }));
+  }
+  const store = journalStore(journal);
+  // An old backend ignores beforeSequence and answers the forward first page.
+  const recovery = new ConversationRecovery(store.after, () => {}, (error) => assert.fail(error),
+    async (id, _before, limit) => store.after(id, 0, limit));
+  await recovery.open('c', 'w', { highWater: 10, pageLimit: 4 });
+  const state = recovery.get('c');
+  assert.equal(state.appliedSequence, 10);
+  assert.equal(state.timeline.length, 10);
+  assert.equal(recovery.hasEarlierHistory('c'), false);
+});

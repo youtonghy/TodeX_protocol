@@ -920,6 +920,16 @@ export class V2ApiClient {
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/events?${query}`);
   }
 
+  /** Reverse pagination for lazy history loading: returns the newest events
+   * with `sequence <= beforeSequence` in ascending order; `hasMore` reports
+   * whether earlier events remain. Page back with
+   * `beforeSequence = firstReturnedSequence - 1`. */
+  async replayEventsBefore(id: string, beforeSequence: number, limit = 200, detail: 'full' | 'summary' = 'full'): Promise<ConversationReplay> {
+    const query = new URLSearchParams({ beforeSequence: String(beforeSequence), limit: String(limit) });
+    if (detail !== 'full') query.set('detail', detail);
+    return this.request(`/v2/conversations/${encodeURIComponent(id)}/events?${query}`);
+  }
+
   async prompt(
     id: string,
     text: string,

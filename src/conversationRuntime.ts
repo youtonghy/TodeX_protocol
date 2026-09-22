@@ -66,9 +66,9 @@ export type ConversationRuntime = {
   queuePaused: boolean;
   lastProgressAt: string | null;
 };
-export function createConversationRuntime(conversationId: string, workspaceId: string): ConversationRuntime {
+export function createConversationRuntime(conversationId: string, workspaceId: string, appliedSequence = 0): ConversationRuntime {
   return {
-    conversationId, workspaceId, appliedSequence: 0, highWaterSequence: 0, pendingEvents: {},
+    conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
     subagents: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
     messageCategories: {}, assistantSegment: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
@@ -502,4 +502,29 @@ export function hydrateConversationRuntimeEvents(
   changed ||= nextTimeline.length !== timeline.length;
   if (!changed) return previous;
   return { ...previous, timeline: nextTimeline };
+}
+
+/** Merge an earlier history page under a lazily seeded runtime. Events below
+ * the loaded window project on a scratch runtime; only their timeline rows
+ * append to the tail (timeline is newest-first), while turn state, pending
+ * permissions, usage and extension UI keep reflecting the newest events —
+ * replaying old events must not resurrect settled state. Rows whose id is
+ * already present are skipped so overlapping page boundaries stay stable. */
+export function prependConversationRuntimeEvents(
+  previous: ConversationRuntime,
+  events: readonly ConversationEvent[],
+): ConversationRuntime {
+  const normalized = events
+    .map(normalizeConversationEvent)
+    .filter((event): event is ConversationEvent =>
+      event !== null && event.conversationId === previous.conversationId)
+    .sort((left, right) => left.sequence - right.sequence);
+  if (!normalized.length) return previous;
+  const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
+  for (const event of normalized) projectEvent(scratch, event);
+  if (!scratch.timeline.length) return previous;
+  const existing = new Set(previous.timeline.map((entry) => entry.id));
+  const older = scratch.timeline.filter((entry) => !existing.has(entry.id));
+  if (!older.length) return previous;
+  return { ...previous, timeline: [...previous.timeline, ...older] };
 }

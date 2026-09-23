@@ -775,6 +775,33 @@ function textFromUnknown(value: unknown, depth = 0): string {
   return '';
 }
 
+/** Answer text for untyped message events. A full message envelope (Claude
+ * sends one per content block) contributes only its text parts, so thinking
+ * and tool_use blocks never become answer bubbles. */
+function assistantContent(payload: JsonRecord, message: JsonRecord | null, delta: JsonRecord | null): string {
+  const candidates: unknown[] = [
+    payload.content,
+    payload.text,
+    typeof payload.delta === 'string' ? payload.delta : undefined,
+    delta?.text,
+    delta?.delta,
+    delta?.content,
+    delta?.output_text,
+  ];
+  for (const candidate of candidates) {
+    const text = textFromUnknown(candidate);
+    if (text) return text;
+  }
+  if (typeof payload.message === 'string') return payload.message;
+  const text = textFromUnknown(message?.text);
+  if (text || !Array.isArray(message?.content)) return text || textFromUnknown(message?.content);
+  // Whitespace inside text parts is significant, so parts are read unclipped.
+  return message.content.map((part) => {
+    const type = readString(asRecord(part), ['type']).toLowerCase();
+    return type && !['text', 'output_text', 'input_text'].includes(type) ? '' : textFromUnknown(part);
+  }).join('');
+}
+
 function conversationContent(payload: JsonRecord, message: JsonRecord | null, delta: JsonRecord | null): string {
   const candidates: unknown[] = [
     payload.content,
@@ -1159,15 +1186,15 @@ export function classifyV2ConversationEvent(
   }
 
   if (type === 'message.created' || type === 'message.completed' || type === 'message.delta' || type.includes('agent') || type.includes('assistant')) {
-    if (!content && type === 'turn.started') return null;
-    if (content || type === 'message.created') {
+    const answer = assistantContent(payload, message, delta);
+    if (answer || type === 'message.created') {
       return {
         id: type === 'assistant.delta' || type === 'message.delta' || type === 'message.completed'
           ? `v2-assistant-${conversationId}-${turnId || 'current'}`
           : eventId,
         kind: 'incoming',
         title: 'Agent',
-        subtitle: content || type,
+        subtitle: answer || type,
         ...base,
       };
     }

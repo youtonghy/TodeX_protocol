@@ -464,3 +464,24 @@ test('supersedes only removes progress rows of the named blocks in the same turn
   assert.deepEqual(state.timeline.map((entry) => [entry.category, entry.subtitle]),
     [['assistant_final', 'Answer'], ['assistant_progress', 'Checking files']]);
 });
+
+// claude.rs: text streams as untyped text_delta, then one message.completed per content block.
+function claudeCompleted(sequence, part) {
+  return event(sequence, 'message.completed', { provider: 'claude-code', turnId: 't',
+    message: { id: 'msg_1', type: 'message', role: 'assistant', content: [part] } });
+}
+
+test('Claude thinking and tool_use completions never become answer bubbles', () => {
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'thought.delta', { provider: 'claude-code', role: 'assistant', turnId: 't', delta: { type: 'thinking_delta', thinking: 'Plan the fix' } }),
+    claudeCompleted(3, { type: 'thinking', thinking: 'Plan the fix', signature: 's' }),
+    event(4, 'message.delta', { provider: 'claude-code', role: 'assistant', turnId: 't', delta: { type: 'text_delta', text: 'Hel' } }),
+    event(5, 'message.delta', { provider: 'claude-code', role: 'assistant', turnId: 't', delta: { type: 'text_delta', text: 'lo' } }),
+    claudeCompleted(6, { type: 'text', text: 'Hello' }),
+    claudeCompleted(7, { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } })).state;
+  assert.deepEqual(state.timeline.filter((entry) => entry.kind === 'incoming').map((entry) => entry.subtitle), ['Hello']);
+  assert.ok(state.timeline.some((entry) => entry.title === '思考中' && entry.subtitle === 'Plan the fix'));
+  const mixed = parity.classifyV2ConversationEvent(event(8, 'message.completed', { turnId: 't', message: { role: 'assistant',
+    content: [{ type: 'thinking', thinking: 'hidden' }, { type: 'text', text: 'Shown' }] } }), 'w', 't');
+  assert.equal(mixed.subtitle, 'Shown');
+});

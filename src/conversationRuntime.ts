@@ -343,11 +343,21 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
       const phase = type.slice('subagent.'.length);
       const status: SubagentRun['status'] = phase === 'started' ? 'running' : phase === 'completed' ? 'completed'
         : phase === 'failed' ? 'failed' : phase === 'cancelled' ? 'cancelled' : previous?.status ?? 'queued';
-      const run: SubagentRun = { id, conversationId: state.conversationId,
+      const run: SubagentRun = { ...previous,
+        id, conversationId: state.conversationId,
         title: string(payload.title) || previous?.title || 'Subagent', task: string(payload.task ?? payload.prompt) || previous?.task || '',
-        ...previous, status,
+        status,
         ...(typeof payload.result === 'string' ? { result: payload.result } : {}),
         ...(typeof payload.error === 'string' ? { error: payload.error } : {}),
+        provider: string(payload.provider) || previous?.provider,
+        parentId: string(payload.parentId) || previous?.parentId,
+        turnId: string(payload.turnId) || previous?.turnId,
+        providerItemId: string(payload.providerItemId) || previous?.providerItemId,
+        agentKind: string(payload.agentKind) || previous?.agentKind,
+        agentId: string(payload.agentId) || previous?.agentId,
+        outputFile: string(payload.outputFile ?? object(payload.metadata)?.outputFile) || previous?.outputFile,
+        usage: object(payload.usage) as SubagentRun['usage'] ?? previous?.usage,
+        metadata: object(payload.metadata) ?? previous?.metadata,
         ...(status === 'running' ? { startedAt: previous?.startedAt ?? event.time }
           : status !== 'queued' ? { finishedAt: event.time } : {}),
       };

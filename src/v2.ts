@@ -121,6 +121,24 @@ export type SubagentRun = {
   error?: string;
   startedAt?: string;
   finishedAt?: string;
+  /** Provider that reported the run (claude-code, codex, grok-build, ...). */
+  provider?: string;
+  /** Parent thread/session/turn the provider attributes the run to. */
+  parentId?: string;
+  /** TodeX turn the run was reported under. */
+  turnId?: string;
+  /** Native item that spawned the run — e.g. the Task tool_use id — so the
+   * timeline tool card and the panel entry describe the same run. */
+  providerItemId?: string;
+  /** Provider-side agent kind (Explore, local_agent, sender tool name, ...). */
+  agentKind?: string;
+  /** Provider-side agent identity (Claude agent-<id> transcript, ...). */
+  agentId?: string;
+  /** Provider-written output/transcript path when one exists. */
+  outputFile?: string;
+  usage?: Record<string, number>;
+  /** Raw provider metadata kept for the detail view. */
+  metadata?: Record<string, unknown>;
 };
 export type MemoryEntry = {
   id: string;
@@ -476,7 +494,8 @@ export type AgentEventType =
   | 'session.started' | 'session.resumed' | 'turn.started' | 'turn.completed' | 'turn.cancelled' | 'turn.failed'
   | 'assistant.delta' | 'reasoning.delta' | 'tool.started' | 'tool.arguments.delta' | 'tool.awaitingApproval'
   | 'tool.completed' | 'tool.failed' | 'terminal.started' | 'terminal.output' | 'terminal.exited'
-  | 'compaction.started' | 'compaction.completed' | 'subagent.started' | 'subagent.completed' | 'protocol.error'
+  | 'compaction.started' | 'compaction.completed' | 'protocol.error'
+  | 'subagent.started' | 'subagent.updated' | 'subagent.completed' | 'subagent.failed' | 'subagent.cancelled'
   | 'extension.ui' | 'extension.message' | 'provider.runtime';
 
 export type AgentEventEnvelope = {

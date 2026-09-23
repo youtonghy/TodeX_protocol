@@ -422,3 +422,45 @@ test('hydrate returns the same state when the range covers nothing', () => {
   ]);
   assert.equal(hydrated, stubbed);
 });
+
+function piProgress(sequence, text) {
+  return event(sequence, 'message.delta', { provider: 'pi', turnId: 't',
+    delta: { type: 'text_delta', contentIndex: 1, delta: text },
+    block: { category: 'assistant_progress', id: 'm-1-assistant_progress-1', turnId: 't', phase: 'delta', contentIndex: 1 } });
+}
+function piFinal(sequence, supersedes) {
+  return event(sequence, 'message.completed', { provider: 'pi', turnId: 't', role: 'assistant',
+    message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'Answer' }] },
+    block: { category: 'assistant_final', id: 'native-1', turnId: 't', phase: 'completed',
+      ...(supersedes ? { supersedes } : {}) } });
+}
+
+test('final answer replaces the progress rows it was streamed under', () => {
+  const streamed = apply(empty(), event(1, 'turn.started', { turnId: 't' }), piProgress(2, 'Ans'), piProgress(3, 'wer'));
+  assert.deepEqual(streamed.state.timeline.map((entry) => [entry.category, entry.subtitle]), [['assistant_progress', 'Answer']]);
+  const final = apply(streamed.state, piFinal(4, ['m-1-assistant_progress-1']));
+  assert.deepEqual(final.state.timeline.map((entry) => [entry.category, entry.subtitle]), [['assistant_final', 'Answer']]);
+  // Journals written before `supersedes` existed keep both rows.
+  const legacy = apply(streamed.state, piFinal(4));
+  assert.equal(legacy.state.timeline.length, 2);
+});
+
+test('older pages and hydrated stubs cannot bring superseded progress back', () => {
+  const events = [event(1, 'turn.started', { turnId: 't' }), piProgress(2, 'Answer'), piFinal(3, ['m-1-assistant_progress-1'])];
+  const seeded = runtime.createConversationRuntime('c', 'w', 2);
+  const tail = apply(seeded, events[2]).state;
+  const merged = runtime.prependConversationRuntimeEvents(tail, events.slice(0, 2));
+  assert.deepEqual(merged.timeline.map((entry) => entry.category), ['assistant_final']);
+  const hydrated = runtime.hydrateConversationRuntimeEvents(merged, events.slice(0, 2));
+  assert.deepEqual(hydrated.timeline.map((entry) => entry.category), ['assistant_final']);
+});
+
+test('supersedes only removes progress rows of the named blocks in the same turn', () => {
+  const narration = event(2, 'message.delta', { provider: 'pi', turnId: 't',
+    delta: { type: 'text_delta', contentIndex: 0, delta: 'Checking files' },
+    block: { category: 'assistant_progress', id: 'm-0-assistant_progress-0', turnId: 't', phase: 'delta' } });
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }), narration, piProgress(3, 'Answer'),
+    piFinal(4, ['m-1-assistant_progress-1'])).state;
+  assert.deepEqual(state.timeline.map((entry) => [entry.category, entry.subtitle]),
+    [['assistant_final', 'Answer'], ['assistant_progress', 'Checking files']]);
+});

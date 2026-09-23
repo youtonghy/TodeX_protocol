@@ -249,6 +249,22 @@ function projectExtensionEvent(state: ConversationRuntime, event: ConversationEv
   return true;
 }
 
+/** A final answer names the progress blocks its text was streamed under
+ * (`block.supersedes`); those copies are dropped so the answer shows once.
+ * Applied to whole timelines because hydrated or older pages can bring the
+ * progress rows back after the final answer was projected. */
+function dropSupersededProgressEntries(timeline: TimelineEntry[]): TimelineEntry[] {
+  const superseded = new Set<string>();
+  for (const entry of timeline) {
+    if (entry.category !== 'assistant_final') continue;
+    for (const blockId of entry.supersedes ?? []) superseded.add(`${entry.turnId ?? ''}\u0000${blockId}`);
+  }
+  if (!superseded.size) return timeline;
+  const next = timeline.filter((entry) => entry.category !== 'assistant_progress'
+    || !superseded.has(`${entry.turnId ?? ''}\u0000${entry.blockId ?? ''}`));
+  return next.length === timeline.length ? timeline : next;
+}
+
 function projectEvent(state: ConversationRuntime, event: ConversationEvent): void {
   const payload = object(event.payload);
   const type = canonicalConversationEventType(event);
@@ -306,6 +322,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
       ? { ...existing, ...entry, subtitle: `${existing.subtitle === '正在回复...' ? '' : existing.subtitle}${entry.subtitle}` }
       : entry;
     state.timeline = existing ? state.timeline.map(item => item.id === next.id ? next : item) : [next, ...state.timeline];
+    if (next.supersedes?.length) state.timeline = dropSupersededProgressEntries(state.timeline);
   }
   if (type === 'permission.requested' || type === 'tool.awaitingApproval') {
     const id = string(payload.permissionId ?? payload.requestId);
@@ -507,8 +524,8 @@ export function hydrateConversationRuntimeEvents(
   }
   // Placeholders whose covering events were fetched but project to no row are
   // resolved stubs, not failures; leaving them would pin the group loading.
-  const nextTimeline = timeline.filter(item =>
-    !item.detailStub || item.sequence === undefined || !covered.has(item.sequence));
+  const nextTimeline = dropSupersededProgressEntries(timeline.filter(item =>
+    !item.detailStub || item.sequence === undefined || !covered.has(item.sequence)));
   changed ||= nextTimeline.length !== timeline.length;
   if (!changed) return previous;
   return { ...previous, timeline: nextTimeline };
@@ -536,5 +553,5 @@ export function prependConversationRuntimeEvents(
   const existing = new Set(previous.timeline.map((entry) => entry.id));
   const older = scratch.timeline.filter((entry) => !existing.has(entry.id));
   if (!older.length) return previous;
-  return { ...previous, timeline: [...previous.timeline, ...older] };
+  return { ...previous, timeline: dropSupersededProgressEntries([...previous.timeline, ...older]) };
 }

@@ -702,6 +702,8 @@ export type TimelineEntry = {
   sequence?: number;
   /** Placeholder for a `detail=summary` replay event: content loads on expand. */
   detailStub?: boolean;
+  /** Progress block ids a final answer was streamed under (`block.supersedes`). */
+  supersedes?: string[];
   extensionMessage?: ExtensionCustomMessage & { runtimeId: string; messageId: string };
 };
 
@@ -711,6 +713,7 @@ type NormalizedConversationBlock = {
   phase: ConversationBlockPhase;
   turnId: string;
   contentIndex?: number;
+  supersedes?: string[];
 };
 
 const BLOCK_CATEGORIES = new Set<ConversationBlockCategory>([
@@ -726,12 +729,17 @@ function conversationBlock(payload: JsonRecord, fallbackTurnId: string): Normali
   const id = readString(block, ['id']);
   if (!id || !BLOCK_CATEGORIES.has(category) || !BLOCK_PHASES.has(phase)) return null;
   const contentIndex = readNumber(block, ['contentIndex', 'content_index'], -1);
+  const rawSupersedes = block?.supersedes;
+  const supersedes = Array.isArray(rawSupersedes)
+    ? rawSupersedes.filter((value): value is string => typeof value === 'string' && value !== '')
+    : [];
   return {
     category,
     id,
     phase,
     turnId: readString(block, ['turnId', 'turn_id']) || fallbackTurnId,
     ...(contentIndex >= 0 ? { contentIndex } : {}),
+    ...(supersedes.length ? { supersedes } : {}),
   };
 }
 
@@ -1093,6 +1101,7 @@ export function classifyV2ConversationEvent(
       blockId: block.id,
       contentIndex: block.contentIndex,
       sequence: readNumber(eventRecord, ['sequence'], 0),
+      ...(block.supersedes ? { supersedes: block.supersedes } : {}),
     };
     switch (block.category) {
       case 'assistant_final':

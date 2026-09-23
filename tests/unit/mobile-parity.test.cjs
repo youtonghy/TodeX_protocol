@@ -4,7 +4,7 @@ const { test } = require('node:test');
 
 const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
 const parity = require(path.join(compiledDir, 'lib', 'mobileParity.js'));
-const { TimelineStore } = require(path.join(compiledDir, 'lib', 'timelineStore.js'));
+const runtime = require(path.join(compiledDir, 'lib', 'conversationRuntime.js'));
 const todex = require(path.join(compiledDir, 'lib', 'todex.js'));
 const v2 = require(path.join(compiledDir, 'lib', 'v2.js'));
 
@@ -393,12 +393,11 @@ test('appends normalized Grok Build streams and hides provider lifecycle noise',
   assert.equal(parity.shouldAppendV2ConversationEvent(firstChunk), true);
   assert.equal(parity.shouldAppendV2ConversationEvent(finalChunk), true);
   assert.equal(parity.classifyV2ConversationEvent(firstChunk, 'workspace-1', 'turn-1').subtitle, '预览');
-  const store = new TimelineStore(10);
-  store.upsertBatch([firstChunk, finalChunk].map((chunk) => ({
-    entry: parity.classifyV2ConversationEvent(chunk, 'workspace-1', 'turn-1'),
-    appendSubtitle: parity.shouldAppendV2ConversationEvent(chunk),
-  })));
-  assert.equal(store.getConversationSnapshot('workspace-1', 'conversation-1')[0].subtitle, '预览完成。');
+  const projected = runtime.applyConversationRuntimeEvents(
+    runtime.createConversationRuntime('conversation-1', 'workspace-1'),
+    [firstChunk, { ...finalChunk, eventId: 'evt-2', sequence: 2 }],
+  ).state;
+  assert.deepEqual(projected.timeline.map((entry) => entry.subtitle), ['预览完成。']);
 
   for (const providerMethod of ['_x.ai/mcp/server_status', '_x.ai/mcp_initialized']) {
     const lifecycle = parity.classifyV2ConversationEvent(event({

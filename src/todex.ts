@@ -142,6 +142,10 @@ export type WorkspaceRecord = {
   localAdapterState?: LocalAdapterState;
   /** Client-side flag set when the backend reports the directory is gone. */
   pathMissing?: boolean;
+  /** User-picked sidebar icon key; empty/unknown falls back to the folder glyph. */
+  icon?: string;
+  /** User-picked sidebar icon tint as '#rrggbb'. */
+  iconColor?: string;
   createdAt: number;
   updatedAt: number;
   sortOrder?: number;
@@ -763,6 +767,8 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     personality: stringField(value, ['personality']) || null,
     localAdapterState,
     pathMissing: booleanField(value, ['pathMissing', 'path_missing']) || undefined,
+    icon: stringField(value, ['icon']) || undefined,
+    iconColor: normalizeHexColor(stringField(value, ['iconColor', 'icon_color'])),
     createdAt,
     updatedAt,
     sortOrder: Number.isFinite(sortOrder) ? sortOrder : undefined,
@@ -844,6 +850,8 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
         tenantId: normalized.tenantId,
         backendConnectionId: normalized.backendConnectionId ?? existing.backendConnectionId ?? null,
         localAdapterState: preserveRuntimeAdapterState(existing.localAdapterState, normalized.localAdapterState),
+        icon: normalized.icon ?? existing.icon,
+        iconColor: normalized.iconColor ?? existing.iconColor,
         sortOrder: normalized.sortOrder ?? existing.sortOrder,
       };
     }
@@ -1252,6 +1260,11 @@ function sameWorkspaceRecord(left: WorkspaceRecord, right: WorkspaceRecord): boo
 
 export function normalizeWorkspacePath(path: string): string {
   return path.trim().replace(/[\\/]+$/, '');
+}
+
+function normalizeHexColor(value: string): string | undefined {
+  const trimmed = value.trim();
+  return /^#[0-9a-f]{6}$/i.test(trimmed) ? trimmed.toLowerCase() : undefined;
 }
 
 function normalizeLocalAdapterState(value: string): LocalAdapterState | undefined {

@@ -485,3 +485,21 @@ test('Claude thinking and tool_use completions never become answer bubbles', () 
     content: [{ type: 'thinking', thinking: 'hidden' }, { type: 'text', text: 'Shown' }] } }), 'w', 't');
   assert.equal(mixed.subtitle, 'Shown');
 });
+
+test('a turn started below a lazy window is adopted without its history rows', () => {
+  const started = event(2, 'turn.started', { turnId: 't', effectivePermissions: { sandbox: 'workspace-write' } });
+  let state = runtime.createConversationRuntime('c', 'w', 40);
+  state = runtime.adoptConversationRuntimeTurn(state, started);
+  assert.equal(state.activeTurnId, 't');
+  assert.equal(state.status, 'running');
+  assert.equal(state.appliedSequence, 40);
+  assert.deepEqual(state.timeline, []);
+  assert.equal(state.effectiveConfig.sandbox, 'workspace-write');
+  state = apply(state, event(41, 'message.delta', { text: 'Hi', turnId: 't' }), event(42, 'turn.completed', { turnId: 't' })).state;
+  assert.equal(state.activeTurnId, '');
+  assert.equal(state.status, 'completed');
+  // A newer turn already tracked by the projection is never replaced.
+  const tracked = apply(runtime.createConversationRuntime('c', 'w', 40), event(41, 'turn.started', { turnId: 'u' })).state;
+  assert.equal(runtime.adoptConversationRuntimeTurn(tracked, started), tracked);
+  assert.equal(runtime.adoptConversationRuntimeTurn(empty(), event(2, 'turn.completed', { turnId: 't' })).activeTurnId, '');
+});

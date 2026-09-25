@@ -555,3 +555,29 @@ export function prependConversationRuntimeEvents(
   if (!older.length) return previous;
   return { ...previous, timeline: dropSupersededProgressEntries([...previous.timeline, ...older]) };
 }
+
+/** Adopt a still-running turn whose `turn.started` lies below a lazily loaded
+ * window. Only the turn's own state (id, running status and the configuration
+ * it started with) is taken from the start event; timeline rows, usage and
+ * permissions below the window stay unloaded. A runtime that already tracks a
+ * turn keeps it — a newer projection is never overridden by older history. */
+export function adoptConversationRuntimeTurn(
+  previous: ConversationRuntime,
+  started: ConversationEvent,
+): ConversationRuntime {
+  const event = normalizeConversationEvent(started);
+  if (!event || event.conversationId !== previous.conversationId || previous.activeTurnId
+    || canonicalConversationEventType(event) !== 'turn.started') return previous;
+  const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
+  projectEvent(scratch, event);
+  if (!scratch.activeTurnId) return previous;
+  return {
+    ...previous,
+    activeTurnId: scratch.activeTurnId,
+    status: previous.pendingPermissions.some(item => item.scope !== 'session'
+      && (!item.turnId || item.turnId === scratch.activeTurnId)) ? 'waitingPermission' : scratch.status,
+    requestedConfig: scratch.requestedConfig,
+    effectiveConfig: scratch.effectiveConfig,
+    configurationStatus: scratch.configurationStatus,
+  };
+}

@@ -40,29 +40,33 @@ test('parseWorkspaceSyncRejected reads the rejected list', () => {
 
 test('icon and iconColor survive normalization and sync payloads', () => {
   const normalized = todex.normalizeWorkspaceRecord(
-    workspace({ icon: 'rocket', iconColor: '#3B82F6' }),
+    workspace({ icon: 'rocket', iconColor: '#3B82F6', ringStyle: 'beads' }),
   );
   assert.equal(normalized.icon, 'rocket');
   assert.equal(normalized.iconColor, '#3b82f6');
+  assert.equal(normalized.ringStyle, 'beads');
   const payload = todex.prepareWorkspaceSyncPayload([normalized]);
   assert.equal(payload[0].icon, 'rocket');
   assert.equal(payload[0].iconColor, '#3b82f6');
+  assert.equal(payload[0].ringStyle, 'beads');
 
   const invalid = todex.normalizeWorkspaceRecord(
-    workspace({ icon: '   ', iconColor: 'blue' }),
+    workspace({ icon: '   ', iconColor: 'blue', ringStyle: '  ' }),
   );
   assert.equal(invalid.icon, undefined);
   assert.equal(invalid.iconColor, undefined);
+  assert.equal(invalid.ringStyle, undefined);
 });
 
 test('merge keeps a local icon when the remote record lacks one', () => {
   const local = todex.normalizeWorkspaceRecord(
-    workspace({ icon: 'rocket', iconColor: '#3b82f6', updatedAt: 20 }),
+    workspace({ icon: 'rocket', iconColor: '#3b82f6', ringStyle: 'pulse', updatedAt: 20 }),
   );
   const remote = todex.normalizeWorkspaceRecord(workspace({ updatedAt: 30 }));
   const [merged] = todex.mergeWorkspaceRecords([local], [remote]);
   assert.equal(merged.icon, 'rocket');
   assert.equal(merged.iconColor, '#3b82f6');
+  assert.equal(merged.ringStyle, 'pulse');
 });
 
 test('pathMissing survives normalization but is stripped from sync payloads', () => {

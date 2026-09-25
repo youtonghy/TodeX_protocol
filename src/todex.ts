@@ -146,6 +146,8 @@ export type WorkspaceRecord = {
   icon?: string;
   /** User-picked sidebar icon tint as '#rrggbb'. */
   iconColor?: string;
+  /** User-picked status ring style key; empty/unknown falls back to 'orbit'. */
+  ringStyle?: string;
   createdAt: number;
   updatedAt: number;
   sortOrder?: number;
@@ -769,6 +771,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     pathMissing: booleanField(value, ['pathMissing', 'path_missing']) || undefined,
     icon: stringField(value, ['icon']) || undefined,
     iconColor: normalizeHexColor(stringField(value, ['iconColor', 'icon_color'])),
+    ringStyle: stringField(value, ['ringStyle', 'ring_style']) || undefined,
     createdAt,
     updatedAt,
     sortOrder: Number.isFinite(sortOrder) ? sortOrder : undefined,
@@ -852,6 +855,7 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
         localAdapterState: preserveRuntimeAdapterState(existing.localAdapterState, normalized.localAdapterState),
         icon: normalized.icon ?? existing.icon,
         iconColor: normalized.iconColor ?? existing.iconColor,
+        ringStyle: normalized.ringStyle ?? existing.ringStyle,
         sortOrder: normalized.sortOrder ?? existing.sortOrder,
       };
     }

@@ -63,7 +63,7 @@ function lazyProjection(events, floor, pageSize) {
 }
 function rows(state) {
   return state.timeline.slice().sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id))
-    .map(({ id, kind, title, subtitle, category, phase, sequence }) => ({ id, kind, title, subtitle, category, phase, sequence }));
+    .map(({ id, kind, title, subtitle, category, phase, sequence, firstSequence }) => ({ id, kind, title, subtitle, category, phase, sequence, firstSequence }));
 }
 function assertLazyMatchesFullReplay(events) {
   const full = rows(apply(empty(), ...events).state);
@@ -409,6 +409,25 @@ test('summary stubs keep folded entries and hydrate fills content by id', () => 
   assert.equal(think.subtitle, 'deep thought');
   assert.equal(hydrated.appliedSequence, 5);
   assert.equal(hydrated.timeline.find(entry => entry.kind === 'incoming').subtitle, 'Answer');
+});
+
+test('a folded row built from several summary stubs spans their whole range', () => {
+  const reasoning = (sequence, thinking, stub) => event(sequence, 'provider.event', { turnId: 't',
+    ...(stub ? { detailStub: true } : { thinking }), block: { id: 'r1', category: 'reasoning', phase: 'delta', turnId: 't' } });
+  const stubbed = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    reasoning(2, '', true), reasoning(3, '', true), reasoning(4, '', true),
+    event(5, 'message.delta', { turnId: 't', text: 'Answer' })).state;
+  const stub = stubbed.timeline.find(entry => entry.category === 'reasoning');
+  assert.equal(stub.detailStub, true);
+  assert.equal(stub.firstSequence, 2);
+  assert.equal(stub.sequence, 4);
+  const range = [reasoning(2, 'r2 '), reasoning(3, 'r3 '), reasoning(4, 'r4 ')]
+    .filter(item => item.sequence >= stub.firstSequence && item.sequence <= stub.sequence);
+  const hydrated = runtime.hydrateConversationRuntimeEvents(stubbed, range);
+  const row = hydrated.timeline.find(entry => entry.category === 'reasoning');
+  assert.equal(row.detailStub, undefined);
+  assert.equal(row.subtitle, 'r2 r3 r4 ');
+  assert.deepEqual([row.firstSequence, row.sequence], [2, 4]);
 });
 
 test('heuristic stubs reuse the full event entry id', () => {

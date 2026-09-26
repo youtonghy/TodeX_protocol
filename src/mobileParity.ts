@@ -699,7 +699,11 @@ export type TimelineEntry = {
   turnId?: string;
   blockId?: string;
   contentIndex?: number;
+  /** Sequence of the newest event merged into this row. */
   sequence?: number;
+  /** Sequence of the event that created this row; with `sequence` it bounds
+   * the journal range a folded row was built from. */
+  firstSequence?: number;
   /** Placeholder for a `detail=summary` replay event: content loads on expand. */
   detailStub?: boolean;
   /** Progress block ids a final answer was streamed under (`block.supersedes`). */
@@ -978,10 +982,10 @@ export function reduceConversationEvents(
     const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
     if (entry) {
       const index = timeline.findIndex((item) => item.id === entry.id);
-      if (index < 0) timeline.unshift(entry);
+      if (index < 0) timeline.unshift({ ...entry, firstSequence: event.sequence });
       else {
         const previous = timeline[index];
-        timeline[index] = { ...previous, ...entry,
+        timeline[index] = { ...previous, ...entry, firstSequence: previous.firstSequence,
           subtitle: shouldAppendV2ConversationEvent(event)
             ? `${previous.subtitle === '正在回复...' ? '' : previous.subtitle}${entry.subtitle}`
             : entry.subtitle };

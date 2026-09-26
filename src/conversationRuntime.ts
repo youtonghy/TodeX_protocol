@@ -337,7 +337,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
     const append = shouldAppendV2ConversationEvent(event);
     const next: TimelineEntry = existing && append
       ? { ...existing, ...entry, subtitle: appendedSubtitle(existing, entry) }
-      : { ...entry, ...(!existing && append ? { streamedText: true } : {}) };
+      : { ...entry, firstSequence: existing?.firstSequence ?? event.sequence, ...(!existing && append ? { streamedText: true } : {}) };
     state.timeline = existing ? state.timeline.map(item => item.id === next.id ? next : item) : [next, ...state.timeline];
     if (next.supersedes?.length) state.timeline = dropSupersededProgressEntries(state.timeline);
   }
@@ -556,12 +556,13 @@ const PROJECTION_FLAGS: ReadonlySet<string> = new Set(['detailStub', 'streamedTe
  * the same id. Streamed text continues the earlier text; any other newer row
  * wins and only takes the fields it lacks from the older projection. */
 function mergeEarlierEntry(older: TimelineEntry, newer: TimelineEntry): TimelineEntry {
+  const firstSequence = older.firstSequence ?? newer.firstSequence;
   if (newer.streamedText) {
-    const merged: TimelineEntry = { ...older, ...newer, subtitle: appendedSubtitle(older, newer) };
+    const merged: TimelineEntry = { ...older, ...newer, subtitle: appendedSubtitle(older, newer), firstSequence };
     if (!older.streamedText) delete merged.streamedText;
     return merged;
   }
-  const merged: Record<string, unknown> = { ...newer };
+  const merged: Record<string, unknown> = { ...newer, firstSequence };
   for (const [key, value] of Object.entries(older)) {
     if (merged[key] === undefined && !PROJECTION_FLAGS.has(key)) merged[key] = value;
   }

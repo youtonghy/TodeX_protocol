@@ -272,13 +272,163 @@ function dropSupersededProgressEntries(timeline: TimelineEntry[]): TimelineEntry
   return next.length === timeline.length ? timeline : next;
 }
 
+/** Lookup structures of one timeline array. Positions count from the oldest
+ * row: a newest-first timeline only grows at the front, so they stay valid
+ * while rows are added or replaced. */
+type TimelineIndex = {
+  positions: Map<string, number>;
+  /** Assistant_progress row ids by `turnId\0blockId`. */
+  progress: Map<string, Set<string>>;
+  /** Final answers naming each `turnId\0blockId` in `supersedes`. */
+  superseding: Map<string, number>;
+  /** Progress rows a final answer in the timeline supersedes. */
+  superseded: Set<string>;
+};
+/** Each index belongs to exactly one timeline array. A batch takes it from
+ * the array it starts from and hands it to the array it produces, so arrays
+ * that were never projected here (or were derived after rows were removed)
+ * simply rebuild it once. */
+const timelineIndexes = new WeakMap<readonly TimelineEntry[], TimelineIndex>();
+
+const progressKey = (entry: TimelineEntry) => `${entry.turnId ?? ''}\u0000${entry.blockId ?? ''}`;
+function supersededKeys(entry: TimelineEntry): string[] {
+  if (entry.category !== 'assistant_final' || !entry.supersedes?.length) return [];
+  return [...new Set(entry.supersedes.map((blockId) => `${entry.turnId ?? ''}\u0000${blockId}`))];
+}
+function indexEntry(index: TimelineIndex, entry: TimelineEntry): void {
+  if (entry.category === 'assistant_progress') {
+    const key = progressKey(entry);
+    const ids = index.progress.get(key) ?? new Set<string>();
+    ids.add(entry.id);
+    index.progress.set(key, ids);
+    if (index.superseding.has(key)) index.superseded.add(entry.id);
+  }
+  for (const key of supersededKeys(entry)) {
+    const count = index.superseding.get(key) ?? 0;
+    index.superseding.set(key, count + 1);
+    if (!count) for (const id of index.progress.get(key) ?? []) index.superseded.add(id);
+  }
+}
+function unindexEntry(index: TimelineIndex, entry: TimelineEntry): void {
+  if (entry.category === 'assistant_progress') {
+    const key = progressKey(entry);
+    const ids = index.progress.get(key);
+    ids?.delete(entry.id);
+    if (ids && !ids.size) index.progress.delete(key);
+    index.superseded.delete(entry.id);
+  }
+  for (const key of supersededKeys(entry)) {
+    const count = (index.superseding.get(key) ?? 1) - 1;
+    if (count > 0) { index.superseding.set(key, count); continue; }
+    index.superseding.delete(key);
+    for (const id of index.progress.get(key) ?? []) index.superseded.delete(id);
+  }
+}
+function buildTimelineIndex(timeline: readonly TimelineEntry[]): TimelineIndex {
+  const index: TimelineIndex = { positions: new Map(), progress: new Map(), superseding: new Map(), superseded: new Set() };
+  // Oldest first, so a (never expected) duplicate id resolves to its newest row.
+  for (let position = 0; position < timeline.length; position++) {
+    const entry = timeline[timeline.length - 1 - position];
+    index.positions.set(entry.id, position);
+    indexEntry(index, entry);
+  }
+  return index;
+}
+
+/** A timeline under projection. Rows are looked up by id instead of scanned,
+ * the base array is copied at most once per batch, and new rows collect
+ * oldest-first until the batch finishes, so projecting a page is linear in
+ * its events and a single delta costs no scan of the timeline. */
+class TimelineDraft {
+  private readonly index: TimelineIndex;
+  private rows: Array<TimelineEntry | null> | null = null;
+  private readonly added: Array<TimelineEntry | null> = [];
+  private removed = false;
+  changed = false;
+
+  constructor(private readonly base: readonly TimelineEntry[]) {
+    const cached = timelineIndexes.get(base);
+    if (cached) timelineIndexes.delete(base);
+    this.index = cached ?? buildTimelineIndex(base);
+  }
+
+  private at(position: number): TimelineEntry | null | undefined {
+    const baseLength = this.base.length;
+    if (position >= baseLength) return this.added[position - baseLength];
+    return (this.rows ?? this.base)[baseLength - 1 - position];
+  }
+
+  private put(position: number, entry: TimelineEntry | null): void {
+    const baseLength = this.base.length;
+    if (position >= baseLength) {
+      this.added[position - baseLength] = entry;
+      return;
+    }
+    this.rows ??= this.base.slice();
+    this.rows[baseLength - 1 - position] = entry;
+  }
+
+  get(id: string): TimelineEntry | undefined {
+    const position = this.index.positions.get(id);
+    return position === undefined ? undefined : this.at(position) ?? undefined;
+  }
+
+  /** Replace the row with the entry's id, or add the entry as the newest row. */
+  set(entry: TimelineEntry): void {
+    this.changed = true;
+    const position = this.index.positions.get(entry.id);
+    const existing = position === undefined ? undefined : this.at(position);
+    if (position !== undefined && existing) {
+      unindexEntry(this.index, existing);
+      this.put(position, entry);
+    } else {
+      this.index.positions.set(entry.id, this.base.length + this.added.length);
+      this.added.push(entry);
+    }
+    indexEntry(this.index, entry);
+  }
+
+  /** The draft's rows as dropSupersededProgressEntries would leave them. */
+  dropSuperseded(): void {
+    if (!this.index.superseded.size) return;
+    this.changed = true;
+    for (const id of [...this.index.superseded]) {
+      const position = this.index.positions.get(id)!;
+      unindexEntry(this.index, this.at(position)!);
+      this.index.positions.delete(id);
+      this.put(position, null);
+    }
+    this.removed = true;
+  }
+
+  /** The projected newest-first timeline; the base array while unchanged. */
+  finish(): TimelineEntry[] {
+    if (!this.changed) {
+      timelineIndexes.set(this.base, this.index);
+      return this.base as TimelineEntry[];
+    }
+    const older = this.rows ?? this.base;
+    let timeline: TimelineEntry[];
+    if (this.removed) {
+      timeline = [...this.added].reverse().concat(older).filter((entry): entry is TimelineEntry => entry !== null);
+    } else if (!this.added.length) {
+      timeline = older as TimelineEntry[];
+    } else {
+      timeline = ([...this.added].reverse() as TimelineEntry[]).concat(older as TimelineEntry[]);
+    }
+    // Removing rows shifts positions; the next batch rebuilds the index.
+    if (!this.removed) timelineIndexes.set(timeline, this.index);
+    return timeline;
+  }
+}
+
 /** Streamed text continues the row's earlier text; the reply placeholder is
  * replaced rather than kept as a prefix. */
 function appendedSubtitle(earlier: TimelineEntry, later: TimelineEntry): string {
   return `${earlier.subtitle === '正在回复...' ? '' : earlier.subtitle}${later.subtitle}`;
 }
 
-function projectEvent(state: ConversationRuntime, event: ConversationEvent): void {
+function projectEvent(state: ConversationRuntime, event: ConversationEvent, timeline: TimelineDraft): void {
   const payload = object(event.payload);
   const type = canonicalConversationEventType(event);
   if (projectExtensionEvent(state, event)) return;
@@ -333,13 +483,13 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
   }
   const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
   if (entry) {
-    const existing = state.timeline.find(item => item.id === entry.id);
+    const existing = timeline.get(entry.id);
     const append = shouldAppendV2ConversationEvent(event);
     const next: TimelineEntry = existing && append
       ? { ...existing, ...entry, subtitle: appendedSubtitle(existing, entry) }
       : { ...entry, firstSequence: existing?.firstSequence ?? event.sequence, ...(!existing && append ? { streamedText: true } : {}) };
-    state.timeline = existing ? state.timeline.map(item => item.id === next.id ? next : item) : [next, ...state.timeline];
-    if (next.supersedes?.length) state.timeline = dropSupersededProgressEntries(state.timeline);
+    timeline.set(next);
+    if (next.supersedes?.length) timeline.dropSuperseded();
   }
   if (type === 'permission.requested' || type === 'tool.awaitingApproval') {
     const id = string(payload.permissionId ?? payload.requestId);
@@ -457,6 +607,15 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
   state.lastProgressAt = event.time;
 }
 
+/** Project events in order on a fresh runtime of the same conversation. */
+function projectScratchRuntime(previous: ConversationRuntime, events: readonly ConversationEvent[]): ConversationRuntime {
+  const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
+  const timeline = new TimelineDraft(scratch.timeline);
+  for (const event of events) projectEvent(scratch, event, timeline);
+  scratch.timeline = timeline.finish();
+  return scratch;
+}
+
 export type ConversationRuntimeUpdate = { state: ConversationRuntime; appliedEvents: ConversationEvent[]; missingSequences: number[] };
 /** Never seed appliedSequence from a high-water mark or a truncated timeline. */
 export function applyConversationRuntimeEvents(previous: ConversationRuntime, events: readonly ConversationEvent[]): ConversationRuntimeUpdate {
@@ -471,13 +630,15 @@ export function applyConversationRuntimeEvents(previous: ConversationRuntime, ev
     state.highWaterSequence = Math.max(state.highWaterSequence, event.sequence);
     if (!state.pendingEvents[event.sequence]) state.pendingEvents[event.sequence] = event;
   }
+  const timeline = new TimelineDraft(state.timeline);
   while (state.pendingEvents[state.appliedSequence + 1]) {
     const event = state.pendingEvents[state.appliedSequence + 1];
     delete state.pendingEvents[event.sequence];
     state.appliedSequence = event.sequence;
-    projectEvent(state, event);
+    projectEvent(state, event, timeline);
     appliedEvents.push(event);
   }
+  state.timeline = timeline.finish();
   return { state, appliedEvents, missingSequences: missingRuntimeSequences(state) };
 }
 function missingRuntimeSequences(state: ConversationRuntime): number[] {
@@ -507,8 +668,7 @@ export function hydrateConversationRuntimeEvents(
       event !== null && event.conversationId === previous.conversationId)
     .sort((left, right) => left.sequence - right.sequence);
   if (!normalized.length) return previous;
-  const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
-  for (const event of normalized) projectEvent(scratch, event);
+  const scratch = projectScratchRuntime(previous, normalized);
   const details = scratch.timeline.filter(isStepProgressEntry);
   const covered = new Set(normalized.map((event) => event.sequence));
   const timeline = [...previous.timeline];
@@ -592,8 +752,7 @@ export function prependConversationRuntimeEvents(
       event !== null && event.conversationId === previous.conversationId)
     .sort((left, right) => left.sequence - right.sequence);
   if (!normalized.length) return previous;
-  const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
-  for (const event of normalized) projectEvent(scratch, event);
+  const scratch = projectScratchRuntime(previous, normalized);
   if (!scratch.timeline.length) return previous;
   const older = new Map(scratch.timeline.map((entry) => [entry.id, entry]));
   let timeline = previous.timeline;
@@ -632,8 +791,7 @@ export function adoptConversationRuntimeTurn(
   const event = normalizeConversationEvent(started);
   if (!event || event.conversationId !== previous.conversationId || previous.activeTurnId
     || canonicalConversationEventType(event) !== 'turn.started') return previous;
-  const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
-  projectEvent(scratch, event);
+  const scratch = projectScratchRuntime(previous, [event]);
   if (!scratch.activeTurnId) return previous;
   return {
     ...previous,

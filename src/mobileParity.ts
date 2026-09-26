@@ -998,6 +998,9 @@ export function reduceConversationEvents(
 }
 
 /** Convert a v2 event into a render-neutral timeline entry. */
+/** Journal placeholder for a record the backend could not read back. */
+const JOURNAL_RECORD_LOST = 'journal.recordLost';
+
 export function classifyV2ConversationEvent(
   event: ConversationEvent,
   workspaceId: string,
@@ -1047,6 +1050,20 @@ export function classifyV2ConversationEvent(
 
   if (type === 'provider.event' && isProviderLifecycleMethod(providerMethod)) {
     return null;
+  }
+
+  // The backend replaces corrupt journal records with placeholders; one
+  // notice stands for each run of consecutive ones, which share `runStart`.
+  if (type === JOURNAL_RECORD_LOST || event.type === JOURNAL_RECORD_LOST) {
+    const runStart = readNumber(payload, ['runStart'], event.sequence);
+    const runLength = Math.max(1, Math.floor(readNumber(payload, ['runLength'], 1)));
+    return {
+      id: `v2-record-lost-${conversationId}-${runStart}`,
+      kind: 'system',
+      title: '记录损坏',
+      subtitle: `${runLength} 条记录损坏，已跳过`,
+      ...base,
+    };
   }
 
   // Provider-internal chatter never renders: command catalog broadcasts are a

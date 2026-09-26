@@ -510,3 +510,36 @@ test('includes reasoning effort in v2 HTTP prompt payloads', async () => {
     text: 'hello', model: 'gpt-5.5', reasoningEffort: 'high',
   });
 });
+
+test('lost journal records render one notice per run of placeholders', () => {
+  const lost = (sequence, runStart, runLength) => event({
+    eventId: `evt-${sequence}`, sequence, type: 'journal.recordLost',
+    payload: { reason: 'corrupt', runStart, runLength, backup: 'events.jsonl.corrupt-1' },
+  });
+  const entry = parity.classifyV2ConversationEvent(lost(3, 3, 2), 'workspace-1');
+  assert.equal(entry.id, 'v2-record-lost-conversation-1-3');
+  assert.equal(entry.kind, 'system');
+  assert.equal(entry.subtitle, '2 条记录损坏，已跳过');
+  assert.equal(parity.isVisibleConversationEntry(entry), true);
+  assert.equal(parity.isStepProgressEntry(entry), false);
+
+  const events = [
+    event({ eventId: 'evt-1', sequence: 1, type: 'turn.started', payload: { turnId: 't' } }),
+    event({ eventId: 'evt-2', sequence: 2, type: 'message.delta', payload: { turnId: 't', text: 'Hi' } }),
+    lost(3, 3, 2), lost(4, 3, 2),
+    event({ eventId: 'evt-5', sequence: 5, type: 'message.delta', payload: { turnId: 't', text: ' there' } }),
+    lost(6, 6, 1),
+  ];
+  const state = runtime.applyConversationRuntimeEvents(
+    runtime.createConversationRuntime('conversation-1', 'workspace-1'), events).state;
+  const notices = state.timeline.filter((item) => item.id.startsWith('v2-record-lost-'));
+  assert.deepEqual(notices.map((item) => [item.id, item.subtitle]), [
+    ['v2-record-lost-conversation-1-6', '1 条记录损坏，已跳过'],
+    ['v2-record-lost-conversation-1-3', '2 条记录损坏，已跳过'],
+  ]);
+  // The same placeholders delivered again (replay after live) add nothing.
+  const replayed = runtime.applyConversationRuntimeEvents(
+    runtime.createConversationRuntime('conversation-1', 'workspace-1', 2), events.slice(2, 4)).state;
+  assert.equal(replayed.timeline.length, 1);
+  assert.equal(parity.reduceConversationEvents(events.slice(2, 4), 'workspace-1').timeline.length, 1);
+});

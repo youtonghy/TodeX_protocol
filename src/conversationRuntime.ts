@@ -58,10 +58,17 @@ export type ConversationRuntime = {
   pendingControl?: { requestId: string; turnId: string; status: 'pending' | 'unknown' };
   configurationError?: string;
   messageCategories: Record<string, string>;
-  /** Segment index of the shared assistant stream; activity between two chunks
-   * starts a new segment so narration interleaves with folded steps. */
-  assistantSegment: number;
+  /** Sequence of the chunk that opened the current segment of the shared
+   * assistant stream (0: none open). Activity between two chunks starts a new
+   * segment so narration interleaves with folded steps; naming segments by
+   * their first sequence keeps ids stable however much history is loaded. */
+  assistantSegmentStart: number;
   assistantStreamInterrupted: boolean;
+  /** How the loaded window's stream began, for joining history paged in below
+   * it: the id of the segment its first chunk opened before anything
+   * interrupted the stream, `null` when a turn start or step came first, and
+   * undefined while nothing decided it yet. */
+  floorAssistantSegment?: string | null;
   queueItems: NativeQueueItem[];
   queuePaused: boolean;
   lastProgressAt: string | null;
@@ -71,7 +78,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
     subagents: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
-    messageCategories: {}, assistantSegment: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
+    messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
   };
@@ -265,6 +272,12 @@ function dropSupersededProgressEntries(timeline: TimelineEntry[]): TimelineEntry
   return next.length === timeline.length ? timeline : next;
 }
 
+/** Streamed text continues the row's earlier text; the reply placeholder is
+ * replaced rather than kept as a prefix. */
+function appendedSubtitle(earlier: TimelineEntry, later: TimelineEntry): string {
+  return `${earlier.subtitle === '正在回复...' ? '' : earlier.subtitle}${later.subtitle}`;
+}
+
 function projectEvent(state: ConversationRuntime, event: ConversationEvent): void {
   const payload = object(event.payload);
   const type = canonicalConversationEventType(event);
@@ -281,8 +294,9 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
   if (type === 'turn.started') {
     state.activeTurnId = explicitTurnId;
     state.messageCategories = {};
-    state.assistantSegment = 0;
+    state.assistantSegmentStart = 0;
     state.assistantStreamInterrupted = false;
+    if (state.floorAssistantSegment === undefined) state.floorAssistantSegment = null;
     state.status = 'running';
     state.requestedConfig = payload.requestedPermissions ? object(payload.requestedPermissions) : null;
     state.effectiveConfig = payload.effectivePermissions
@@ -306,21 +320,24 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
   // segment instead of growing the previous text into one blob.
   if (classifiedEntry && classifiedEntry.kind !== 'incoming') {
     state.assistantStreamInterrupted = true;
+    if (state.floorAssistantSegment === undefined) state.floorAssistantSegment = null;
   }
   let segmentedId: string | undefined;
   if (classifiedEntry && classifiedEntry.kind === 'incoming' && classifiedEntry.id.startsWith('v2-assistant-')) {
-    if (state.assistantStreamInterrupted) {
-      state.assistantSegment = (state.assistantSegment || 0) + 1;
+    if (state.assistantStreamInterrupted || !state.assistantSegmentStart) {
+      state.assistantSegmentStart = event.sequence;
       state.assistantStreamInterrupted = false;
     }
-    segmentedId = `${classifiedEntry.id}#seg${state.assistantSegment || 0}`;
+    segmentedId = `${classifiedEntry.id}#s${state.assistantSegmentStart}`;
+    if (state.floorAssistantSegment === undefined) state.floorAssistantSegment = segmentedId;
   }
   const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
   if (entry) {
     const existing = state.timeline.find(item => item.id === entry.id);
-    const next = existing && shouldAppendV2ConversationEvent(event)
-      ? { ...existing, ...entry, subtitle: `${existing.subtitle === '正在回复...' ? '' : existing.subtitle}${entry.subtitle}` }
-      : entry;
+    const append = shouldAppendV2ConversationEvent(event);
+    const next: TimelineEntry = existing && append
+      ? { ...existing, ...entry, subtitle: appendedSubtitle(existing, entry) }
+      : { ...entry, ...(!existing && append ? { streamedText: true } : {}) };
     state.timeline = existing ? state.timeline.map(item => item.id === next.id ? next : item) : [next, ...state.timeline];
     if (next.supersedes?.length) state.timeline = dropSupersededProgressEntries(state.timeline);
   }
@@ -531,12 +548,39 @@ export function hydrateConversationRuntimeEvents(
   return { ...previous, timeline: nextTimeline };
 }
 
-/** Merge an earlier history page under a lazily seeded runtime. Events below
- * the loaded window project on a scratch runtime; only their timeline rows
- * append to the tail (timeline is newest-first), while turn state, pending
- * permissions, usage and extension UI keep reflecting the newest events —
- * replaying old events must not resurrect settled state. Rows whose id is
- * already present are skipped so overlapping page boundaries stay stable. */
+/** Row fields that describe how a projection built the row rather than what
+ * it shows; an older projection must not copy them onto a newer row. */
+const PROJECTION_FLAGS: ReadonlySet<string> = new Set(['detailStub', 'streamedText']);
+
+/** Merge a row projected from an earlier history page into the loaded row of
+ * the same id. Streamed text continues the earlier text; any other newer row
+ * wins and only takes the fields it lacks from the older projection. */
+function mergeEarlierEntry(older: TimelineEntry, newer: TimelineEntry): TimelineEntry {
+  if (newer.streamedText) {
+    const merged: TimelineEntry = { ...older, ...newer, subtitle: appendedSubtitle(older, newer) };
+    if (!older.streamedText) delete merged.streamedText;
+    return merged;
+  }
+  const merged: Record<string, unknown> = { ...newer };
+  for (const [key, value] of Object.entries(older)) {
+    if (merged[key] === undefined && !PROJECTION_FLAGS.has(key)) merged[key] = value;
+  }
+  return merged as TimelineEntry;
+}
+
+const SEGMENT_SUFFIX = '#s';
+function segmentStart(segmentId: string): number {
+  return Number(segmentId.slice(segmentId.lastIndexOf(SEGMENT_SUFFIX) + SEGMENT_SUFFIX.length));
+}
+
+/** Merge an earlier history page under a lazily seeded runtime. Events must
+ * lie below the loaded window; they project on a scratch runtime and only
+ * their timeline rows merge in (timeline is newest-first), while turn state,
+ * pending permissions, usage and extension UI keep reflecting the newest
+ * events — replaying old events must not resurrect settled state. A row
+ * spanning the floor merges with its older part by id, and the assistant
+ * segment the window opened joins the segment still open at the page's end,
+ * so paging in history yields the rows a full replay would. */
 export function prependConversationRuntimeEvents(
   previous: ConversationRuntime,
   events: readonly ConversationEvent[],
@@ -550,10 +594,29 @@ export function prependConversationRuntimeEvents(
   const scratch = createConversationRuntime(previous.conversationId, previous.workspaceId);
   for (const event of normalized) projectEvent(scratch, event);
   if (!scratch.timeline.length) return previous;
-  const existing = new Set(previous.timeline.map((entry) => entry.id));
-  const older = scratch.timeline.filter((entry) => !existing.has(entry.id));
-  if (!older.length) return previous;
-  return { ...previous, timeline: dropSupersededProgressEntries([...previous.timeline, ...older]) };
+  const older = new Map(scratch.timeline.map((entry) => [entry.id, entry]));
+  let timeline = previous.timeline;
+  // A window that never touched the assistant stream still continues the
+  // stream state the page ended with.
+  const stream: Partial<ConversationRuntime> = previous.floorAssistantSegment === undefined
+    ? { assistantSegmentStart: scratch.assistantSegmentStart, assistantStreamInterrupted: scratch.assistantStreamInterrupted }
+    : {};
+  const leading = previous.floorAssistantSegment;
+  if (leading && scratch.assistantSegmentStart && !scratch.assistantStreamInterrupted) {
+    const continued = `${leading.slice(0, leading.lastIndexOf(SEGMENT_SUFFIX))}${SEGMENT_SUFFIX}${scratch.assistantSegmentStart}`;
+    if (continued !== leading && older.has(continued)) {
+      timeline = timeline.map((entry) => entry.id === leading ? { ...entry, id: continued } : entry);
+      if (previous.assistantSegmentStart === segmentStart(leading)) stream.assistantSegmentStart = scratch.assistantSegmentStart;
+    }
+  }
+  stream.floorAssistantSegment = scratch.floorAssistantSegment === undefined ? leading : scratch.floorAssistantSegment;
+  const loaded = new Set(timeline.map((entry) => entry.id));
+  const merged = timeline.map((entry) => {
+    const earlier = older.get(entry.id);
+    return earlier ? mergeEarlierEntry(earlier, entry) : entry;
+  });
+  const appended = scratch.timeline.filter((entry) => !loaded.has(entry.id));
+  return { ...previous, ...stream, timeline: dropSupersededProgressEntries([...merged, ...appended]) };
 }
 
 /** Adopt a still-running turn whose `turn.started` lies below a lazily loaded

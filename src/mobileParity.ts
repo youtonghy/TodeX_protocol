@@ -704,6 +704,9 @@ export type TimelineEntry = {
   detailStub?: boolean;
   /** Progress block ids a final answer was streamed under (`block.supersedes`). */
   supersedes?: string[];
+  /** The subtitle holds only streamed deltas, so text projected from earlier
+   * history for the same row precedes it instead of being replaced. */
+  streamedText?: boolean;
   extensionMessage?: ExtensionCustomMessage & { runtimeId: string; messageId: string };
 };
 
@@ -938,7 +941,7 @@ export function reduceConversationEvents(
   let activeTurnId = '';
   let lastSequence = 0;
   const normalizedEvents = events.map(normalizeConversationEvent).filter((event): event is ConversationEvent => event !== null);
-  let assistantSegment = 0;
+  let assistantSegmentStart = 0;
   let assistantStreamInterrupted = false;
   for (const event of normalizedEvents.sort((a, b) => a.sequence - b.sequence)) {
     const key = event.eventId || `${event.conversationId}:${event.sequence}:${event.type}`;
@@ -954,22 +957,23 @@ export function reduceConversationEvents(
     const type = canonicalConversationEventType(event);
     if (type === 'turn.started' && turnId) {
       activeTurnId = turnId;
-      assistantSegment = 0;
+      assistantSegmentStart = 0;
       assistantStreamInterrupted = false;
     }
     const classifiedEntry = classifyV2ConversationEvent(event, workspaceId, turnId || activeTurnId);
     // Same segmentation as the live runtime: activity between two chunks of
-    // the shared assistant stream starts a new entry (see projectEvent).
+    // the shared assistant stream starts a new entry named by the sequence of
+    // its first chunk (see projectEvent).
     if (classifiedEntry && classifiedEntry.kind !== 'incoming') {
       assistantStreamInterrupted = true;
     }
     let segmentedId: string | undefined;
     if (classifiedEntry && classifiedEntry.kind === 'incoming' && classifiedEntry.id.startsWith('v2-assistant-')) {
-      if (assistantStreamInterrupted) {
-        assistantSegment += 1;
+      if (assistantStreamInterrupted || !assistantSegmentStart) {
+        assistantSegmentStart = event.sequence;
         assistantStreamInterrupted = false;
       }
-      segmentedId = `${classifiedEntry.id}#seg${assistantSegment}`;
+      segmentedId = `${classifiedEntry.id}#s${assistantSegmentStart}`;
     }
     const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
     if (entry) {

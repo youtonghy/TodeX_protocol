@@ -52,6 +52,81 @@ test('contiguous narration without intervening steps stays one entry', () => {
   assert.equal(state.timeline[0].subtitle, 'Hello world');
 });
 
+/** Full replay versus a lazy window seeded at `floor` whose older history
+ * pages in `pageSize` events at a time. */
+function lazyProjection(events, floor, pageSize) {
+  let state = apply(runtime.createConversationRuntime('c', 'w', floor), ...events.filter(item => item.sequence > floor)).state;
+  for (let top = floor; top > 0; top -= pageSize) {
+    state = runtime.prependConversationRuntimeEvents(state, events.filter(item => item.sequence <= top && item.sequence > top - pageSize));
+  }
+  return state;
+}
+function rows(state) {
+  return state.timeline.slice().sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id))
+    .map(({ id, kind, title, subtitle, category, phase, sequence }) => ({ id, kind, title, subtitle, category, phase, sequence }));
+}
+function assertLazyMatchesFullReplay(events) {
+  const full = rows(apply(empty(), ...events).state);
+  const last = events[events.length - 1].sequence;
+  for (let floor = 1; floor < last; floor++) {
+    for (const pageSize of [1, 2, 3, 300]) {
+      assert.deepEqual(rows(lazyProjection(events, floor, pageSize)), full, `floor ${floor}, page ${pageSize}`);
+    }
+  }
+  return full;
+}
+
+test('paging history under a lazy window rebuilds interleaved assistant segments', () => {
+  const full = assertLazyMatchesFullReplay([event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.delta', { text: 'First', turnId: 't' }),
+    event(3, 'message.delta', { text: ' part. ', turnId: 't' }),
+    event(4, 'tool.started', { turnId: 't', toolCallId: 'x', toolName: 'ls' }),
+    event(5, 'tool.completed', { turnId: 't', toolCallId: 'x', result: 'a.txt' }),
+    event(6, 'message.delta', { text: 'Second', turnId: 't' }),
+    event(7, 'message.delta', { text: ' part.', turnId: 't' }),
+    event(8, 'tool.started', { turnId: 't', toolCallId: 'y', toolName: 'cat' }),
+    event(9, 'message.delta', { text: 'Third.', turnId: 't' }),
+    event(10, 'tool.completed', { turnId: 't', toolCallId: 'y', result: 'body' }),
+    event(11, 'message.delta', { text: 'Done.', turnId: 't' }),
+    event(12, 'turn.completed', { turnId: 't' })]);
+  assert.deepEqual(full.filter(row => row.kind === 'incoming').map(row => [row.id, row.subtitle]), [
+    ['v2-assistant-c-t#s2', 'First part. '], ['v2-assistant-c-t#s6', 'Second part.'],
+    ['v2-assistant-c-t#s9', 'Third.'], ['v2-assistant-c-t#s11', 'Done.']]);
+});
+
+test('paging history rebuilds reasoning streams and tool calls spanning the floor', () => {
+  const reasoning = (sequence, thinking) => event(sequence, 'provider.event', { turnId: 't', thinking,
+    block: { id: 'r1', category: 'reasoning', phase: 'delta', turnId: 't' } });
+  const tool = (sequence, phase, extra) => event(sequence, 'provider.event', { turnId: 't', toolCallId: 'b1', toolName: 'shell',
+    block: { id: 'b1', category: 'tool', phase, turnId: 't' }, ...extra });
+  const full = assertLazyMatchesFullReplay([event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'thought.delta', { turnId: 't', thinking: 'plan ' }),
+    event(3, 'thought.delta', { turnId: 't', thinking: 'more ' }),
+    event(4, 'thought.delta', { turnId: 't', thinking: 'done' }),
+    reasoning(5, 'r2 '), reasoning(6, 'r3 '), reasoning(7, 'r4'),
+    event(8, 'tool.started', { turnId: 't', toolCallId: 'z', toolName: 'grep', arguments: { q: 'x' } }),
+    event(9, 'message.delta', { text: 'Searching', turnId: 't' }),
+    event(10, 'tool.completed', { turnId: 't', toolCallId: 'z', result: 'hit' }),
+    tool(11, 'started', { arguments: { cmd: 'ls' } }),
+    tool(12, 'completed', { result: 'files' }),
+    event(13, 'turn.completed', { turnId: 't' })]);
+  assert.equal(full.find(row => row.id === 'v2-thought-c-t').subtitle, 'plan more done');
+  assert.equal(full.find(row => row.category === 'reasoning').subtitle, 'r2 r3 r4');
+  assert.ok(full.find(row => row.id === 'v2-tool-c-t-z').subtitle.includes('hit'));
+  assert.ok(full.find(row => row.category === 'tool').subtitle.includes('files'));
+});
+
+test('a live stream continues the assistant segment joined from older history', () => {
+  const events = [event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.delta', { text: 'Hel', turnId: 't' }),
+    event(3, 'message.delta', { text: 'lo', turnId: 't' })];
+  const lazy = apply(lazyProjection(events, 2, 1), event(4, 'message.delta', { text: '!', turnId: 't' })).state;
+  assert.deepEqual(lazy.timeline.map(row => [row.id, row.subtitle]), [['v2-assistant-c-t#s2', 'Hello!']]);
+  const quiet = apply(lazyProjection([...events, event(4, 'usage.updated', { turnId: 't' })], 3, 300),
+    event(5, 'message.delta', { text: '?', turnId: 't' })).state;
+  assert.deepEqual(quiet.timeline.map(row => [row.id, row.subtitle]), [['v2-assistant-c-t#s2', 'Hello?']]);
+});
+
 test('historical mislabelled message completion cannot end a running turn', () => {
   const update = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'message.completed', { turnId: 't', role: 'assistant', text: 'Answer' }, { normalizedType: 'turn.completed' }));

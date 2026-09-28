@@ -254,6 +254,7 @@ export type ProviderDescriptor = {
 export type ManagedCliProvider = 'codex' | 'pi' | 'claude-code' | 'grok-build' | 'devin' | 'opencode';
 export type CliVersionStatus = 'upToDate' | 'updateAvailable' | 'ahead' | 'unknown' | 'notInstalled' | 'external';
 export type CliUpgradeStatus = 'running' | 'succeeded' | 'failed';
+export type CliOperationAction = 'install' | 'upgrade';
 
 type CliVersionInfoBase = {
   name: string;
@@ -268,15 +269,20 @@ export type CliVersionInfo = CliVersionInfoBase & ({
   id: ManagedCliProvider;
   kind: 'managed';
   upgradeSupported: boolean;
+  /** Missing on older backends; clients must treat absence as unsupported. */
+  installSupported?: boolean;
 } | {
   id: string;
   kind: 'external';
   upgradeSupported: false;
+  installSupported?: false;
 });
 
 export type CliUpgradeOperation = {
   id: string;
   provider: ManagedCliProvider;
+  /** Missing on older backends, which only upgrade. */
+  action?: CliOperationAction;
   status: CliUpgradeStatus;
   startedAt: string;
   finishedAt?: string;
@@ -390,6 +396,20 @@ export type AgentProviderBucket = {
   currentProviderId: string | null;
   providers: AgentProviderProfile[];
   live: AgentProviderLive;
+};
+
+export const AGENT_PROVIDER_TRANSFER_FORMAT = 'todex.agent-providers';
+
+/** One provider in an export file; secrets are in clear, unlike list responses. */
+export type AgentProviderTransferItem = AgentProviderInput & { id: string };
+
+/** A per-agent provider export, and the body the import route accepts. */
+export type AgentProviderTransfer = {
+  format: typeof AGENT_PROVIDER_TRANSFER_FORMAT;
+  version: number;
+  agent: ManagedProviderAgent;
+  exportedAt: number;
+  providers: AgentProviderTransferItem[];
 };
 
 export type AgentProvidersResponse = {
@@ -767,6 +787,10 @@ export class V2ApiClient {
     return this.request(`/v2/providers/${encodeURIComponent(provider)}/upgrade`, { method: 'POST' });
   }
 
+  async installCli(provider: ManagedCliProvider): Promise<CliUpgradeOperation> {
+    return this.request(`/v2/providers/${encodeURIComponent(provider)}/install`, { method: 'POST' });
+  }
+
   async getCliUpgrade(operationId: string): Promise<CliUpgradeOperation> {
     return this.request(`/v2/providers/upgrades/${encodeURIComponent(operationId)}`);
   }
@@ -840,6 +864,21 @@ export class V2ApiClient {
     return this.request(
       `/v2/agent-providers/${encodeURIComponent(agent)}/import-live`,
       { method: 'POST', body: JSON.stringify({ id, name }) },
+    );
+  }
+
+  async exportAgentProviders(agent: ManagedProviderAgent): Promise<AgentProviderTransfer> {
+    return this.request(`/v2/agent-providers/${encodeURIComponent(agent)}/export`);
+  }
+
+  /** Upserts every provider in the file by id; others stay, current is kept. */
+  async importAgentProviders(
+    agent: ManagedProviderAgent,
+    transfer: AgentProviderTransfer,
+  ): Promise<AgentProviderBucket> {
+    return this.request(
+      `/v2/agent-providers/${encodeURIComponent(agent)}/import`,
+      { method: 'POST', body: JSON.stringify(transfer) },
     );
   }
 

@@ -1,12 +1,22 @@
 /** Shared deterministic projection for both realtime delivery and history replay. */
 import { canonicalConversationEventType, contextCompactionStatus, normalizeConversationEvent } from './v2';
-import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun } from './v2';
+import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun, SubagentStatus } from './v2';
 import { classifyV2ConversationEvent, contextUsageFromV2Event, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue => value && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};
 const string = (value: unknown): string => typeof value === 'string' ? value : '';
+const SUBAGENT_STATUSES = new Set<string>(['queued', 'running', 'completed', 'failed', 'cancelled']);
+const SUBAGENT_STATUS_ALIASES: Record<string, SubagentStatus> = {
+  inProgress: 'running', in_progress: 'running', errored: 'failed', notFound: 'failed',
+  interrupted: 'cancelled', shutdown: 'cancelled', stopped: 'cancelled', killed: 'cancelled',
+  pendingInit: 'queued', pending: 'queued',
+};
+function reportedSubagentStatus(value: unknown): SubagentStatus | undefined {
+  const status = string(value);
+  return SUBAGENT_STATUSES.has(status) ? status as SubagentStatus : SUBAGENT_STATUS_ALIASES[status];
+}
 const number = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
 export type RuntimePermission = { id: string; turnId: string; scope?: ExtensionScope; runtimeId?: string; event: ConversationEvent; payload: RecordValue };
 export type RuntimeCompaction = ContextCompactionState & { recommended: boolean };
@@ -525,8 +535,15 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
     if (id) {
       const previous = state.subagents.find(item => item.id === id);
       const phase = type.slice('subagent.'.length);
+      const reportedStatus = reportedSubagentStatus(payload.status);
+      // 'queued' marks a run whose start event sits below the loaded window;
+      // a progress frame reporting the real phase outranks that placeholder.
+      const current = previous && previous.status !== 'queued' ? previous.status : undefined;
       const status: SubagentRun['status'] = phase === 'started' ? 'running' : phase === 'completed' ? 'completed'
-        : phase === 'failed' ? 'failed' : phase === 'cancelled' ? 'cancelled' : previous?.status ?? 'queued';
+        : phase === 'failed' ? 'failed' : phase === 'cancelled' ? 'cancelled' : current ?? reportedStatus ?? 'queued';
+      const metadata = object(payload.metadata);
+      const usage = object(payload.usage);
+      const nestedUsage = object(metadata.usage);
       const run: SubagentRun = { ...previous,
         id, conversationId: state.conversationId,
         title: string(payload.title) || previous?.title || 'Subagent', task: string(payload.task ?? payload.prompt) || previous?.task || '',
@@ -539,9 +556,9 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
         providerItemId: string(payload.providerItemId) || previous?.providerItemId,
         agentKind: string(payload.agentKind) || previous?.agentKind,
         agentId: string(payload.agentId) || previous?.agentId,
-        outputFile: string(payload.outputFile ?? object(payload.metadata)?.outputFile) || previous?.outputFile,
-        usage: object(payload.usage) as SubagentRun['usage'] ?? previous?.usage,
-        metadata: object(payload.metadata) ?? previous?.metadata,
+        outputFile: string(payload.outputFile ?? metadata.outputFile) || previous?.outputFile,
+        usage: (Object.keys(usage).length ? usage : Object.keys(nestedUsage).length ? nestedUsage : previous?.usage) as SubagentRun['usage'],
+        metadata: Object.keys(metadata).length ? metadata : previous?.metadata,
         ...(status === 'running' ? { startedAt: previous?.startedAt ?? event.time }
           : status !== 'queued' ? { finishedAt: event.time } : {}),
       };
@@ -734,6 +751,56 @@ function segmentStart(segmentId: string): number {
   return Number(segmentId.slice(segmentId.lastIndexOf(SEGMENT_SUFFIX) + SEGMENT_SUFFIX.length));
 }
 
+/** Newer fields win; fields the newer entry lacks take the earlier
+ * projection's value. Returns the newer entry when nothing filled in. */
+function fillEarlierFields<T extends { id: string }>(older: T, newer: T): T {
+  const merged: Record<string, unknown> = { ...newer };
+  for (const [key, value] of Object.entries(older)) {
+    if (merged[key] === undefined) merged[key] = value;
+  }
+  return Object.keys(merged).some(key => merged[key] !== (newer as Record<string, unknown>)[key])
+    ? merged as T : newer;
+}
+
+/** Merge a run projected from an earlier history page into the loaded run of
+ * the same id. 'Subagent', '' and 'queued' are placeholders for a run whose
+ * start sits below the loaded window, so the paged-in start replaces them;
+ * every other field keeps the newer projection's value. */
+function mergeEarlierSubagent(older: SubagentRun, newer: SubagentRun): SubagentRun {
+  const merged: Record<string, unknown> = { ...newer };
+  for (const [key, value] of Object.entries(older)) {
+    if (merged[key] === undefined) merged[key] = value;
+  }
+  if (merged.title === 'Subagent' && older.title) merged.title = older.title;
+  if (!merged.task && older.task) merged.task = older.task;
+  if (merged.status === 'queued' && older.status !== 'queued') merged.status = older.status;
+  if (older.startedAt) merged.startedAt = older.startedAt;
+  const candidate = merged as unknown as SubagentRun;
+  return (Object.keys(merged) as Array<keyof SubagentRun>).some(key => candidate[key] !== newer[key])
+    ? candidate : newer;
+}
+
+/** Fold collection entries projected from an earlier page into the loaded
+ * collection: known ids merge by `merge`, unseen entries append at the tail
+ * to preserve newest-first ordering. */
+function mergeEarlierCollection<T extends { id: string }>(
+  current: T[], earlier: T[], merge: (older: T, newer: T) => T = fillEarlierFields,
+): T[] {
+  if (!earlier.length) return current;
+  const olderById = new Map(earlier.map(item => [item.id, item]));
+  let changed = false;
+  const merged = current.map(item => {
+    const older = olderById.get(item.id);
+    if (!older) return item;
+    const next = merge(older, item);
+    changed ||= next !== item;
+    return next;
+  });
+  const known = new Set(current.map(item => item.id));
+  const appended = earlier.filter(item => !known.has(item.id));
+  return changed || appended.length ? [...merged, ...appended] : current;
+}
+
 /** Merge an earlier history page under a lazily seeded runtime. Events must
  * lie below the loaded window; they project on a scratch runtime and only
  * their timeline rows merge in (timeline is newest-first), while turn state,
@@ -741,7 +808,10 @@ function segmentStart(segmentId: string): number {
  * events — replaying old events must not resurrect settled state. A row
  * spanning the floor merges with its older part by id, and the assistant
  * segment the window opened joins the segment still open at the page's end,
- * so paging in history yields the rows a full replay would. */
+ * so paging in history yields the rows a full replay would. Auxiliary
+ * collections (subagent runs, memory entries) merge per entry: a run whose
+ * `subagent.started` pages in below the window fills the title, task and
+ * lifecycle the loaded window only saw as `subagent.updated` frames. */
 export function prependConversationRuntimeEvents(
   previous: ConversationRuntime,
   events: readonly ConversationEvent[],
@@ -753,7 +823,12 @@ export function prependConversationRuntimeEvents(
     .sort((left, right) => left.sequence - right.sequence);
   if (!normalized.length) return previous;
   const scratch = projectScratchRuntime(previous, normalized);
-  if (!scratch.timeline.length) return previous;
+  const subagents = mergeEarlierCollection(previous.subagents, scratch.subagents, mergeEarlierSubagent);
+  const memoryEntries = mergeEarlierCollection(previous.memoryEntries, scratch.memoryEntries);
+  if (!scratch.timeline.length) {
+    return subagents === previous.subagents && memoryEntries === previous.memoryEntries
+      ? previous : { ...previous, subagents, memoryEntries };
+  }
   const older = new Map(scratch.timeline.map((entry) => [entry.id, entry]));
   let timeline = previous.timeline;
   // A window that never touched the assistant stream still continues the
@@ -776,7 +851,8 @@ export function prependConversationRuntimeEvents(
     return earlier ? mergeEarlierEntry(earlier, entry) : entry;
   });
   const appended = scratch.timeline.filter((entry) => !loaded.has(entry.id));
-  return { ...previous, ...stream, timeline: dropSupersededProgressEntries([...merged, ...appended]) };
+  return { ...previous, ...stream, subagents, memoryEntries,
+    timeline: dropSupersededProgressEntries([...merged, ...appended]) };
 }
 
 /** Adopt a still-running turn whose `turn.started` lies below a lazily loaded

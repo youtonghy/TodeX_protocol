@@ -189,6 +189,49 @@ test('usage updates do not erase running or failed compaction, auxiliary replay 
   assert.equal(update.state.memoryEntries.length, 0);
 });
 
+test('subagent metadata and usage persist across events that omit them', () => {
+  const state = apply(empty(),
+    event(1, 'subagent.started', { subagentId: 's', title: 'Worker', task: 'Review' }),
+    event(2, 'subagent.updated', { subagentId: 's', status: 'running',
+      metadata: { taskId: 'a3077749', description: 'Running vitest', usage: { total_tokens: 2400 } } }),
+    event(3, 'subagent.completed', { subagentId: 's', result: 'Done' })).state;
+  const run = state.subagents[0];
+  assert.equal(run.status, 'completed');
+  assert.equal(run.result, 'Done');
+  assert.deepEqual(run.usage, { total_tokens: 2400 });
+  assert.equal(run.metadata.taskId, 'a3077749');
+});
+
+test('a subagent run whose start pages in below the lazy window fills its placeholders', () => {
+  const events = [
+    event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'subagent.started', { subagentId: 'toolu_1', title: 'Restore Package.resolved',
+      task: 'run the envelope test', agentKind: 'general-purpose', turnId: 't' }, { time: '2026-09-06T00:00:02.000Z' }),
+    event(3, 'subagent.completed', { subagentId: 'toolu_0', title: 'Earlier run', task: 'old task', result: 'ok' }),
+    event(4, 'subagent.updated', { subagentId: 'toolu_1', status: 'running',
+      metadata: { taskId: 'a3077749', description: 'Running vitest', toolName: 'Bash', usage: { total_tokens: 2400 } } }),
+  ];
+  // The lazy window opens at floor 3 with only the progress frame loaded.
+  let state = apply(runtime.createConversationRuntime('c', 'w', 3), events[3]).state;
+  assert.equal(state.subagents.length, 1);
+  const orphan = state.subagents[0];
+  assert.equal(orphan.status, 'running');
+  assert.deepEqual(orphan.usage, { total_tokens: 2400 });
+  // Paging in the page holding `subagent.started` heals the placeholder.
+  state = runtime.prependConversationRuntimeEvents(state, events.filter(item => item.sequence <= 3));
+  assert.equal(state.subagents.length, 2);
+  const run = state.subagents.find(item => item.id === 'toolu_1');
+  assert.equal(run.title, 'Restore Package.resolved');
+  assert.equal(run.task, 'run the envelope test');
+  assert.equal(run.agentKind, 'general-purpose');
+  assert.equal(run.status, 'running');
+  assert.equal(run.startedAt, events[1].time);
+  assert.equal(run.metadata.description, 'Running vitest');
+  const settled = state.subagents.find(item => item.id === 'toolu_0');
+  assert.equal(settled.status, 'completed');
+  assert.equal(settled.result, 'ok');
+});
+
 test('events from another conversation never enter the projection', () => {
   const update = apply(empty(), event(1, 'turn.started', { turnId: 'x' }, { conversationId: 'other' }));
   assert.equal(update.state.appliedSequence, 0);

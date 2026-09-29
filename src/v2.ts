@@ -306,6 +306,8 @@ export type ProviderModelDescriptor = {
   defaultReasoningEffort?: string;
   contextWindow?: number;
   imageInput?: boolean;
+  /** Model family (e.g. "opus", "sonnet") used to group versions under one menu entry. */
+  family?: string;
 };
 
 export type ProviderModelsResponse = {

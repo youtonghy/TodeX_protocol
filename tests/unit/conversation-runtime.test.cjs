@@ -623,6 +623,112 @@ test('Claude thinking and tool_use completions never become answer bubbles', () 
   assert.equal(mixed.subtitle, 'Shown');
 });
 
+// claude.rs tags every event emitted for a `parent_tool_use_id` frame with the
+// spawning Task call's id: inner tools, streamed text, thinking and message
+// envelopes all fold under the run instead of reaching the main stream.
+function subTool(sequence, id, phase) {
+  return event(sequence, `tool.${phase}`, { provider: 'claude-code', turnId: 't', toolCallId: id,
+    subagentId: 'toolu_task', toolName: 'Read', result: 'data',
+    block: { category: 'tool', id, turnId: 't', phase } });
+}
+function subDelta(sequence, text) {
+  return event(sequence, 'message.delta', { provider: 'claude-code', role: 'assistant', turnId: 't',
+    delta: { type: 'text_delta', text }, subagentId: 'toolu_task' });
+}
+function mainDelta(sequence, text) {
+  return event(sequence, 'message.delta', { provider: 'claude-code', role: 'assistant', turnId: 't',
+    delta: { type: 'text_delta', text } });
+}
+function mainCompleted(sequence, text) {
+  return event(sequence, 'message.completed', { provider: 'claude-code', turnId: 't',
+    message: { id: `msg_${sequence}`, type: 'message', role: 'assistant', content: [{ type: 'text', text }] } });
+}
+
+test('subagent activity between narration chunks never splits the assistant stream', () => {
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    mainDelta(2, 'All in '),
+    subTool(3, 'toolu_inner1', 'started'), subDelta(4, 'exploring'), subTool(5, 'toolu_inner1', 'completed'),
+    event(6, 'thought.delta', { provider: 'claude-code', turnId: 't', delta: { type: 'thinking_delta', thinking: 'inner plan' }, subagentId: 'toolu_task' }),
+    mainDelta(7, 'one bubble.'),
+    subTool(8, 'toolu_inner2', 'started'),
+    event(9, 'turn.completed', { turnId: 't' })).state;
+  const incoming = state.timeline.filter((entry) => entry.kind === 'incoming');
+  assert.deepEqual(incoming.map((entry) => entry.subtitle), ['All in one bubble.']);
+  // Subagent narration folds into the trace as its own step; tool rows keep
+  // their entries but carry the run marker.
+  const narration = state.timeline.find((entry) => entry.id === 'v2-subagent-c-toolu_task-text');
+  assert.equal(narration.kind, 'system');
+  assert.equal(narration.subtitle, 'exploring');
+  assert.ok(parity.isStepProgressEntry(narration));
+  const thinking = state.timeline.find((entry) => entry.id === 'v2-subagent-c-toolu_task-thought');
+  assert.equal(thinking.subtitle, 'inner plan');
+  const tools = state.timeline.filter((entry) => entry.subagentId === 'toolu_task' && entry.title === '工具调用');
+  assert.equal(tools.length, 2);
+});
+
+test('a subagent message envelope cannot become a main-stream bubble', () => {
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.completed', { provider: 'claude-code', turnId: 't', subagentId: 'toolu_task',
+      message: { role: 'assistant', content: [{ type: 'text', text: "I'll start by exploring" }] } }),
+    mainDelta(3, 'Parent answer'),
+    event(4, 'turn.completed', { turnId: 't' })).state;
+  assert.deepEqual(state.timeline.filter((entry) => entry.kind === 'incoming').map((entry) => entry.subtitle), ['Parent answer']);
+});
+
+test('a completed assistant message supersedes the segments its deltas streamed', () => {
+  const text = 'First part. Second part. Done.';
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    mainDelta(2, 'First part. '),
+    event(3, 'tool.started', { turnId: 't', toolCallId: 'x', toolName: 'ls' }),
+    mainDelta(4, 'Second part. '),
+    event(5, 'tool.completed', { turnId: 't', toolCallId: 'x', result: 'a.txt' }),
+    mainDelta(6, 'Done.'),
+    mainCompleted(7, text),
+    event(8, 'turn.completed', { turnId: 't' })).state;
+  const incoming = state.timeline.filter((entry) => entry.kind === 'incoming');
+  assert.deepEqual(incoming.map((entry) => entry.subtitle), [text]);
+  // Replay through reduceConversationEvents collapses the same stream.
+  const replayed = parity.reduceConversationEvents([
+    event(1, 'turn.started', { turnId: 't' }), mainDelta(2, 'First part. '),
+    event(3, 'tool.started', { turnId: 't', toolCallId: 'x', toolName: 'ls' }),
+    mainDelta(4, 'Second part. '), event(5, 'tool.completed', { turnId: 't', toolCallId: 'x', result: 'a' }),
+    mainDelta(6, 'Done.'), mainCompleted(7, text), event(8, 'turn.completed', { turnId: 't' })], 'w');
+  assert.deepEqual(replayed.timeline.filter((entry) => entry.kind === 'incoming').map((entry) => entry.subtitle), [text]);
+});
+
+test('a completed message covers only the segments of its own message', () => {
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    mainDelta(2, 'Checking files'), mainCompleted(3, 'Checking files'),
+    event(4, 'tool.started', { turnId: 't', toolCallId: 'x', toolName: 'grep' }),
+    mainDelta(5, 'All '), mainDelta(6, 'done'),
+    mainCompleted(7, 'All done'),
+    event(8, 'turn.completed', { turnId: 't' })).state;
+  assert.deepEqual(state.timeline.filter((entry) => entry.kind === 'incoming').map((entry) => entry.subtitle),
+    ['All done', 'Checking files']);
+});
+
+test('an interrupted segment whose text the completion lacks stays beside it', () => {
+  // Journal gaps or provider quirks can leave a segment the final text does
+  // not contain; coverage must keep it rather than silently drop real output.
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    mainDelta(2, 'Stray note. '),
+    event(3, 'tool.started', { turnId: 't', toolCallId: 'x', toolName: 'ls' }),
+    mainDelta(4, 'Done.'),
+    mainCompleted(5, 'Done.'),
+    event(6, 'turn.completed', { turnId: 't' })).state;
+  assert.deepEqual(state.timeline.filter((entry) => entry.kind === 'incoming').map((entry) => entry.subtitle),
+    ['Done.', 'Stray note. ']);
+});
+
+test('fragments paged in below a completed message collapse under it', () => {
+  const events = [event(1, 'turn.started', { turnId: 't' }),
+    mainDelta(2, 'One '), subTool(3, 'toolu_inner', 'completed'), mainDelta(4, 'two '),
+    subDelta(5, 'inner work'), mainDelta(6, 'three'), mainCompleted(7, 'One two three'),
+    event(8, 'turn.completed', { turnId: 't' })];
+  const full = assertLazyMatchesFullReplay(events);
+  assert.deepEqual(full.filter((row) => row.kind === 'incoming').map((row) => row.subtitle), ['One two three']);
+});
+
 test('a turn started below a lazy window is adopted without its history rows', () => {
   const started = event(2, 'turn.started', { turnId: 't', effectivePermissions: { sandbox: 'workspace-write' } });
   let state = runtime.createConversationRuntime('c', 'w', 40);

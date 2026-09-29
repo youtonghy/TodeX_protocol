@@ -1,7 +1,7 @@
 /** Shared deterministic projection for both realtime delivery and history replay. */
 import { canonicalConversationEventType, contextCompactionStatus, normalizeConversationEvent } from './v2';
 import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun, SubagentStatus } from './v2';
-import { classifyV2ConversationEvent, contextUsageFromV2Event, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
+import { classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 
 type RecordValue = Record<string, unknown>;
@@ -411,6 +411,38 @@ class TimelineDraft {
     this.removed = true;
   }
 
+  /** Rows newest→oldest without materializing the finished timeline. */
+  private *rowsNewestFirst(): Generator<TimelineEntry> {
+    const total = this.base.length + this.added.length;
+    for (let position = total - 1; position >= 0; position -= 1) {
+      const row = this.at(position);
+      if (row) yield row;
+    }
+  }
+
+  /** A full assistant message carries the text its streamed fragments were
+   * rendered under; the covered segments are dropped so the answer shows
+   * once. A non-matching chain keeps every row (providers that only deliver
+   * completed messages see no segments). Returns the earliest firstSequence
+   * among dropped rows so the surviving entry keeps the message's start. */
+  dropCoveredAssistantSegments(entryId: string, text: string): number | undefined {
+    let first: number | undefined;
+    for (const id of coveredAssistantSegmentIds(this.rowsNewestFirst(), entryId, text)) {
+      const position = this.index.positions.get(id);
+      if (position === undefined) continue;
+      const row = this.at(position);
+      if (!row) continue;
+      unindexEntry(this.index, row);
+      this.index.positions.delete(id);
+      this.put(position, null);
+      this.changed = true;
+      this.removed = true;
+      const start = row.firstSequence ?? row.sequence;
+      if (start !== undefined && (first === undefined || start < first)) first = start;
+    }
+    return first;
+  }
+
   /** The projected newest-first timeline; the base array while unchanged. */
   finish(): TimelineEntry[] {
     if (!this.changed) {
@@ -477,8 +509,9 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
   const classifiedEntry = classifyV2ConversationEvent(projectedEvent, state.workspaceId, turnId);
   // The generic assistant stream shares one entry per turn. A step between
   // two chunks means the agent moved on, so the next chunk opens a new
-  // segment instead of growing the previous text into one blob.
-  if (classifiedEntry && classifiedEntry.kind !== 'incoming') {
+  // segment instead of growing the previous text into one blob. Steps tagged
+  // as a subagent's run alongside the stream and never split it.
+  if (classifiedEntry && classifiedEntry.kind !== 'incoming' && !classifiedEntry.subagentId) {
     state.assistantStreamInterrupted = true;
     if (state.floorAssistantSegment === undefined) state.floorAssistantSegment = null;
   }
@@ -493,11 +526,13 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
   }
   const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
   if (entry) {
-    const existing = timeline.get(entry.id);
     const append = shouldAppendV2ConversationEvent(event);
+    const coveredStart = !append && entry.kind === 'incoming' && entry.subtitle
+      ? timeline.dropCoveredAssistantSegments(entry.id, entry.subtitle) : undefined;
+    const existing = timeline.get(entry.id);
     const next: TimelineEntry = existing && append
       ? { ...existing, ...entry, subtitle: appendedSubtitle(existing, entry) }
-      : { ...entry, firstSequence: existing?.firstSequence ?? event.sequence, ...(!existing && append ? { streamedText: true } : {}) };
+      : { ...entry, firstSequence: coveredStart ?? existing?.firstSequence ?? event.sequence, ...(!existing && append ? { streamedText: true } : {}) };
     timeline.set(next);
     if (next.supersedes?.length) timeline.dropSuperseded();
   }
@@ -801,6 +836,30 @@ function mergeEarlierCollection<T extends { id: string }>(
   return changed || appended.length ? [...merged, ...appended] : current;
 }
 
+/** Rows below `index` in event order (oldest first) — the order their
+ * subtitles tile a completed message's text from its head. */
+function* olderEventOrder(timeline: readonly TimelineEntry[], index: number, skipped: ReadonlySet<string>): Generator<TimelineEntry> {
+  for (let position = timeline.length - 1; position > index; position -= 1) {
+    if (!skipped.has(timeline[position].id)) yield timeline[position];
+  }
+}
+
+/** Fragments of a completed message that page in below the loaded window
+ * resurface as tail rows after `projectEvent` already collapsed them. Every
+ * non-streamed `v2-assistant` segment is a full text whose covered prefix
+ * chain drops; a still-streaming segment covers nothing. */
+function dropCoveredAssistantSegmentEntries(timeline: TimelineEntry[]): TimelineEntry[] {
+  const dropped = new Set<string>();
+  for (let index = 0; index < timeline.length; index += 1) {
+    const cover = timeline[index];
+    if (dropped.has(cover.id) || cover.kind !== 'incoming' || cover.streamedText) continue;
+    for (const id of coveredAssistantSegmentPrefixIds(olderEventOrder(timeline, index, dropped), cover.id, cover.subtitle)) {
+      dropped.add(id);
+    }
+  }
+  return dropped.size ? timeline.filter((entry) => !dropped.has(entry.id)) : timeline;
+}
+
 /** Merge an earlier history page under a lazily seeded runtime. Events must
  * lie below the loaded window; they project on a scratch runtime and only
  * their timeline rows merge in (timeline is newest-first), while turn state,
@@ -852,7 +911,7 @@ export function prependConversationRuntimeEvents(
   });
   const appended = scratch.timeline.filter((entry) => !loaded.has(entry.id));
   return { ...previous, ...stream, subagents, memoryEntries,
-    timeline: dropSupersededProgressEntries([...merged, ...appended]) };
+    timeline: dropCoveredAssistantSegmentEntries(dropSupersededProgressEntries([...merged, ...appended])) };
 }
 
 /** Adopt a still-running turn whose `turn.started` lies below a lazily loaded

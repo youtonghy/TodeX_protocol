@@ -708,6 +708,10 @@ export type TimelineEntry = {
   detailStub?: boolean;
   /** Progress block ids a final answer was streamed under (`block.supersedes`). */
   supersedes?: string[];
+  /** Subagent run the row belongs to (providers tag events emitted for a
+   * `parent_tool_use_id` frame). Subagent activity folds into the trace but
+   * never splits the assistant stream it happens to interleave. */
+  subagentId?: string;
   /** The subtitle holds only streamed deltas, so text projected from earlier
    * history for the same row precedes it instead of being replaced. */
   streamedText?: boolean;
@@ -933,6 +937,56 @@ export type ConversationReplayState = {
   normalizedEvents: AgentEventEnvelope[];
 };
 
+/** `v2-assistant-…#s` row ids whose joined text a full assistant message's
+ * text already covers. Rows walk newest→oldest; a row stays covered only
+ * while prepending its subtitle keeps a strict suffix match, so an older
+ * segment of a different message ends the chain instead of being dropped. */
+export function coveredAssistantSegmentIds(
+  rows: Iterable<TimelineEntry>,
+  completedId: string,
+  text: string,
+): string[] {
+  const cut = completedId.lastIndexOf('#s');
+  if (cut < 0 || !completedId.startsWith('v2-assistant-') || !text) return [];
+  const base = completedId.slice(0, cut);
+  const covered: string[] = [];
+  let acc = '';
+  for (const row of rows) {
+    if (!row.id.startsWith(`${base}#s`)) continue;
+    const joined = `${row.subtitle}${acc}`;
+    if (joined.length > text.length || !text.endsWith(joined)) break;
+    acc = joined;
+    covered.push(row.id);
+    if (acc.length === text.length) break;
+  }
+  return covered;
+}
+
+/** Fragments of a completed message that page in below it hold the head of
+ * its text, not a suffix: walking the same-base rows oldest→newest, a row is
+ * covered while its subtitle continues the accumulated prefix exactly. A
+ * foreign row is skipped without advancing, so a middle page keeps matching
+ * once the head page has arrived. */
+export function coveredAssistantSegmentPrefixIds(
+  rows: Iterable<TimelineEntry>,
+  completedId: string,
+  text: string,
+): string[] {
+  const cut = completedId.lastIndexOf('#s');
+  if (cut < 0 || !completedId.startsWith('v2-assistant-') || !text) return [];
+  const base = completedId.slice(0, cut);
+  const covered: string[] = [];
+  let position = 0;
+  for (const row of rows) {
+    if (!row.id.startsWith(`${base}#s`)) continue;
+    if (!row.subtitle || !text.startsWith(row.subtitle, position)) continue;
+    position += row.subtitle.length;
+    covered.push(row.id);
+    if (position >= text.length) break;
+  }
+  return covered;
+}
+
 /** Reduce live and replayed events through one idempotent, gap-aware path. */
 export function reduceConversationEvents(
   events: ConversationEvent[],
@@ -967,8 +1021,9 @@ export function reduceConversationEvents(
     const classifiedEntry = classifyV2ConversationEvent(event, workspaceId, turnId || activeTurnId);
     // Same segmentation as the live runtime: activity between two chunks of
     // the shared assistant stream starts a new entry named by the sequence of
-    // its first chunk (see projectEvent).
-    if (classifiedEntry && classifiedEntry.kind !== 'incoming') {
+    // its first chunk (see projectEvent). Subagent steps never interrupt the
+    // stream they run alongside.
+    if (classifiedEntry && classifiedEntry.kind !== 'incoming' && !classifiedEntry.subagentId) {
       assistantStreamInterrupted = true;
     }
     let segmentedId: string | undefined;
@@ -981,8 +1036,22 @@ export function reduceConversationEvents(
     }
     const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
     if (entry) {
+      // A full assistant message supersedes the stream fragments that built
+      // it; leaving them would repeat the answer beside its own pieces. The
+      // surviving row keeps the message's first chunk as its start.
+      let coveredStart: number | undefined;
+      if (entry.kind === 'incoming' && !shouldAppendV2ConversationEvent(event) && entry.subtitle) {
+        for (const id of coveredAssistantSegmentIds(timeline, entry.id, entry.subtitle)) {
+          const coveredIndex = timeline.findIndex((item) => item.id === id);
+          if (coveredIndex >= 0) {
+            const start = timeline[coveredIndex].firstSequence ?? timeline[coveredIndex].sequence;
+            if (start !== undefined && (coveredStart === undefined || start < coveredStart)) coveredStart = start;
+            timeline.splice(coveredIndex, 1);
+          }
+        }
+      }
       const index = timeline.findIndex((item) => item.id === entry.id);
-      if (index < 0) timeline.unshift({ ...entry, firstSequence: event.sequence });
+      if (index < 0) timeline.unshift({ ...entry, firstSequence: coveredStart ?? event.sequence });
       else {
         const previous = timeline[index];
         timeline[index] = { ...previous, ...entry, firstSequence: previous.firstSequence,
@@ -1025,6 +1094,10 @@ export function classifyV2ConversationEvent(
   const at = eventTime(event, now);
   const base = { raw: '', at, workspaceId, conversationId, turnId, sequence: event.sequence };
   const block = conversationBlock(payload, turnId);
+  // Events emitted for a subagent's frames (providers tag them from
+  // `parent_tool_use_id`) still fold into the trace but must not reach the
+  // assistant stream.
+  const subagentId = readString(payload, ['subagentId', 'subagent_id', 'parentToolUseId', 'parent_tool_use_id']) || undefined;
 
   if (type === 'extension.message') {
     if (!message || message.role !== 'custom' || message.display === false) return null;
@@ -1154,6 +1227,7 @@ export function classifyV2ConversationEvent(
       contentIndex: block.contentIndex,
       sequence: readNumber(eventRecord, ['sequence'], 0),
       ...(block.supersedes ? { supersedes: block.supersedes } : {}),
+      ...(subagentId ? { subagentId } : {}),
     };
     switch (block.category) {
       case 'assistant_final':
@@ -1190,9 +1264,12 @@ export function classifyV2ConversationEvent(
     || Boolean(thoughtPayload);
   if (isThoughtEvent) {
     const thought = thoughtPayload || content;
-    return thought
-      ? { id: `v2-thought-${conversationId}-${streamId}`, kind: 'system', title: '思考中', subtitle: thought, ...base }
-      : null;
+    if (!thought) return null;
+    // A subagent's thinking folds into the trace under its own stream, never
+    // into the main reasoning row it would otherwise corrupt.
+    return subagentId
+      ? { id: `v2-subagent-${conversationId}-${subagentId}-thought`, kind: 'system', title: '思考中', subtitle: thought, subagentId, ...base }
+      : { id: `v2-thought-${conversationId}-${streamId}`, kind: 'system', title: '思考中', subtitle: thought, ...base };
   }
 
   const isToolEvent = /tool|command|function|mcp/i.test(type)
@@ -1206,6 +1283,7 @@ export function classifyV2ConversationEvent(
       kind: 'system',
       title: '工具调用',
       subtitle: content || shortJsonValue(payload),
+      ...(subagentId ? { subagentId } : {}),
       ...base,
     };
   }
@@ -1213,6 +1291,23 @@ export function classifyV2ConversationEvent(
   if (type === 'message.created' || type === 'message.completed' || type === 'message.delta' || type.includes('agent') || type.includes('assistant')) {
     const answer = assistantContent(payload, message, delta);
     if (answer || type === 'message.created') {
+      if (subagentId) {
+        // A subagent's message is trace detail: streamed text folds into one
+        // step per run; a completed envelope adds nothing its deltas or the
+        // subagent run's result do not already show.
+        if (type === 'message.delta' || type === 'assistant.delta') {
+          return {
+            ...base,
+            id: `v2-subagent-${conversationId}-${subagentId}-text`,
+            kind: 'system',
+            title: '子代理',
+            subtitle: answer,
+            category: 'status',
+            subagentId,
+          };
+        }
+        return null;
+      }
       return {
         id: type === 'assistant.delta' || type === 'message.delta' || type === 'message.completed'
           ? `v2-assistant-${conversationId}-${turnId || 'current'}`

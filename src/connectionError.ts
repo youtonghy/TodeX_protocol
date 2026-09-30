@@ -24,6 +24,11 @@ export type ConnectionFailureCode =
   | 'request_failed';
 
 export class ConnectionError extends Error {
+  /** HTTP status of the failed request, when the failure came from a response. */
+  public httpStatus?: number;
+  /** Backend error envelope `code` (e.g. `CONFLICT`), when one was returned. */
+  public backendCode?: string;
+
   constructor(
     public type: ConnectionErrorType,
     public userMessage: string,
@@ -66,13 +71,15 @@ export class ConnectionError extends Error {
   }
 
   static authenticationFailed(status: number): ConnectionError {
-    return new ConnectionError(
+    const error = new ConnectionError(
       ConnectionErrorType.AUTHENTICATION_FAILED,
       'Token 缺失或无效',
       `HTTP ${status}`,
       false,
       'authentication_failed',
     );
+    error.httpStatus = status;
+    return error;
   }
 
   static serverError(status: number): ConnectionError {
@@ -162,6 +169,7 @@ export class ConnectionError extends Error {
       backendMessage?.trim(),
     ].filter(Boolean).join(' · ');
     let userMessage = backendMessage?.trim() || `请求失败（HTTP ${status}）`;
+    let error: ConnectionError | undefined;
     switch (backendCode) {
       case 'WORKSPACE_PATH_NOT_FOUND':
         userMessage = '工作区目录不存在，请重新选择 Backend 上的目录';
@@ -170,18 +178,20 @@ export class ConnectionError extends Error {
         userMessage = '工作区目录不在 Backend 允许的根目录内';
         break;
       case 'PROVIDER_UNAVAILABLE':
-        return ConnectionError.providerUnavailable(backendMessage?.trim() || '该 Agent 当前不可用');
+        error = ConnectionError.providerUnavailable(backendMessage?.trim() || '该 Agent 当前不可用');
+        break;
       case 'GIT_PARTIAL_SUCCESS':
-        return new ConnectionError(
+        error = new ConnectionError(
           ConnectionErrorType.PROTOCOL_ERROR,
           '本地提交已创建，但推送失败；已刷新仓库状态，请检查远端后单独推送',
           details,
           false,
           'request_failed',
         );
+        break;
     }
-    if (status >= 500) {
-      return new ConnectionError(
+    if (!error && status >= 500) {
+      error = new ConnectionError(
         ConnectionErrorType.SERVER_ERROR,
         '服务器暂时不可用，请稍后重试',
         details,
@@ -189,13 +199,18 @@ export class ConnectionError extends Error {
         'request_failed',
       );
     }
-    return new ConnectionError(
-      ConnectionErrorType.PROTOCOL_ERROR,
-      userMessage,
-      details,
-      status >= 500,
-      'request_failed',
-    );
+    if (!error) {
+      error = new ConnectionError(
+        ConnectionErrorType.PROTOCOL_ERROR,
+        userMessage,
+        details,
+        status >= 500,
+        'request_failed',
+      );
+    }
+    error.httpStatus = status;
+    error.backendCode = backendCode;
+    return error;
   }
 
   static unreachable(details: string): ConnectionError {
@@ -220,6 +235,14 @@ export class ConnectionError extends Error {
     }
     return ConnectionError.networkOffline(details);
   }
+}
+
+/** Compare-and-save endpoints (e.g. PUT /v2/workspace/file) report a stale
+ * base as HTTP 409 + `{code: "CONFLICT"}`. Matches the mobile client's
+ * `code == "CONFLICT" || code == "409"` check. */
+export function isConflictError(error: unknown): boolean {
+  return error instanceof ConnectionError
+    && (error.httpStatus === 409 || error.backendCode === 'CONFLICT' || error.backendCode === '409');
 }
 
 export function connectionFailureLabel(code?: ConnectionFailureCode | ''): string {

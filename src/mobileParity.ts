@@ -168,8 +168,14 @@ export function normalizeConversationReasoningEffort(value: string | null | unde
     case 'xhigh':
     case 'extra':
     case 'extrahigh':
-    case 'max':
       return 'xhigh';
+    case 'max':
+      return 'max';
+    case 'ultra':
+    case 'highest':
+      return 'ultra';
+    case 'ultracode':
+      return 'ultracode';
     default:
       return null;
   }

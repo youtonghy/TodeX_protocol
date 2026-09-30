@@ -431,8 +431,14 @@ export function normalizeReasoningEffort(value: string | null | undefined): stri
     case 'xhigh':
     case 'extra':
     case 'extrahigh':
-    case 'max':
       return 'xhigh';
+    case 'max':
+      return 'max';
+    case 'ultra':
+    case 'highest':
+      return 'ultra';
+    case 'ultracode':
+      return 'ultracode';
     default:
       return null;
   }
@@ -445,6 +451,9 @@ const REASONING_EFFORT_DESCRIPTIONS: Record<string, string> = {
   medium: 'Balances speed and reasoning depth for everyday tasks',
   high: 'Greater reasoning depth for complex problems',
   xhigh: 'Extra high reasoning depth for complex problems',
+  max: 'Maximum reasoning depth for the hardest problems',
+  ultra: 'Maximum reasoning with proactive multi-agent delegation',
+  ultracode: 'xhigh reasoning plus automatic workflow orchestration',
 };
 
 export const DEFAULT_REASONING_EFFORT_OPTIONS: CodexReasoningEffortOption[] = [
@@ -453,6 +462,7 @@ export const DEFAULT_REASONING_EFFORT_OPTIONS: CodexReasoningEffortOption[] = [
   'medium',
   'high',
   'xhigh',
+  'max',
 ].map((reasoningEffort) => ({
   reasoningEffort,
   description: REASONING_EFFORT_DESCRIPTIONS[reasoningEffort] ?? reasoningEffort,
@@ -494,7 +504,9 @@ export const FALLBACK_CODEX_MODELS: CodexModelCatalogItem[] = [
     description: 'Small, fast, and cost-efficient model for simpler coding tasks.',
     hidden: false,
     isDefault: false,
-    supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS.filter((option) => option.reasoningEffort !== 'xhigh'),
+    supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS.filter(
+      (option) => option.reasoningEffort !== 'xhigh' && option.reasoningEffort !== 'max',
+    ),
     defaultReasoningEffort: 'medium',
     serviceTiers: [FAST_SERVICE_TIER],
   },

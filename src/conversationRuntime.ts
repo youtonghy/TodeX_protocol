@@ -597,7 +597,19 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
         ...(status === 'running' ? { startedAt: previous?.startedAt ?? event.time }
           : status !== 'queued' ? { finishedAt: event.time } : {}),
       };
-      state.subagents = [run, ...state.subagents.filter(item => item.id !== id)];
+      // Runs keep their slot while they update — only a first sighting or the
+      // transition into a settled status changes position, so the list does
+      // not reshuffle on every progress event and finished runs collect below
+      // the active ones.
+      if (previous && isSettledSubagent(previous) === isSettledSubagent(run)) {
+        state.subagents = state.subagents.map(item => (item.id === id ? run : item));
+      } else {
+        const others = state.subagents.filter(item => item.id !== id);
+        const firstSettled = others.findIndex(isSettledSubagent);
+        const insertAt = isSettledSubagent(run) ? (firstSettled === -1 ? others.length : firstSettled) : 0;
+        others.splice(insertAt, 0, run);
+        state.subagents = others;
+      }
     }
   }
   if (type === 'memory.updated' || type === 'memory.created') {
@@ -815,6 +827,20 @@ function mergeEarlierSubagent(older: SubagentRun, newer: SubagentRun): SubagentR
     ? candidate : newer;
 }
 
+function isSettledSubagent(run: SubagentRun): boolean {
+  return run.status !== 'running' && run.status !== 'queued';
+}
+
+/** Keep the active-before-settled group order after an earlier page merged:
+ * a still-running run whose events all sit below the loaded window appends at
+ * the tail and would otherwise land below finished runs. Returns the input
+ * unchanged when the order already holds. */
+function partitionSettledSubagents(subagents: SubagentRun[]): SubagentRun[] {
+  const firstSettled = subagents.findIndex(isSettledSubagent);
+  if (firstSettled === -1 || !subagents.slice(firstSettled).some(item => !isSettledSubagent(item))) return subagents;
+  return [...subagents.filter(item => !isSettledSubagent(item)), ...subagents.filter(isSettledSubagent)];
+}
+
 /** Fold collection entries projected from an earlier page into the loaded
  * collection: known ids merge by `merge`, unseen entries append at the tail
  * to preserve newest-first ordering. */
@@ -882,7 +908,7 @@ export function prependConversationRuntimeEvents(
     .sort((left, right) => left.sequence - right.sequence);
   if (!normalized.length) return previous;
   const scratch = projectScratchRuntime(previous, normalized);
-  const subagents = mergeEarlierCollection(previous.subagents, scratch.subagents, mergeEarlierSubagent);
+  const subagents = partitionSettledSubagents(mergeEarlierCollection(previous.subagents, scratch.subagents, mergeEarlierSubagent));
   const memoryEntries = mergeEarlierCollection(previous.memoryEntries, scratch.memoryEntries);
   if (!scratch.timeline.length) {
     return subagents === previous.subagents && memoryEntries === previous.memoryEntries

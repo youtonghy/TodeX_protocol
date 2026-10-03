@@ -1054,7 +1054,7 @@ export class V2ApiClient {
     return this.request('/v2/ssh/hosts');
   }
 
-  async createSshHost(host: ManagedHost): Promise<{ host: SshHost }> {
+  async createSshHost(host: ManagedHost): Promise<{ host: ManagedHost }> {
     return this.request('/v2/ssh/hosts', { method: 'POST', body: JSON.stringify(host) });
   }
 
@@ -1062,7 +1062,7 @@ export class V2ApiClient {
     return this.request('/v2/ssh/hosts/import', { method: 'POST', body: JSON.stringify({ text }) });
   }
 
-  async updateSshHost(alias: string, host: ManagedHost): Promise<{ host: SshHost }> {
+  async updateSshHost(alias: string, host: ManagedHost): Promise<{ host: ManagedHost }> {
     return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}`, { method: 'PUT', body: JSON.stringify(host) });
   }
 

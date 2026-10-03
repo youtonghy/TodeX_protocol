@@ -1149,7 +1149,6 @@ export class V2ApiClient {
     return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/delete`, { method: 'POST', body: JSON.stringify({ path }) });
   }
 
-  /** Uploads base64 file content (≤ 100 MiB decoded) to an absolute remote path. */
   /**
    * Writes one chunk of a file as raw bytes. `offset` 0 creates the file
    * (409 if it exists and `overwrite` is false); later chunks must start at
@@ -1211,8 +1210,6 @@ export class V2ApiClient {
         signal: controller.signal
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
         const backendError = await response.json().catch(() => null) as {
           code?: unknown;
@@ -1236,8 +1233,6 @@ export class V2ApiClient {
       if (responseType === 'bytes') return new Uint8Array(await response.arrayBuffer()) as T;
       return await response.json() as T;
     } catch (error: unknown) {
-      clearTimeout(timeoutId);
-
       if (error instanceof ConnectionError) {
         throw error;
       }
@@ -1254,6 +1249,9 @@ export class V2ApiClient {
       }
 
       throw error;
+    } finally {
+      // Armed until the body is read: a stalled download must time out too.
+      clearTimeout(timeoutId);
     }
   }
 }

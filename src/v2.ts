@@ -314,6 +314,37 @@ export type CliVersionsResponse = {
   activeOperation?: CliUpgradeOperation;
 };
 
+export type QuotaWindow = {
+  id: string;
+  /** 0–100 percentage used within the window, when the provider reports one. */
+  usedPercent?: number;
+  /** Unix seconds when the window resets. */
+  resetsAt?: number;
+  durationMins?: number;
+};
+
+export type ProviderQuotaState = 'ok' | 'idle' | 'unavailable' | 'unsupported';
+
+/** Account-level plan quota; distinct from per-turn `usage` accounting. */
+export type ProviderQuotaSnapshot = {
+  provider: string;
+  scope: 'account';
+  state: ProviderQuotaState;
+  /** Unix milliseconds of the daemon's newest snapshot. */
+  fetchedAt?: number;
+  planType?: string;
+  windows?: QuotaWindow[];
+  credits?: { hasCredits?: boolean; unlimited?: boolean; balance?: string | number | null };
+  buckets?: Record<string, unknown>;
+  /** Why the snapshot is idle/unavailable/unsupported. */
+  reason?: string;
+  raw?: unknown;
+};
+
+export type ProviderQuotasResponse = {
+  providers: Record<string, ProviderQuotaSnapshot>;
+};
+
 export type ProviderModelDescriptor = {
   id: string;
   displayName: string;
@@ -835,6 +866,10 @@ export class V2ApiClient {
     const query = new URLSearchParams({ provider, workspace });
     if (conversationId) query.set('conversationId', conversationId);
     return this.request(`/v2/providers/commands?${query}`);
+  }
+
+  async getProviderQuotas(): Promise<ProviderQuotasResponse> {
+    return this.request('/v2/providers/quota');
   }
 
   async listAgentProviders(agent?: ManagedProviderAgent): Promise<AgentProvidersResponse> {

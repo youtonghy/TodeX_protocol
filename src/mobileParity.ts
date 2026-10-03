@@ -1087,6 +1087,9 @@ export function classifyV2ConversationEvent(
   const message = asRecord(payload.message);
   const delta = asRecord(payload.delta);
   const type = canonicalConversationEventType(event);
+  // Agent SSH commands already show as the agent's own MCP tool call; their
+  // live output belongs to the side-panel view (ConversationRuntime.sshExecs).
+  if (type.startsWith('ssh.exec.')) return null;
   const eventId = readString(eventRecord, ['eventId', 'event_id', 'id']) || `sequence-${readNumber(eventRecord, ['sequence'], 0)}`;
   const conversationId = readString(eventRecord, ['conversationId', 'conversation_id']);
   const content = conversationContent(payload, message, delta);

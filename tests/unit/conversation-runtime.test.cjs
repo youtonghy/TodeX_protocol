@@ -746,3 +746,47 @@ test('a turn started below a lazy window is adopted without its history rows', (
   assert.equal(runtime.adoptConversationRuntimeTurn(tracked, started), tracked);
   assert.equal(runtime.adoptConversationRuntimeTurn(empty(), event(2, 'turn.completed', { turnId: 't' })).activeTurnId, '');
 });
+
+test('agent ssh_exec calls collect per execId without touching the timeline', () => {
+  const events = [
+    event(1, 'ssh.exec.started', { execId: 'a', host: 'web', command: 'uname -a', cwd: '/srv' }),
+    event(2, 'ssh.exec.started', { execId: 'b', host: 'db', command: 'ls' }),
+    event(3, 'ssh.exec.output', { execId: 'a', stream: 'stdout', data: 'Lin' }),
+    event(4, 'ssh.exec.output', { execId: 'b', stream: 'stderr', data: 'denied\n' }),
+    event(5, 'ssh.exec.output', { execId: 'a', stream: 'stdout', data: 'ux\n' }),
+    event(6, 'ssh.exec.output', { execId: 'a', stream: 'stderr', data: 'warn\n' }),
+    event(7, 'ssh.exec.completed', { execId: 'a', host: 'web', exitCode: 0, durationMs: 12, truncated: false, outputTruncated: false }),
+    event(8, 'ssh.exec.completed', { execId: 'b', host: 'db', exitCode: 255, durationMs: 3, failure: 'authenticationFailed', truncated: false, outputTruncated: true }),
+  ];
+  const state = apply(empty(), ...events).state;
+  assert.equal(state.timeline.length, 0);
+  assert.deepEqual(state.sshExecs.map(run => [run.id, run.host, run.status]), [['a', 'web', 'completed'], ['b', 'db', 'failed']]);
+  const [a, b] = state.sshExecs;
+  assert.equal(a.command, 'uname -a');
+  assert.equal(a.cwd, '/srv');
+  assert.deepEqual(a.output, [{ stream: 'stdout', data: 'Linux\n' }, { stream: 'stderr', data: 'warn\n' }]);
+  assert.equal(a.exitCode, 0);
+  assert.equal(b.failure, 'authenticationFailed');
+  assert.equal(b.outputTruncated, true);
+
+  // Paging the start in below a window that only saw later frames.
+  let paged = apply(runtime.createConversationRuntime('c', 'w', 4), ...events.slice(4)).state;
+  assert.equal(paged.sshExecs.find(run => run.id === 'a').command, '');
+  paged = runtime.prependConversationRuntimeEvents(paged, events.slice(0, 4));
+  const merged = paged.sshExecs.find(run => run.id === 'a');
+  assert.equal(merged.command, 'uname -a');
+  assert.deepEqual(merged.output, a.output);
+  assert.deepEqual(paged.sshExecs.map(run => run.id), ['a', 'b']);
+});
+
+test('ssh_exec runs are capped and cancellation is its own status', () => {
+  const events = [];
+  for (let index = 1; index <= 60; index += 1) {
+    events.push(event(index, 'ssh.exec.started', { execId: `x${index}`, host: 'h', command: 'true' }));
+  }
+  events.push(event(61, 'ssh.exec.completed', { execId: 'x60', host: 'h', durationMs: 1, failure: 'cancelled' }));
+  const state = apply(empty(), ...events).state;
+  assert.equal(state.sshExecs.length, 50);
+  assert.equal(state.sshExecs[0].id, 'x11');
+  assert.equal(state.sshExecs.at(-1).status, 'cancelled');
+});

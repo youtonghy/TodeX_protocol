@@ -3,6 +3,7 @@ import { canonicalConversationEventType, contextCompactionStatus, normalizeConve
 import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun, SubagentStatus } from './v2';
 import { classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
+import { SSH_EXEC_RUN_LIMIT, type SshExecOutputChunk, type SshExecRun } from './ssh';
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue => value && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};
@@ -54,6 +55,8 @@ export type ConversationRuntime = {
   contextUsage: ConversationContextUsage | null;
   cumulativeUsage: Record<string, number> | null;
   subagents: SubagentRun[];
+  /** Agent `ssh_exec` calls, oldest first (see `ssh.exec.*` events). */
+  sshExecs: SshExecRun[];
   compaction: RuntimeCompaction;
   memoryEntries: MemoryEntry[];
   pendingPermissions: RuntimePermission[];
@@ -87,7 +90,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
   return {
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
-    subagents: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
+    subagents: [], sshExecs: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
@@ -612,6 +615,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
       }
     }
   }
+  if (type.startsWith('ssh.exec.')) projectSshExec(state, type.slice('ssh.exec.'.length), payload, event.time);
   if (type === 'memory.updated' || type === 'memory.created') {
     const id = string(payload.memoryId ?? payload.id);
     const content = string(payload.content ?? payload.text);
@@ -813,6 +817,60 @@ function fillEarlierFields<T extends { id: string }>(older: T, newer: T): T {
  * the same id. 'Subagent', '' and 'queued' are placeholders for a run whose
  * start sits below the loaded window, so the paged-in start replaces them;
  * every other field keeps the newer projection's value. */
+function projectSshExec(state: ConversationRuntime, phase: string, payload: RecordValue, time: string): void {
+  const id = string(payload.execId);
+  if (!id || !['started', 'output', 'completed'].includes(phase)) return;
+  const previous = state.sshExecs.find(item => item.id === id);
+  // Output or completion whose start lies below the loaded window still gets
+  // a run; paging in the start fills the command (see mergeEarlierSshExec).
+  const base: SshExecRun = previous ?? { id, host: '', command: '', status: 'running', output: [] };
+  let run: SshExecRun = { ...base,
+    host: string(payload.host) || base.host,
+    turnId: string(payload.turnId) || base.turnId };
+  if (phase === 'started') {
+    run = { ...run, command: string(payload.command) || run.command, cwd: string(payload.cwd) || run.cwd, startedAt: run.startedAt ?? time };
+  } else if (phase === 'output') {
+    const stream = payload.stream === 'stderr' ? 'stderr' : 'stdout';
+    const data = string(payload.data);
+    if (!data) return;
+    run = { ...run, output: appendSshExecOutput(run.output, [{ stream, data }]) };
+  } else {
+    const failure = string(payload.failure);
+    run = { ...run,
+      status: failure === 'cancelled' ? 'cancelled' : failure ? 'failed' : 'completed',
+      ...(typeof payload.exitCode === 'number' ? { exitCode: payload.exitCode } : {}),
+      ...(failure ? { failure: failure as SshExecRun['failure'] } : {}),
+      durationMs: number(payload.durationMs),
+      truncated: payload.truncated === true,
+      outputTruncated: payload.outputTruncated === true,
+      finishedAt: time };
+  }
+  state.sshExecs = previous
+    ? state.sshExecs.map(item => (item.id === id ? run : item))
+    : [...state.sshExecs, run].slice(-SSH_EXEC_RUN_LIMIT);
+}
+
+function appendSshExecOutput(output: SshExecOutputChunk[], chunks: readonly SshExecOutputChunk[]): SshExecOutputChunk[] {
+  const next = [...output];
+  for (const chunk of chunks) {
+    const last = next[next.length - 1];
+    if (last && last.stream === chunk.stream) next[next.length - 1] = { stream: last.stream, data: last.data + chunk.data };
+    else next.push(chunk);
+  }
+  return next;
+}
+
+/** An earlier page holds the start and the first output of a call whose
+ * later output and completion are already loaded. */
+function mergeEarlierSshExec(older: SshExecRun, newer: SshExecRun): SshExecRun {
+  return { ...older, ...newer,
+    host: newer.host || older.host,
+    command: newer.command || older.command,
+    cwd: newer.cwd ?? older.cwd,
+    startedAt: older.startedAt ?? newer.startedAt,
+    output: appendSshExecOutput(older.output, newer.output) };
+}
+
 function mergeEarlierSubagent(older: SubagentRun, newer: SubagentRun): SubagentRun {
   const merged: Record<string, unknown> = { ...newer };
   for (const [key, value] of Object.entries(older)) {
@@ -844,6 +902,18 @@ function partitionSettledSubagents(subagents: SubagentRun[]): SubagentRun[] {
 /** Fold collection entries projected from an earlier page into the loaded
  * collection: known ids merge by `merge`, unseen entries append at the tail
  * to preserve newest-first ordering. */
+/** Earlier calls go first: the collection is oldest-first. */
+function mergeEarlierSshExecs(current: SshExecRun[], earlier: SshExecRun[]): SshExecRun[] {
+  if (!earlier.length) return current;
+  const newerById = new Map(current.map(item => [item.id, item]));
+  const merged = earlier.map(item => {
+    const newer = newerById.get(item.id);
+    return newer ? mergeEarlierSshExec(item, newer) : item;
+  });
+  const known = new Set(earlier.map(item => item.id));
+  return [...merged, ...current.filter(item => !known.has(item.id))].slice(-SSH_EXEC_RUN_LIMIT);
+}
+
 function mergeEarlierCollection<T extends { id: string }>(
   current: T[], earlier: T[], merge: (older: T, newer: T) => T = fillEarlierFields,
 ): T[] {
@@ -910,9 +980,10 @@ export function prependConversationRuntimeEvents(
   const scratch = projectScratchRuntime(previous, normalized);
   const subagents = partitionSettledSubagents(mergeEarlierCollection(previous.subagents, scratch.subagents, mergeEarlierSubagent));
   const memoryEntries = mergeEarlierCollection(previous.memoryEntries, scratch.memoryEntries);
+  const sshExecs = mergeEarlierSshExecs(previous.sshExecs, scratch.sshExecs);
   if (!scratch.timeline.length) {
-    return subagents === previous.subagents && memoryEntries === previous.memoryEntries
-      ? previous : { ...previous, subagents, memoryEntries };
+    return subagents === previous.subagents && memoryEntries === previous.memoryEntries && sshExecs === previous.sshExecs
+      ? previous : { ...previous, subagents, memoryEntries, sshExecs };
   }
   const older = new Map(scratch.timeline.map((entry) => [entry.id, entry]));
   let timeline = previous.timeline;
@@ -936,7 +1007,7 @@ export function prependConversationRuntimeEvents(
     return earlier ? mergeEarlierEntry(earlier, entry) : entry;
   });
   const appended = scratch.timeline.filter((entry) => !loaded.has(entry.id));
-  return { ...previous, ...stream, subagents, memoryEntries,
+  return { ...previous, ...stream, subagents, memoryEntries, sshExecs,
     timeline: dropCoveredAssistantSegmentEntries(dropSupersededProgressEntries([...merged, ...appended])) };
 }
 

@@ -214,3 +214,30 @@ export function remoteParentPath(path: string): string {
 export function remoteBaseName(path: string): string {
   return path.replace(/\/+$/, '').split('/').pop() || path;
 }
+
+/** One agent `ssh_exec` call, rebuilt from `ssh.exec.*` conversation events. */
+export type SshExecOutputChunk = { stream: 'stdout' | 'stderr'; data: string };
+export type SshExecStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type SshExecRun = {
+  /** The backend `execId`. */
+  id: string;
+  host: string;
+  command: string;
+  cwd?: string;
+  status: SshExecStatus;
+  exitCode?: number;
+  failure?: SshFailureKind | 'cancelled';
+  durationMs?: number;
+  /** The agent's result was cut at 256 KiB per stream. */
+  truncated?: boolean;
+  /** The recorded output below stopped at 64 KiB per stream. */
+  outputTruncated?: boolean;
+  /** Output in arrival order; consecutive chunks of one stream are joined. */
+  output: SshExecOutputChunk[];
+  turnId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+
+/** Most recent calls kept per conversation runtime. */
+export const SSH_EXEC_RUN_LIMIT = 50;

@@ -3,6 +3,24 @@ import { buildHttpUrl, utf8ByteLength } from './todex';
 import { ConnectionError } from './connectionError';
 import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
 import { deviceAuthHeaders, deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
+import type {
+  FtpSite,
+  FtpSiteInput,
+  ManagedHost,
+  OpenRemoteConnectionInput,
+  RemoteConnection,
+  RemoteDownload,
+  RemoteEntriesResponse,
+  RemoteFile,
+  SshHost,
+  SshHostImportResult,
+  SshHostsResponse,
+  SshKey,
+  SshKeyGenerateInput,
+  SshKeyImportInput,
+  SshKeysResponse,
+  SshTestResult,
+} from './ssh';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -1028,9 +1046,124 @@ export class V2ApiClient {
     });
   }
 
-  private async request<T>(pathname: string, init: RequestInit = {}): Promise<T> {
+  // SSH hosts, keys and remote files (`/v2/ssh/*`, `/v2/ftp/*`, `/v2/remote/*`).
+  // Secrets (passwords, passphrases, private keys) only travel in request
+  // bodies and are never returned by the backend.
+
+  async listSshHosts(): Promise<SshHostsResponse> {
+    return this.request('/v2/ssh/hosts');
+  }
+
+  async createSshHost(host: ManagedHost): Promise<{ host: SshHost }> {
+    return this.request('/v2/ssh/hosts', { method: 'POST', body: JSON.stringify(host) });
+  }
+
+  async importSshHosts(text: string): Promise<SshHostImportResult> {
+    return this.request('/v2/ssh/hosts/import', { method: 'POST', body: JSON.stringify({ text }) });
+  }
+
+  async updateSshHost(alias: string, host: ManagedHost): Promise<{ host: SshHost }> {
+    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}`, { method: 'PUT', body: JSON.stringify(host) });
+  }
+
+  async deleteSshHost(alias: string): Promise<{ deleted: boolean }> {
+    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}`, { method: 'DELETE' });
+  }
+
+  async setSshHostAgentAccess(alias: string, enabled: boolean): Promise<{ alias: string; agentAccess: boolean }> {
+    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/agent-access`, {
+      method: 'PUT', body: JSON.stringify({ enabled }),
+    });
+  }
+
+  async testSshHost(alias: string): Promise<SshTestResult> {
+    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/test`, { method: 'POST' });
+  }
+
+  /** Closes the shared OpenSSH master connection for the host. */
+  async disconnectSshHost(alias: string): Promise<{ disconnected: boolean }> {
+    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/disconnect`, { method: 'POST' });
+  }
+
+  async createFtpSite(site: FtpSiteInput): Promise<{ site: FtpSite }> {
+    return this.request('/v2/ftp/sites', { method: 'POST', body: JSON.stringify(site) });
+  }
+
+  async updateFtpSite(id: string, site: FtpSiteInput): Promise<{ site: FtpSite }> {
+    return this.request(`/v2/ftp/sites/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(site) });
+  }
+
+  async deleteFtpSite(id: string): Promise<{ deleted: boolean }> {
+    return this.request(`/v2/ftp/sites/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async listSshKeys(): Promise<SshKeysResponse> {
+    return this.request('/v2/ssh/keys');
+  }
+
+  async importSshKey(input: SshKeyImportInput): Promise<{ key: SshKey }> {
+    return this.request('/v2/ssh/keys/import', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async generateSshKey(input: SshKeyGenerateInput): Promise<{ key: SshKey }> {
+    // RSA-4096 generation can take several seconds on slow hosts.
+    return this.request('/v2/ssh/keys/generate', { method: 'POST', body: JSON.stringify(input) }, Math.max(this.timeout, 60_000));
+  }
+
+  async listRemoteConnections(): Promise<{ connections: RemoteConnection[] }> {
+    return this.request('/v2/remote/connections');
+  }
+
+  async openRemoteConnection(input: OpenRemoteConnectionInput): Promise<{ connection: RemoteConnection }> {
+    return this.request('/v2/remote/connections', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async closeRemoteConnection(id: string): Promise<{ closed: boolean }> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async listRemoteEntries(id: string, path: string): Promise<RemoteEntriesResponse> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/entries?${new URLSearchParams({ path })}`);
+  }
+
+  async readRemoteFile(id: string, path: string): Promise<RemoteFile> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/file?${new URLSearchParams({ path })}`);
+  }
+
+  /** Compare-and-save; a stale `expectedText` fails with 409 `CONFLICT`. */
+  async saveRemoteFile(id: string, path: string, text: string, expectedText: string): Promise<{ saved: boolean }> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/file`, {
+      method: 'PUT', body: JSON.stringify({ path, text, expectedText }),
+    });
+  }
+
+  async createRemoteDirectory(id: string, path: string): Promise<{ ok: boolean }> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/mkdir`, { method: 'POST', body: JSON.stringify({ path }) });
+  }
+
+  async renameRemoteEntry(id: string, from: string, to: string): Promise<{ ok: boolean }> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/rename`, { method: 'POST', body: JSON.stringify({ from, to }) });
+  }
+
+  /** Deletes a file or an empty directory. */
+  async deleteRemoteEntry(id: string, path: string): Promise<{ ok: boolean }> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/delete`, { method: 'POST', body: JSON.stringify({ path }) });
+  }
+
+  /** Uploads base64 file content (≤ 100 MiB decoded) to an absolute remote path. */
+  async uploadRemoteFile(id: string, path: string, data: string, overwrite = false, timeoutMs = 10 * 60_000): Promise<void> {
+    await this.request(`/v2/remote/connections/${encodeURIComponent(id)}/upload`, {
+      method: 'PUT', body: JSON.stringify({ path, data, overwrite }),
+    }, timeoutMs);
+  }
+
+  async downloadRemoteFile(id: string, path: string, timeoutMs = 10 * 60_000): Promise<RemoteDownload> {
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/download?${new URLSearchParams({ path })}`, {}, timeoutMs);
+  }
+
+  private async request<T>(pathname: string, init: RequestInit = {}, timeoutMs = this.timeout): Promise<T> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const headers = new Headers(init.headers);
@@ -1061,7 +1194,10 @@ export class V2ApiClient {
         } | null;
         const backendCode = typeof backendError?.code === 'string' ? backendError.code : undefined;
         const backendMessage = typeof backendError?.message === 'string' ? backendError.message : undefined;
-        if (response.status === 401 || backendCode === 'UNAUTHENTICATED' || backendCode === 'UNAUTHORIZED') {
+        // `REMOTE_*` codes are SFTP/FTP login failures on the far side, not a
+        // rejected device signature; they must reach the caller intact.
+        const remoteFailure = backendCode?.startsWith('REMOTE_') === true;
+        if ((response.status === 401 && !remoteFailure) || backendCode === 'UNAUTHENTICATED' || backendCode === 'UNAUTHORIZED') {
           throw ConnectionError.authenticationFailed(response.status);
         }
         throw ConnectionError.apiRequestFailed(
@@ -1080,7 +1216,7 @@ export class V2ApiClient {
       }
 
       if (error instanceof Error && error.name === 'AbortError') {
-        throw ConnectionError.timeout(`Request timeout after ${this.timeout}ms`);
+        throw ConnectionError.timeout(`Request timeout after ${timeoutMs}ms`);
       }
 
       // 网络错误

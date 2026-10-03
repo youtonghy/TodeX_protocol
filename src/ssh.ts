@@ -163,10 +163,10 @@ export type RemoteFile = {
   dataUrl?: string;
 };
 
-export type RemoteDownload = { name: string; sizeBytes: number; data: string };
-
 /** Per-file transfer ceiling for remote upload and download. */
 export const REMOTE_TRANSFER_MAX_BYTES = 100 * 1024 * 1024;
+/** Largest raw body the backend accepts for one upload request. */
+export const REMOTE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 export const REMOTE_AUTH_FAILED = 'REMOTE_AUTH_FAILED';
 export const REMOTE_HOST_KEY_UNVERIFIED = 'REMOTE_HOST_KEY_UNVERIFIED';

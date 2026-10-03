@@ -9,7 +9,6 @@ import type {
   ManagedHost,
   OpenRemoteConnectionInput,
   RemoteConnection,
-  RemoteDownload,
   RemoteEntriesResponse,
   RemoteFile,
   SshHost,
@@ -1151,27 +1150,54 @@ export class V2ApiClient {
   }
 
   /** Uploads base64 file content (≤ 100 MiB decoded) to an absolute remote path. */
-  async uploadRemoteFile(id: string, path: string, data: string, overwrite = false, timeoutMs = 10 * 60_000): Promise<void> {
-    await this.request(`/v2/remote/connections/${encodeURIComponent(id)}/upload`, {
-      method: 'PUT', body: JSON.stringify({ path, data, overwrite }),
+  /**
+   * Writes one chunk of a file as raw bytes. `offset` 0 creates the file
+   * (409 if it exists and `overwrite` is false); later chunks must start at
+   * the remote file's current size. Returns the size after the write.
+   */
+  async uploadRemoteChunk(
+    id: string,
+    path: string,
+    offset: number,
+    bytes: Uint8Array,
+    overwrite = false,
+    timeoutMs = 10 * 60_000,
+  ): Promise<{ sizeBytes: number }> {
+    const query = new URLSearchParams({ path, offset: String(offset), overwrite: String(overwrite) });
+    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/upload?${query}`, {
+      method: 'PUT', body: bytes as Uint8Array<ArrayBuffer>,
     }, timeoutMs);
   }
 
-  async downloadRemoteFile(id: string, path: string, timeoutMs = 10 * 60_000): Promise<RemoteDownload> {
-    return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/download?${new URLSearchParams({ path })}`, {}, timeoutMs);
+  /** Raw file bytes (at most `REMOTE_TRANSFER_MAX_BYTES`). */
+  async downloadRemoteFile(id: string, path: string, timeoutMs = 10 * 60_000): Promise<Uint8Array> {
+    return this.request(
+      `/v2/remote/connections/${encodeURIComponent(id)}/download?${new URLSearchParams({ path })}`,
+      {},
+      timeoutMs,
+      'bytes',
+    );
   }
 
-  private async request<T>(pathname: string, init: RequestInit = {}, timeoutMs = this.timeout): Promise<T> {
+  private async request<T>(
+    pathname: string,
+    init: RequestInit = {},
+    timeoutMs = this.timeout,
+    responseType: 'json' | 'bytes' = 'json',
+  ): Promise<T> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const headers = new Headers(init.headers);
-      headers.set('Accept', 'application/json');
-      if (init.body) headers.set('Content-Type', 'application/json');
+      // Raw byte bodies (remote uploads) are signed as-is; everything else
+      // is JSON text.
+      const rawBody = init.body instanceof Uint8Array ? init.body : undefined;
+      headers.set('Accept', responseType === 'bytes' ? 'application/octet-stream' : 'application/json');
+      if (init.body) headers.set('Content-Type', rawBody ? 'application/octet-stream' : 'application/json');
       if (this.authToken) headers.set('Authorization', `Bearer ${this.authToken}`);
       if (this.device) {
-        const body = typeof init.body === 'string' ? new TextEncoder().encode(init.body) : new Uint8Array();
+        const body = rawBody ?? (typeof init.body === 'string' ? new TextEncoder().encode(init.body) : new Uint8Array());
         for (const [name, value] of Object.entries(
           deviceAuthHeaders(this.device, init.method ?? 'GET', pathname, body),
         )) {
@@ -1207,6 +1233,7 @@ export class V2ApiClient {
         );
       }
 
+      if (responseType === 'bytes') return new Uint8Array(await response.arrayBuffer()) as T;
       return await response.json() as T;
     } catch (error: unknown) {
       clearTimeout(timeoutId);

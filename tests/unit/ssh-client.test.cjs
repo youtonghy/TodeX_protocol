@@ -10,7 +10,12 @@ const ssh = require(path.join(compiledDir, 'ssh.js'));
 function recordingClient(responses = []) {
   const calls = [];
   const fetchImpl = async (url, init) => {
-    calls.push({ url: new URL(url), method: init.method ?? 'GET', body: init.body ? JSON.parse(init.body) : undefined });
+    calls.push({
+      url: new URL(url),
+      method: init.method ?? 'GET',
+      headers: new Headers(init.headers),
+      body: init.body instanceof Uint8Array ? init.body : init.body ? JSON.parse(init.body) : undefined,
+    });
     const next = responses.shift() ?? { status: 200, body: {} };
     return new Response(JSON.stringify(next.body), { status: next.status, headers: { 'Content-Type': 'application/json' } });
   };
@@ -75,7 +80,7 @@ test('remote connection file operations encode ids and query paths', async () =>
   await api.createRemoteDirectory('c 1', '/srv/new');
   await api.renameRemoteEntry('c 1', '/srv/a', '/srv/b');
   await api.deleteRemoteEntry('c 1', '/srv/b');
-  await api.uploadRemoteFile('c 1', '/srv/up.bin', 'AAEC', true);
+  await api.uploadRemoteChunk('c 1', '/srv/up.bin', 8, new Uint8Array([0, 1, 2]), true);
   await api.downloadRemoteFile('c 1', '/srv/up.bin');
   await api.closeRemoteConnection('c 1');
   assert.deepEqual(calls.map((call) => `${call.method} ${call.url.pathname}`), [
@@ -96,7 +101,11 @@ test('remote connection file operations encode ids and query paths', async () =>
   assert.equal(calls[3].url.searchParams.get('path'), '/srv/a&b.txt');
   assert.deepEqual(calls[4].body, { path: '/srv/a.txt', text: 'new', expectedText: 'old' });
   assert.deepEqual(calls[6].body, { from: '/srv/a', to: '/srv/b' });
-  assert.deepEqual(calls[8].body, { path: '/srv/up.bin', data: 'AAEC', overwrite: true });
+  assert.deepEqual([...calls[8].body], [0, 1, 2]);
+  assert.equal(calls[8].headers.get('Content-Type'), 'application/octet-stream');
+  assert.equal(calls[8].url.searchParams.get('path'), '/srv/up.bin');
+  assert.equal(calls[8].url.searchParams.get('offset'), '8');
+  assert.equal(calls[8].url.searchParams.get('overwrite'), 'true');
   assert.equal(calls[9].url.searchParams.get('path'), '/srv/up.bin');
 });
 

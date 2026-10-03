@@ -205,7 +205,9 @@ export function applyPairingToSettings(
   };
 }
 
-export function createTransportCryptoSession(settings: ConnectionSettings): TransportCryptoSession | null {
+export function createTransportCryptoSession(
+  settings: Pick<ConnectionSettings, 'encryptionProtocol' | 'encryptionPublicKey'> & Partial<ConnectionSettings>,
+): TransportCryptoSession | null {
   if (settings.encryptionProtocol === 'none') {
     return null;
   }

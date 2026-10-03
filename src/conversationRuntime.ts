@@ -4,6 +4,7 @@ import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryE
 import { classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 import { SSH_EXEC_RUN_LIMIT, type SshExecOutputChunk, type SshExecRun } from './ssh';
+import type { DesktopBrowserActionEvent } from './agentDesktop';
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue => value && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};
@@ -57,6 +58,9 @@ export type ConversationRuntime = {
   subagents: SubagentRun[];
   /** Agent `ssh_exec` calls, oldest first (see `ssh.exec.*` events). */
   sshExecs: SshExecRun[];
+  /** Agent desktop browser: whether the conversation holds a grant, and its
+   * newest actions (`desktop.browser.*`). History pages do not extend it. */
+  desktopBrowser: DesktopBrowserState;
   compaction: RuntimeCompaction;
   memoryEntries: MemoryEntry[];
   pendingPermissions: RuntimePermission[];
@@ -90,7 +94,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
   return {
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
-    subagents: [], sshExecs: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
+    subagents: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
@@ -616,6 +620,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
     }
   }
   if (type.startsWith('ssh.exec.')) projectSshExec(state, type.slice('ssh.exec.'.length), payload, event.time);
+  if (type === 'desktop.browser.action' || type === 'desktop.browser.grant') projectDesktopBrowser(state, type, payload, event.time);
   if (type === 'memory.updated' || type === 'memory.created') {
     const id = string(payload.memoryId ?? payload.id);
     const content = string(payload.content ?? payload.text);
@@ -817,6 +822,33 @@ function fillEarlierFields<T extends { id: string }>(older: T, newer: T): T {
  * the same id. 'Subagent', '' and 'queued' are placeholders for a run whose
  * start sits below the loaded window, so the paged-in start replaces them;
  * every other field keeps the newer projection's value. */
+export type DesktopBrowserState = {
+  granted: boolean;
+  deviceName?: string;
+  actions: Array<DesktopBrowserActionEvent & { time: string }>;
+};
+
+/** Newest `desktop.browser.action` events kept per conversation. */
+export const DESKTOP_BROWSER_ACTION_LIMIT = 50;
+
+function projectDesktopBrowser(state: ConversationRuntime, type: string, payload: RecordValue, time: string): void {
+  if (type === 'desktop.browser.grant') {
+    const granted = payload.status === 'granted';
+    state.desktopBrowser = { ...state.desktopBrowser, granted, deviceName: granted ? string(payload.deviceName) || undefined : undefined };
+    return;
+  }
+  const actionId = string(payload.actionId);
+  if (!actionId || state.desktopBrowser.actions.some(action => action.actionId === actionId)) return;
+  const action = { ...(payload as unknown as DesktopBrowserActionEvent), actionId, time };
+  state.desktopBrowser = {
+    ...state.desktopBrowser,
+    // Acting implies a grant even when the grant event lies below the window.
+    granted: true,
+    deviceName: string(payload.deviceName) || state.desktopBrowser.deviceName,
+    actions: [...state.desktopBrowser.actions, action].slice(-DESKTOP_BROWSER_ACTION_LIMIT),
+  };
+}
+
 function projectSshExec(state: ConversationRuntime, phase: string, payload: RecordValue, time: string): void {
   const id = string(payload.execId);
   if (!id || !['started', 'output', 'completed'].includes(phase)) return;

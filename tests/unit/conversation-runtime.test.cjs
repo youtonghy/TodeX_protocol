@@ -790,3 +790,25 @@ test('ssh_exec runs are capped and cancellation is its own status', () => {
   assert.equal(state.sshExecs[0].id, 'x11');
   assert.equal(state.sshExecs.at(-1).status, 'cancelled');
 });
+
+test('desktop browser grants and actions collect without touching the timeline', () => {
+  const action = (sequence, actionId, extra = {}) => event(sequence, 'desktop.browser.action', {
+    actionId, tool: 'browser_snapshot', ok: true, summary: 'snapshot', deviceId: 'dev_desk', deviceName: 'Desk', ...extra,
+  });
+  const state = apply(empty(),
+    event(1, 'desktop.browser.grant', { status: 'granted', deviceId: 'dev_desk', deviceName: 'Desk' }),
+    action(2, 'a', { url: 'http://localhost:5173/', shotId: 'shot_1' }),
+    action(3, 'a'),
+    action(4, 'b', { ok: false, error: { code: 'NO_TAB', message: 'x' } }),
+  ).state;
+  assert.equal(state.timeline.length, 0);
+  assert.equal(state.desktopBrowser.granted, true);
+  assert.equal(state.desktopBrowser.deviceName, 'Desk');
+  assert.deepEqual(state.desktopBrowser.actions.map(item => [item.actionId, item.ok, item.shotId]), [['a', true, 'shot_1'], ['b', false, undefined]]);
+  const revoked = apply(state, event(5, 'desktop.browser.grant', { status: 'revoked', reason: 'user' })).state;
+  assert.equal(revoked.desktopBrowser.granted, false);
+  assert.equal(revoked.desktopBrowser.actions.length, 2);
+  const many = apply(empty(), ...Array.from({ length: runtime.DESKTOP_BROWSER_ACTION_LIMIT + 5 }, (_, i) => action(i + 1, `x${i}`))).state;
+  assert.equal(many.desktopBrowser.actions.length, runtime.DESKTOP_BROWSER_ACTION_LIMIT);
+  assert.equal(many.desktopBrowser.actions[0].actionId, 'x5');
+});

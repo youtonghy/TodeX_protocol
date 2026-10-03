@@ -1090,6 +1090,9 @@ export function classifyV2ConversationEvent(
   // Agent SSH commands already show as the agent's own MCP tool call; their
   // live output belongs to the side-panel view (ConversationRuntime.sshExecs).
   if (type.startsWith('ssh.exec.')) return null;
+  // Desktop browser actions also show as the MCP tool call; the browser view
+  // follows them in the Workbench (ConversationRuntime.desktopBrowser).
+  if (type.startsWith('desktop.browser.')) return null;
   const eventId = readString(eventRecord, ['eventId', 'event_id', 'id']) || `sequence-${readNumber(eventRecord, ['sequence'], 0)}`;
   const conversationId = readString(eventRecord, ['conversationId', 'conversation_id']);
   const content = conversationContent(payload, message, delta);

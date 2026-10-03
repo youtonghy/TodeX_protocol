@@ -1105,7 +1105,7 @@ export class V2ApiClient {
     return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}`, { method: 'DELETE' });
   }
 
-  /** `GET /v2/agent-desktop`; a 404 (`ConnectionError` with status 404) means the daemon predates desktop tools. */
+  /** `GET /v2/agent-desktop`; a 404 (`ConnectionError.httpStatus`) means the daemon predates desktop tools. */
   async getAgentDesktop(): Promise<AgentDesktopSettings> {
     return this.request('/v2/agent-desktop');
   }

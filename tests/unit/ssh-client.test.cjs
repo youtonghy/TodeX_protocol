@@ -141,3 +141,17 @@ test('SSH helpers format endpoints, validate key names and join POSIX paths', ()
   assert.equal(ssh.remoteParentPath('/a.txt'), '/');
   assert.equal(ssh.remoteBaseName('/srv/dir/'), 'dir');
 });
+
+test('agent desktop routes use the contract paths, methods and bodies', async () => {
+  const { api, calls } = recordingClient();
+  await api.getAgentDesktop();
+  await api.setAgentDesktopEnabled(true);
+  await api.revokeAgentDesktop('conv/1');
+  await api.getAgentShot('conv/1', 'shot_1');
+  assert.deepEqual(calls.map(call => [call.method, call.url.pathname, call.body]), [
+    ['GET', '/v2/agent-desktop', undefined],
+    ['PUT', '/v2/agent-desktop', { enabled: true }],
+    ['DELETE', '/v2/conversations/conv%2F1/agent-desktop', undefined],
+    ['GET', '/v2/conversations/conv%2F1/agent-shots/shot_1', undefined],
+  ]);
+});

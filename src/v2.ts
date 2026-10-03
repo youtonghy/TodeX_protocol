@@ -20,6 +20,7 @@ import type {
   SshKeysResponse,
   SshTestResult,
 } from './ssh';
+import type { AgentDesktopSettings, AgentShot } from './agentDesktop';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -1102,6 +1103,24 @@ export class V2ApiClient {
 
   async deleteSshHost(alias: string): Promise<{ deleted: boolean }> {
     return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}`, { method: 'DELETE' });
+  }
+
+  /** `GET /v2/agent-desktop`; a 404 (`ConnectionError` with status 404) means the daemon predates desktop tools. */
+  async getAgentDesktop(): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop');
+  }
+
+  async setAgentDesktopEnabled(enabled: boolean): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ enabled }) });
+  }
+
+  /** Stops the agent's desktop browser for one conversation; its next tool call asks again. */
+  async revokeAgentDesktop(conversationId: string): Promise<{ conversationId: string; revoked: boolean }> {
+    return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop`, { method: 'DELETE' });
+  }
+
+  async getAgentShot(conversationId: string, shotId: string): Promise<AgentShot> {
+    return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-shots/${encodeURIComponent(shotId)}`);
   }
 
   async setSshHostAgentAccess(alias: string, enabled: boolean): Promise<{ alias: string; agentAccess: boolean }> {

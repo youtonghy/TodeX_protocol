@@ -290,6 +290,29 @@ export function permissionOptions(request: PendingRequest): PermissionOption[] {
   return options;
 }
 
+export type PermissionDeviceGate =
+  | { allowed: true }
+  | { allowed: false; deviceNames: string[] };
+
+/**
+ * Whether this device may answer `request`. Requests that name their
+ * answering devices (`allowedDeviceIds`) are rejected by the daemon from any
+ * other device; `details.executors` supplies display names when present.
+ */
+export function permissionDeviceGate(request: PendingRequest, deviceId: string | undefined): PermissionDeviceGate {
+  const raw = request.data.allowedDeviceIds;
+  if (!Array.isArray(raw)) return { allowed: true };
+  const allowed = raw.filter((value): value is string => typeof value === 'string');
+  if (deviceId && allowed.includes(deviceId)) return { allowed: true };
+  const details = isObject(request.data.details) ? request.data.details : {};
+  const executors = Array.isArray(details.executors) ? details.executors : [];
+  const deviceNames = executors
+    .filter((executor): executor is Record<string, unknown> => isObject(executor)
+      && typeof executor.deviceId === 'string' && allowed.includes(executor.deviceId))
+    .map(executor => (typeof executor.deviceName === 'string' && executor.deviceName.trim()) || String(executor.deviceId));
+  return { allowed: false, deviceNames: [...new Set(deviceNames)] };
+}
+
 export function permissionActions(request: PendingRequest): Array<boolean | PermissionOption> {
   if (request.data.options === undefined) return [true, false];
   const options = permissionOptions(request);

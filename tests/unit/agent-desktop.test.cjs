@@ -20,3 +20,20 @@ test('tunnel flow-control constants keep frames far below the socket limit', () 
   assert.ok(encodedChunk < 64 * 1024);
   assert.ok(desktop.TUNNEL_WINDOW_BYTES >= desktop.TUNNEL_CHUNK_BYTES * 4);
 });
+
+test('device-restricted permissions are answerable only on the named devices', () => {
+  const { permissionDeviceGate } = require(path.join(compiledDir, 'todex.js'));
+  const request = (data) => ({ requestId: 'p', requestType: 'permission', title: 't', event: {}, data });
+  assert.deepEqual(permissionDeviceGate(request({ options: [] }), undefined), { allowed: true });
+  const gated = request({
+    allowedDeviceIds: ['dev_desk', 'dev_other'],
+    details: { executors: [
+      { deviceId: 'dev_desk', deviceName: 'Studio Mac' },
+      { deviceId: 'dev_other' },
+      { deviceId: 'dev_unlisted', deviceName: 'Nope' },
+    ] },
+  });
+  assert.deepEqual(permissionDeviceGate(gated, 'dev_desk'), { allowed: true });
+  assert.deepEqual(permissionDeviceGate(gated, 'dev_phone'), { allowed: false, deviceNames: ['Studio Mac', 'dev_other'] });
+  assert.deepEqual(permissionDeviceGate(request({ allowedDeviceIds: ['dev_desk'] }), undefined), { allowed: false, deviceNames: [] });
+});

@@ -50,18 +50,18 @@ test('chat suggestions list other unarchived conversations of the workspace', ()
   assert.deepEqual(menu.buildChatReferenceSuggestions('', conversations, 'w', 'current', 'New').map((item) => item.label), ['Fix the Build', 'New']);
 });
 
-test('ssh suggestions match alias or resolved endpoint and open a terminal', () => {
+test('ssh suggestions list only agent-access hosts and insert an @ssh: mention', () => {
   const hosts = [
     { alias: 'prod', source: 'sshConfig', agentAccess: false, resolved: { hostName: 'prod.internal', user: 'deploy', identityFiles: [] } },
     { alias: 'dev-vm', source: 'managed', agentAccess: true, resolved: { hostName: '10.0.0.2', user: 'me', port: 2222, identityFiles: [] } },
   ];
   assert.deepEqual(menu.buildSshReferenceSuggestions('', hosts).map((item) => [item.label, item.description]), [
-    ['prod', 'deploy@prod.internal'],
     ['dev-vm', 'me@10.0.0.2:2222'],
   ]);
   assert.deepEqual(menu.buildSshReferenceSuggestions('10.0', hosts).map((item) => item.label), ['dev-vm']);
-  const prod = menu.buildSshReferenceSuggestions('prod', hosts)[0];
-  assert.deepEqual(prod.action, { kind: 'ssh', host: 'prod' });
+  const dev = menu.buildSshReferenceSuggestions('dev', hosts)[0];
+  assert.deepEqual(dev.action, { kind: 'insert', text: '@ssh:dev-vm ' });
+  assert.deepEqual(menu.buildSshReferenceSuggestions('prod', hosts), []);
   assert.deepEqual(menu.buildSshReferenceSuggestions('none', hosts), []);
 });
 

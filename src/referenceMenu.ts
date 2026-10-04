@@ -38,9 +38,7 @@ export type ReferenceSuggestion = {
     /** Replace the trigger with this text (type rows, files, folders). */
     | { kind: 'insert'; text: string }
     | { kind: 'conversation'; conversationId: string; title: string }
-    | { kind: 'capability'; item: CapabilitySuggestion }
-    /** Drop the trigger and open an SSH terminal tab for the alias. */
-    | { kind: 'ssh'; host: string };
+    | { kind: 'capability'; item: CapabilitySuggestion };
 };
 
 const isReferenceType = (value: string): value is ReferenceType =>
@@ -116,19 +114,22 @@ export function buildChatReferenceSuggestions(
     });
 }
 
-/** `@ssh:` lists backend SSH hosts; picking one opens a terminal, it never
- * inserts text into the prompt. Matches on the alias or the resolved
- * `user@host:port` endpoint. */
+/** `@ssh:` lists the backend SSH hosts the user allowed agents to call
+ * (`agentAccess`); hosts without it are never offered. Picking one inserts an
+ * `@ssh:<alias>` mention, and the agent drives the host through its `ssh_exec`
+ * tool — the resulting `ssh.exec.*` activity shows in read-only tabs. Matches
+ * on the alias or the resolved `user@host:port` endpoint. */
 export function buildSshReferenceSuggestions(query: string, hosts: readonly SshHost[]): ReferenceSuggestion[] {
   const needle = query.toLowerCase();
   return hosts
+    .filter((host) => host.agentAccess)
     .filter((host) => !needle || host.alias.toLowerCase().includes(needle) || sshHostEndpoint(host).toLowerCase().includes(needle))
     .slice(0, REFERENCE_SUGGESTION_LIMIT)
     .map((host) => ({
       id: `ssh:${host.alias}`,
       label: host.alias,
       description: sshHostEndpoint(host),
-      action: { kind: 'ssh' as const, host: host.alias },
+      action: { kind: 'insert' as const, text: `@ssh:${host.alias} ` },
     }));
 }
 

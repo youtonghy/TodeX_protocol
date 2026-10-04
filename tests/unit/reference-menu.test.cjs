@@ -18,7 +18,7 @@ test('parses the menu stage from the text after @', () => {
 test('lists types in a fixed order, narrowed by prefix', () => {
   const describe = (type) => `d-${type}`;
   assert.deepEqual(menu.buildReferenceTypeSuggestions('', describe).map((item) => item.label),
-    ['@file:', '@folder:', '@chat:', '@skill:', '@mcp:']);
+    ['@file:', '@folder:', '@chat:', '@skill:', '@mcp:', '@ssh:']);
   assert.deepEqual(menu.buildReferenceTypeSuggestions('F', describe).map((item) => item.action.text), ['@file:', '@folder:']);
   assert.deepEqual(menu.buildReferenceTypeSuggestions('src/', describe), []);
   assert.equal(menu.buildReferenceTypeSuggestions('sk', describe)[0].description, 'd-skill');
@@ -48,6 +48,21 @@ test('chat suggestions list other unarchived conversations of the workspace', ()
     { id: 'chat:a', label: 'Fix the Build', description: 'line one line two', action: { kind: 'conversation', conversationId: 'a', title: 'Fix the Build' } },
   ]);
   assert.deepEqual(menu.buildChatReferenceSuggestions('', conversations, 'w', 'current', 'New').map((item) => item.label), ['Fix the Build', 'New']);
+});
+
+test('ssh suggestions match alias or resolved endpoint and open a terminal', () => {
+  const hosts = [
+    { alias: 'prod', source: 'sshConfig', agentAccess: false, resolved: { hostName: 'prod.internal', user: 'deploy', identityFiles: [] } },
+    { alias: 'dev-vm', source: 'managed', agentAccess: true, resolved: { hostName: '10.0.0.2', user: 'me', port: 2222, identityFiles: [] } },
+  ];
+  assert.deepEqual(menu.buildSshReferenceSuggestions('', hosts).map((item) => [item.label, item.description]), [
+    ['prod', 'deploy@prod.internal'],
+    ['dev-vm', 'me@10.0.0.2:2222'],
+  ]);
+  assert.deepEqual(menu.buildSshReferenceSuggestions('10.0', hosts).map((item) => item.label), ['dev-vm']);
+  const prod = menu.buildSshReferenceSuggestions('prod', hosts)[0];
+  assert.deepEqual(prod.action, { kind: 'ssh', host: 'prod' });
+  assert.deepEqual(menu.buildSshReferenceSuggestions('none', hosts), []);
 });
 
 test('capability suggestions keep one kind', () => {

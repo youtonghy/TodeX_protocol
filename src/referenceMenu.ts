@@ -1,4 +1,5 @@
 import type { CapabilitySuggestion } from './capabilityCatalog';
+import { sshHostEndpoint, type SshHost } from './ssh';
 
 /**
  * The composer `@` menu is two-level: `@` lists reference types, `@type:query`
@@ -6,7 +7,7 @@ import type { CapabilitySuggestion } from './capabilityCatalog';
  * inserts the same text or chip as before (`@path`, a skill chip, `#mcp`, a
  * conversation export), so prompts sent to agents keep their format.
  */
-export const REFERENCE_TYPES = ['file', 'folder', 'chat', 'skill', 'mcp'] as const;
+export const REFERENCE_TYPES = ['file', 'folder', 'chat', 'skill', 'mcp', 'ssh'] as const;
 export type ReferenceType = (typeof REFERENCE_TYPES)[number];
 
 export const REFERENCE_SUGGESTION_LIMIT = 8;
@@ -37,7 +38,9 @@ export type ReferenceSuggestion = {
     /** Replace the trigger with this text (type rows, files, folders). */
     | { kind: 'insert'; text: string }
     | { kind: 'conversation'; conversationId: string; title: string }
-    | { kind: 'capability'; item: CapabilitySuggestion };
+    | { kind: 'capability'; item: CapabilitySuggestion }
+    /** Drop the trigger and open an SSH terminal tab for the alias. */
+    | { kind: 'ssh'; host: string };
 };
 
 const isReferenceType = (value: string): value is ReferenceType =>
@@ -111,6 +114,22 @@ export function buildChatReferenceSuggestions(
         action: { kind: 'conversation', conversationId: item.id, title },
       };
     });
+}
+
+/** `@ssh:` lists backend SSH hosts; picking one opens a terminal, it never
+ * inserts text into the prompt. Matches on the alias or the resolved
+ * `user@host:port` endpoint. */
+export function buildSshReferenceSuggestions(query: string, hosts: readonly SshHost[]): ReferenceSuggestion[] {
+  const needle = query.toLowerCase();
+  return hosts
+    .filter((host) => !needle || host.alias.toLowerCase().includes(needle) || sshHostEndpoint(host).toLowerCase().includes(needle))
+    .slice(0, REFERENCE_SUGGESTION_LIMIT)
+    .map((host) => ({
+      id: `ssh:${host.alias}`,
+      label: host.alias,
+      description: sshHostEndpoint(host),
+      action: { kind: 'ssh' as const, host: host.alias },
+    }));
 }
 
 /** `items` should come from `buildCapabilitySuggestions` with a limit large

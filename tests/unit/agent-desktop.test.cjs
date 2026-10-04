@@ -37,3 +37,11 @@ test('device-restricted permissions are answerable only on the named devices', (
   assert.deepEqual(permissionDeviceGate(gated, 'dev_phone'), { allowed: false, deviceNames: ['Studio Mac', 'dev_other'] });
   assert.deepEqual(permissionDeviceGate(request({ allowedDeviceIds: ['dev_desk'] }), undefined), { allowed: false, deviceNames: [] });
 });
+
+test('computer tool names are MCP- and model-API-safe', () => {
+  for (const tool of desktop.AGENT_COMPUTER_TOOLS) {
+    assert.match(tool, /^[a-zA-Z0-9_-]{1,64}$/);
+    assert.ok(desktop.isAgentComputerTool(tool));
+    assert.equal(desktop.isAgentBrowserTool(tool), false);
+  }
+});

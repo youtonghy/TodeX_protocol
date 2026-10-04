@@ -12,7 +12,8 @@
 /** MCP server name agents see; tools appear as `mcp__todex_desktop__browser_open`. */
 export const AGENT_DESKTOP_SERVER = 'todex_desktop';
 
-export type ExecutorCapability = 'browser';
+/** `browser`: agent browser tabs. `screen`: Computer Use (macOS 14+, both switches on). */
+export type ExecutorCapability = 'browser' | 'screen';
 
 export const AGENT_BROWSER_TOOLS = [
   'browser_open',
@@ -22,6 +23,9 @@ export const AGENT_BROWSER_TOOLS = [
   'browser_close',
 ] as const;
 export type AgentBrowserTool = typeof AGENT_BROWSER_TOOLS[number];
+
+export const AGENT_COMPUTER_TOOLS = ['computer_observe', 'computer_act', 'computer_done'] as const;
+export type AgentComputerTool = typeof AGENT_COMPUTER_TOOLS[number];
 
 export type ExecutorInfo = {
   executorId: number;
@@ -35,6 +39,8 @@ export type ExecutorInfo = {
 export type AgentDesktopSettings = {
   /** Agents get the `todex_desktop` MCP server. Off by default. */
   enabled: boolean;
+  /** Agents also get the `computer_*` tools (needs `enabled`). Off by default. */
+  computerEnabled: boolean;
   executors: ExecutorInfo[];
 };
 
@@ -54,7 +60,12 @@ export type ExecutorResultPayload =
   | { invokeId: string; ok: true; result: AgentBrowserResult }
   | { invokeId: string; ok: false; error: ExecutorFailure };
 
-export type ExecutorFailure = { code: ExecutorErrorCode | string; message: string };
+export type ExecutorFailure = {
+  code: ExecutorErrorCode | string;
+  message: string;
+  /** `APP_CONFIRM`: `{ bundleId, name }` of the app awaiting approval. */
+  detail?: Record<string, unknown>;
+};
 
 /**
  * - `NAVIGATION_BLOCKED`: top-level navigation outside loopback.
@@ -64,6 +75,12 @@ export type ExecutorFailure = { code: ExecutorErrorCode | string; message: strin
  * - `SENSITIVE_ACTION`: the action needs the user's confirmation; the daemon
  *   asks and re-invokes with `confirmed: true`.
  * - `TUNNEL_FAILED`: the daemon's port could not be forwarded.
+ * - `USER_ACTIVE`: the user is using the pointer; retry shortly.
+ * - `TARGET_BLOCKED`: the target app or window may never be controlled.
+ * - `APP_CONFIRM`: first action in this app; the daemon asks and re-invokes
+ *   with the app in `allowedApps`.
+ * - `PERMISSION_REQUIRED`: Screen Recording or Accessibility is not granted.
+ * - `SCREEN_BUSY`: another conversation controls this screen (daemon).
  */
 export type ExecutorErrorCode =
   | 'NAVIGATION_BLOCKED'
@@ -72,6 +89,11 @@ export type ExecutorErrorCode =
   | 'TAB_LIMIT'
   | 'SENSITIVE_ACTION'
   | 'TUNNEL_FAILED'
+  | 'USER_ACTIVE'
+  | 'TARGET_BLOCKED'
+  | 'APP_CONFIRM'
+  | 'PERMISSION_REQUIRED'
+  | 'SCREEN_BUSY'
   | 'INVALID_ARGUMENT'
   | 'EXECUTOR_FAILED';
 
@@ -83,8 +105,8 @@ export type ExecutorInvokePayload = {
   conversationId: string;
   /** Selects the browser partition; `id` is absent for ad-hoc workspaces. */
   workspace: { id?: string; path: string };
-  tool: AgentBrowserTool;
-  args: AgentBrowserArgs;
+  tool: AgentBrowserTool | AgentComputerTool;
+  args: AgentBrowserArgs | ComputerArgs;
   timeoutMs: number;
 };
 
@@ -92,7 +114,11 @@ export type ExecutorInvokePayload = {
 export type ExecutorCancelPayload = { invokeId: string };
 
 /** `{ type: 'executor.release', payload: { conversationId } }`: access revoked or conversation gone; close its tab. */
-export type ExecutorReleasePayload = { conversationId: string };
+export type ExecutorReleasePayload = {
+  conversationId: string;
+  /** Only that capability's state (tab, or screen control); absent: all. */
+  capability?: ExecutorCapability;
+};
 
 // ---- Tool arguments and results -------------------------------------------
 
@@ -150,6 +176,81 @@ export type BrowserActResult = BrowserPageResult & { detail?: string };
 
 export type AgentBrowserResult = BrowserPageResult | BrowserSnapshotResult | BrowserActResult | Record<string, never>;
 
+// ---- Computer Use ------------------------------------------------------------
+
+export type ComputerObserveArgs = {
+  /** Bundle id or name; default: the frontmost app. */
+  app?: string;
+  /** Window id from `windows`; default: the app's front window. */
+  window?: number;
+  /** Capture this display (index in `displays`) instead of the window. */
+  display?: number;
+  screenshot?: boolean;
+};
+
+export type ComputerActAction =
+  | 'click' | 'double_click' | 'right_click' | 'hover' | 'drag' | 'scroll'
+  | 'type' | 'key' | 'wait' | 'open_app' | 'focus_window';
+
+export type ComputerActArgs = {
+  action: ComputerActAction;
+  /** Element from the latest `computer_observe` (`e12`): acts in the background. */
+  ref?: string;
+  /** Screenshot pixel coordinates of the latest observation: moves the pointer. */
+  x?: number;
+  y?: number;
+  toX?: number;
+  toY?: number;
+  /** `type`: text to insert. */
+  text?: string;
+  /** `key`: chord such as `cmd+c`, `enter`, `shift+tab`. */
+  keys?: string;
+  /** `open_app` / `focus_window`: bundle id or name. */
+  app?: string;
+  window?: number;
+  deltaX?: number;
+  deltaY?: number;
+  ms?: number;
+  /** Set by the daemon: bundle ids approved for this conversation. */
+  allowedApps?: string[];
+  /** Set by the daemon after the user confirmed a `SENSITIVE_ACTION`. */
+  confirmed?: boolean;
+};
+
+export type ComputerDoneArgs = Record<string, never>;
+export type ComputerArgs = ComputerObserveArgs | ComputerActArgs | ComputerDoneArgs;
+
+export type ComputerApp = { name: string; bundleId: string; pid: number };
+export type ComputerWindow = { id: number; app: string; bundleId: string; title: string };
+export type ComputerDisplay = { index: number; x: number; y: number; width: number; height: number; scale: number };
+
+/** Screenshot plus the mapping from its pixels to global screen points. */
+export type ComputerScreenshot = BrowserScreenshot & {
+  /** Global point of pixel (0, 0). */
+  originX: number;
+  originY: number;
+  /** Screen points per screenshot pixel. */
+  pointsPerPixel: number;
+};
+
+export type ComputerObserveResult = {
+  app: ComputerApp;
+  window?: ComputerWindow & { x: number; y: number; width: number; height: number };
+  windows: ComputerWindow[];
+  displays: ComputerDisplay[];
+  /** Indented accessibility tree; actionable nodes carry `[ref=eN]`. */
+  tree: string;
+  truncated: boolean;
+  screenshot?: ComputerScreenshot;
+};
+
+export type ComputerActResult = {
+  app: ComputerApp;
+  /** `background`: delivered to the element; `pointer`: moved the pointer. */
+  path: 'background' | 'pointer' | 'none';
+  detail?: string;
+};
+
 // ---- Tunnel frames (both directions, no ids) ------------------------------
 
 /** Client → daemon: a local TCP connection was accepted for `port` on the daemon host. */
@@ -199,6 +300,36 @@ export type DesktopBrowserGrantEvent = {
 export const DESKTOP_BROWSER_GRANT_KIND = 'desktop_browser';
 /** `permission.requested.kind` of a single sensitive action. */
 export const DESKTOP_BROWSER_ACTION_KIND = 'desktop_browser_action';
+/** First Computer Use in a conversation; executor devices only. */
+export const DESKTOP_COMPUTER_GRANT_KIND = 'desktop_computer';
+/** First action in an app during a conversation; any device. */
+export const DESKTOP_COMPUTER_APP_KIND = 'desktop_computer_app';
+/** A sensitive Computer Use action (password field); any device. */
+export const DESKTOP_COMPUTER_ACTION_KIND = 'desktop_computer_action';
+
+/** `desktop.computer.session`: a conversation took or released the screen. */
+export type DesktopComputerSessionEvent = {
+  status: 'started' | 'ended';
+  deviceId?: string;
+  deviceName?: string;
+  /** `done`, `idle`, `user`, `revoked`, `disconnected`. */
+  reason?: string;
+};
+
+/** `desktop.computer.action`: one Computer Use call, journaled without image data. */
+export type DesktopComputerActionEvent = {
+  actionId: string;
+  tool: AgentComputerTool;
+  ok: boolean;
+  summary: string;
+  app?: string;
+  windowTitle?: string;
+  path?: ComputerActResult['path'];
+  error?: ExecutorFailure;
+  shotId?: string;
+  deviceId: string;
+  deviceName: string;
+};
 
 /** `details` of a {@link DESKTOP_BROWSER_GRANT_KIND} permission. */
 export type DesktopBrowserGrantDetails = {
@@ -207,6 +338,10 @@ export type DesktopBrowserGrantDetails = {
 
 /** `GET /v2/conversations/{id}/agent-shots/{shotId}`. */
 export type AgentShot = { shotId: string; mimeType: string; dataUrl: string };
+
+export function isAgentComputerTool(value: unknown): value is AgentComputerTool {
+  return typeof value === 'string' && (AGENT_COMPUTER_TOOLS as readonly string[]).includes(value);
+}
 
 export function isAgentBrowserTool(value: unknown): value is AgentBrowserTool {
   return typeof value === 'string' && (AGENT_BROWSER_TOOLS as readonly string[]).includes(value);

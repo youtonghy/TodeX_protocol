@@ -4,7 +4,7 @@ import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryE
 import { classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 import { SSH_EXEC_RUN_LIMIT, type SshExecOutputChunk, type SshExecRun } from './ssh';
-import type { DesktopBrowserActionEvent } from './agentDesktop';
+import type { DesktopBrowserActionEvent, DesktopComputerActionEvent } from './agentDesktop';
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue => value && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};
@@ -61,6 +61,9 @@ export type ConversationRuntime = {
   /** Agent desktop browser: whether the conversation holds a grant, and its
    * newest actions (`desktop.browser.*`). History pages do not extend it. */
   desktopBrowser: DesktopBrowserState;
+  /** Computer Use: whether the conversation holds the screen, and its
+   * newest actions (`desktop.computer.*`). History pages do not extend it. */
+  desktopComputer: DesktopComputerState;
   compaction: RuntimeCompaction;
   memoryEntries: MemoryEntry[];
   pendingPermissions: RuntimePermission[];
@@ -94,7 +97,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
   return {
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
-    subagents: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
+    subagents: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
@@ -621,6 +624,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
   }
   if (type.startsWith('ssh.exec.')) projectSshExec(state, type.slice('ssh.exec.'.length), payload, event.time);
   if (type === 'desktop.browser.action' || type === 'desktop.browser.grant') projectDesktopBrowser(state, type, payload, event.time);
+  if (type === 'desktop.computer.action' || type === 'desktop.computer.session') projectDesktopComputer(state, type, payload, event.time);
   if (type === 'memory.updated' || type === 'memory.created') {
     const id = string(payload.memoryId ?? payload.id);
     const content = string(payload.content ?? payload.text);
@@ -846,6 +850,36 @@ function projectDesktopBrowser(state: ConversationRuntime, type: string, payload
     granted: true,
     deviceName: string(payload.deviceName) || state.desktopBrowser.deviceName,
     actions: [...state.desktopBrowser.actions, action].slice(-DESKTOP_BROWSER_ACTION_LIMIT),
+  };
+}
+
+export type DesktopComputerState = {
+  /** The conversation currently controls the executor's screen. */
+  active: boolean;
+  deviceId?: string;
+  deviceName?: string;
+  actions: Array<DesktopComputerActionEvent & { time: string }>;
+};
+
+function projectDesktopComputer(state: ConversationRuntime, type: string, payload: RecordValue, time: string): void {
+  if (type === 'desktop.computer.session') {
+    const active = payload.status === 'started';
+    state.desktopComputer = {
+      ...state.desktopComputer,
+      active,
+      deviceId: active ? string(payload.deviceId) || undefined : state.desktopComputer.deviceId,
+      deviceName: active ? string(payload.deviceName) || undefined : state.desktopComputer.deviceName,
+    };
+    return;
+  }
+  const actionId = string(payload.actionId);
+  if (!actionId || state.desktopComputer.actions.some(action => action.actionId === actionId)) return;
+  const action = { ...(payload as unknown as DesktopComputerActionEvent), actionId, time };
+  state.desktopComputer = {
+    ...state.desktopComputer,
+    deviceId: string(payload.deviceId) || state.desktopComputer.deviceId,
+    deviceName: string(payload.deviceName) || state.desktopComputer.deviceName,
+    actions: [...state.desktopComputer.actions, action].slice(-DESKTOP_BROWSER_ACTION_LIMIT),
   };
 }
 

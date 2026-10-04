@@ -1114,6 +1114,11 @@ export class V2ApiClient {
     return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ enabled }) });
   }
 
+  /** Computer Use tools; needs desktop tools on. */
+  async setAgentComputerEnabled(computerEnabled: boolean): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ computerEnabled }) });
+  }
+
   /** Stops the agent's desktop browser for one conversation; its next tool call asks again. */
   async revokeAgentDesktop(conversationId: string): Promise<{ conversationId: string; revoked: boolean }> {
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop`, { method: 'DELETE' });

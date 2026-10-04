@@ -1120,8 +1120,9 @@ export class V2ApiClient {
   }
 
   /** Stops the agent's desktop browser for one conversation; its next tool call asks again. */
-  async revokeAgentDesktop(conversationId: string): Promise<{ conversationId: string; revoked: boolean }> {
-    return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop`, { method: 'DELETE' });
+  async revokeAgentDesktop(conversationId: string, capability?: 'browser' | 'screen'): Promise<{ conversationId: string; revoked: boolean }> {
+    const query = capability ? `?capability=${capability}` : '';
+    return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop${query}`, { method: 'DELETE' });
   }
 
   async getAgentShot(conversationId: string, shotId: string): Promise<AgentShot> {

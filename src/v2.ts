@@ -20,7 +20,7 @@ import type {
   SshKeysResponse,
   SshTestResult,
 } from './ssh';
-import type { AgentDesktopSettings, AgentShot, ComputerFrame } from './agentDesktop';
+import type { AgentBrowserProfile, AgentBrowserProfiles, AgentDesktopSettings, AgentShot, ComputerFrame } from './agentDesktop';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -1127,6 +1127,38 @@ export class V2ApiClient {
   /** The host's screen now; 404 (`ConnectionError.httpStatus`) unless the conversation controls it. */
   async getComputerFrame(conversationId: string): Promise<ComputerFrame> {
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop/frame`);
+  }
+
+  /** The conversation's browser tab now (the live stream's polling fallback); 404 without a tab. */
+  async getBrowserFrame(conversationId: string): Promise<ComputerFrame> {
+    return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop/frame?capability=browser`);
+  }
+
+  /** Starts downloading the daemon's pinned Chromium; progress shows in `browser.chromium`. */
+  async installAgentBrowser(): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-browser/install', { method: 'POST' });
+  }
+
+  async getAgentBrowserProfiles(): Promise<AgentBrowserProfiles> {
+    return this.request('/v2/agent-browser/profiles');
+  }
+
+  async createAgentBrowserProfile(name: string): Promise<AgentBrowserProfile> {
+    return this.request('/v2/agent-browser/profiles', { method: 'POST', body: JSON.stringify({ name }) });
+  }
+
+  async renameAgentBrowserProfile(id: string, name: string): Promise<AgentBrowserProfiles> {
+    return this.request(`/v2/agent-browser/profiles/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name }) });
+  }
+
+  /** Deletes the profile with its cookies, storage and cache. */
+  async deleteAgentBrowserProfile(id: string): Promise<AgentBrowserProfiles> {
+    return this.request(`/v2/agent-browser/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /** `workspace`: workspace id (path for workspaces without one). Its open tabs close. */
+  async assignAgentBrowserProfile(workspace: string, profileId: string): Promise<AgentBrowserProfiles> {
+    return this.request('/v2/agent-browser/workspaces', { method: 'PUT', body: JSON.stringify({ workspace, profileId }) });
   }
 
   /** Stops the agent's desktop browser and/or Computer Use for one conversation; its next tool call asks again. */

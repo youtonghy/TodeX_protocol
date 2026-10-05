@@ -805,9 +805,15 @@ test('desktop browser grants and actions collect without touching the timeline',
   assert.equal(state.desktopBrowser.granted, true);
   assert.equal(state.desktopBrowser.deviceName, 'Desk');
   assert.deepEqual(state.desktopBrowser.actions.map(item => [item.actionId, item.ok, item.shotId]), [['a', true, 'shot_1'], ['b', false, undefined]]);
-  const revoked = apply(state, event(5, 'desktop.browser.grant', { status: 'revoked', reason: 'user' })).state;
+  // A failed call for want of a tab means none is open.
+  assert.equal(state.desktopBrowser.tabOpen, false);
+  const opened = apply(state, action(5, 'c', { tool: 'browser_open', url: 'http://localhost:5173/' })).state;
+  assert.equal(opened.desktopBrowser.tabOpen, true);
+  assert.equal(apply(opened, action(6, 'd', { tool: 'browser_close' })).state.desktopBrowser.tabOpen, false);
+  const revoked = apply(opened, event(6, 'desktop.browser.grant', { status: 'revoked', reason: 'user' })).state;
   assert.equal(revoked.desktopBrowser.granted, false);
-  assert.equal(revoked.desktopBrowser.actions.length, 2);
+  assert.equal(revoked.desktopBrowser.tabOpen, false);
+  assert.equal(revoked.desktopBrowser.actions.length, 3);
   const many = apply(empty(), ...Array.from({ length: runtime.DESKTOP_BROWSER_ACTION_LIMIT + 5 }, (_, i) => action(i + 1, `x${i}`))).state;
   assert.equal(many.desktopBrowser.actions.length, runtime.DESKTOP_BROWSER_ACTION_LIMIT);
   assert.equal(many.desktopBrowser.actions[0].actionId, 'x5');

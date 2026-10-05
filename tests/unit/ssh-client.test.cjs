@@ -151,6 +151,13 @@ test('agent desktop routes use the contract paths, methods and bodies', async ()
   await api.getAgentShot('conv/1', 'shot_1');
   await api.requestComputerPermissions();
   await api.getComputerFrame('conv/1');
+  await api.getBrowserFrame('conv/1');
+  await api.installAgentBrowser();
+  await api.getAgentBrowserProfiles();
+  await api.createAgentBrowserProfile('Shared');
+  await api.renameAgentBrowserProfile('p/1', 'Main');
+  await api.deleteAgentBrowserProfile('p/1');
+  await api.assignAgentBrowserProfile('ws_1', 'p1');
   assert.deepEqual(calls.map(call => [call.method, call.url.pathname, call.body]), [
     ['GET', '/v2/agent-desktop', undefined],
     ['PUT', '/v2/agent-desktop', { enabled: true }],
@@ -159,5 +166,13 @@ test('agent desktop routes use the contract paths, methods and bodies', async ()
     ['GET', '/v2/conversations/conv%2F1/agent-shots/shot_1', undefined],
     ['POST', '/v2/agent-desktop/computer/permissions', undefined],
     ['GET', '/v2/conversations/conv%2F1/agent-desktop/frame', undefined],
+    ['GET', '/v2/conversations/conv%2F1/agent-desktop/frame', undefined],
+    ['POST', '/v2/agent-browser/install', undefined],
+    ['GET', '/v2/agent-browser/profiles', undefined],
+    ['POST', '/v2/agent-browser/profiles', { name: 'Shared' }],
+    ['PUT', '/v2/agent-browser/profiles/p%2F1', { name: 'Main' }],
+    ['DELETE', '/v2/agent-browser/profiles/p%2F1', undefined],
+    ['PUT', '/v2/agent-browser/workspaces', { workspace: 'ws_1', profileId: 'p1' }],
   ]);
+  assert.equal(calls[7].url.search, '?capability=browser');
 });

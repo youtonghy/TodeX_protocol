@@ -1,24 +1,23 @@
 /**
  * Agent desktop tools (`todex_desktop` MCP server).
  *
- * Agents run next to the daemon, which may be remote; the browser they drive
- * belongs to a desktop client. A desktop registers as an *executor* on a
- * dedicated `/v2/ws` connection; the daemon forwards each tool call as
- * `executor.invoke` and waits for `executor.result`. When the daemon is not
- * on the desktop's machine, `localhost` pages are reached through `tunnel.*`
- * streams on the same connection.
+ * Both run in the daemon, on its own host; clients only watch (live frames,
+ * screenshots, the action journal) and answer prompts.
  *
- * Computer Use (`computer_*`) runs in the daemon itself, on its own host:
- * clients only watch it (live frames, screenshots, the action journal) and
- * answer per-app and per-action prompts. The person at the host grants
- * each conversation there.
+ * - The agent browser (`browser_*`) is a headed Chrome for Testing the daemon
+ *   pins and downloads; `localhost` is the daemon's host. Any paired device
+ *   grants a conversation. Live frames stream over `/v2/ws`
+ *   (`agentBrowser.watch` → {@link AgentBrowserFrame}).
+ * - Computer Use (`computer_*`) controls the host itself; the person at the
+ *   host grants each conversation there.
+ *
+ * Desktops used to run the browser as *executors*; daemons still answer
+ * their `executor.register` harmlessly.
  */
 
 /** MCP server name agents see; tools appear as `mcp__todex_desktop__browser_open`. */
 export const AGENT_DESKTOP_SERVER = 'todex_desktop';
 
-/** `browser`: agent browser tabs. (Older desktops also announced `screen`, which daemons ignore.) */
-export type ExecutorCapability = 'browser';
 
 export const AGENT_BROWSER_TOOLS = [
   'browser_open',
@@ -32,13 +31,6 @@ export type AgentBrowserTool = typeof AGENT_BROWSER_TOOLS[number];
 export const AGENT_COMPUTER_TOOLS = ['computer_observe', 'computer_act', 'computer_done'] as const;
 export type AgentComputerTool = typeof AGENT_COMPUTER_TOOLS[number];
 
-export type ExecutorInfo = {
-  executorId: number;
-  deviceId: string;
-  deviceName: string;
-  platform: string;
-  capabilities: ExecutorCapability[];
-};
 
 /** Whether the daemon's host can run Computer Use. */
 export type ComputerHostStatus = {
@@ -56,33 +48,59 @@ export type ComputerHostStatus = {
   permissions: { screen: boolean; accessibility: boolean };
 };
 
+/** The daemon's pinned Chromium (Chrome for Testing). */
+export type AgentBrowserInstall = {
+  version: string;
+  installed: boolean;
+  downloading: boolean;
+  /** 0..1 while downloading. */
+  progress?: number;
+  error?: string;
+  /** `TODEX_AGENT_BROWSER_PATH` points at another Chromium. */
+  overridden: boolean;
+};
+
+/** Whether the daemon's host can run the agent browser. */
+export type AgentBrowserStatus = {
+  available: boolean;
+  reason?: string;
+  /** The computer the browser runs on (its `localhost`). */
+  host: string;
+  chromium: AgentBrowserInstall;
+};
+
 /** `GET|PUT /v2/agent-desktop`. A 404 means the daemon predates desktop tools. */
 export type AgentDesktopSettings = {
   /** Agents get the `todex_desktop` MCP server. Off by default. */
   enabled: boolean;
   /** Agents also get the `computer_*` tools (needs `enabled`). Off by default. */
   computerEnabled: boolean;
-  executors: ExecutorInfo[];
   /** Absent from daemons where Computer Use still ran on desktops. */
   computer?: ComputerHostStatus;
+  /** Absent from daemons where the browser still ran on desktops. */
+  browser?: AgentBrowserStatus;
 };
 
-// ---- Client → daemon frames ------------------------------------------------
+export type AgentBrowserProfile = { id: string; name: string; createdAt: number };
 
-/** `{ id, type: 'executor.register', payload }` → `server.result` {@link ExecutorRegistered}. */
-export type ExecutorRegisterPayload = {
-  capabilities: ExecutorCapability[];
-  /** `process.platform` of the desktop. */
-  platform: string;
+/** `GET /v2/agent-browser/profiles` (and the result of every profile change). */
+export type AgentBrowserProfiles = {
+  profiles: AgentBrowserProfile[];
+  /** Workspace id (path for workspaces without one) → profile id. */
+  workspaces: Record<string, string>;
 };
 
-export type ExecutorRegistered = { executorId: number; deviceId: string };
+/**
+ * `{ type: 'agentBrowser.frame', payload }` after `agentBrowser.watch
+ * { conversationId }` on `/v2/ws` (until `agentBrowser.unwatch`). Only the
+ * latest frame is kept when the connection is slow; `closed` means the
+ * conversation has no tab.
+ */
+export type AgentBrowserFrame =
+  | { conversationId: string; seq: number; mimeType: 'image/jpeg'; data: string; width: number; height: number; closed?: never }
+  | { conversationId: string; closed: true };
 
-/** `{ type: 'executor.result', payload }`; no response. */
-export type ExecutorResultPayload =
-  | { invokeId: string; ok: true; result: AgentBrowserResult }
-  | { invokeId: string; ok: false; error: ExecutorFailure };
-
+/** A failed tool call as journaled in `desktop.*.action` events. */
 export type ExecutorFailure = {
   code: ExecutorErrorCode | string;
   message: string;
@@ -94,54 +112,32 @@ export type ExecutorFailure = {
  * - `NAVIGATION_BLOCKED`: top-level navigation outside loopback.
  * - `NO_TAB`: the conversation has no open tab (call `browser_open`).
  * - `REF_NOT_FOUND`: the `ref` is not in the latest snapshot.
- * - `TAB_LIMIT`: too many agent tabs on this desktop.
+ * - `TAB_LIMIT`: too many agent tabs (or browser profiles) on the host.
+ * - `BROWSER_INSTALLING`: the daemon is still downloading Chromium.
  * - `SENSITIVE_ACTION`: the action needs the user's confirmation; the daemon
- *   asks and re-invokes with `confirmed: true`.
- * - `TUNNEL_FAILED`: the daemon's port could not be forwarded.
+ *   asks and retries confirmed.
  * - `USER_ACTIVE`: the user is using the pointer; retry shortly.
  * - `TARGET_BLOCKED`: the target app or window may never be controlled.
- * - `APP_CONFIRM`: first action in this app; the daemon asks and re-invokes
- *   with the app in `allowedApps`.
+ * - `APP_CONFIRM`: first action in this app; the daemon asks and retries.
  * - `PERMISSION_REQUIRED`: Screen Recording or Accessibility is not granted.
- * - `SCREEN_BUSY`: another conversation controls this screen (daemon).
+ * - `SCREEN_BUSY`: another conversation controls the screen.
+ * - `UNAVAILABLE`: the host cannot run it (no graphical session, ...).
  */
 export type ExecutorErrorCode =
   | 'NAVIGATION_BLOCKED'
   | 'NO_TAB'
   | 'REF_NOT_FOUND'
   | 'TAB_LIMIT'
+  | 'BROWSER_INSTALLING'
   | 'SENSITIVE_ACTION'
-  | 'TUNNEL_FAILED'
   | 'USER_ACTIVE'
   | 'TARGET_BLOCKED'
   | 'APP_CONFIRM'
   | 'PERMISSION_REQUIRED'
   | 'SCREEN_BUSY'
+  | 'UNAVAILABLE'
   | 'INVALID_ARGUMENT'
   | 'EXECUTOR_FAILED';
-
-// ---- Daemon → client frames ------------------------------------------------
-
-/** `{ type: 'executor.invoke', payload }`. */
-export type ExecutorInvokePayload = {
-  invokeId: string;
-  conversationId: string;
-  /** Selects the browser partition; `id` is absent for ad-hoc workspaces. */
-  workspace: { id?: string; path: string };
-  tool: AgentBrowserTool | AgentComputerTool;
-  args: AgentBrowserArgs | ComputerArgs;
-  timeoutMs: number;
-};
-
-/** `{ type: 'executor.cancel', payload: { invokeId } }`: nobody waits for the call any more. */
-export type ExecutorCancelPayload = { invokeId: string };
-
-/** `{ type: 'executor.release', payload: { conversationId } }`: access revoked or conversation gone; close its tab. */
-export type ExecutorReleasePayload = {
-  conversationId: string;
-  /** Only that capability's state; absent: all. */
-  capability?: ExecutorCapability;
-};
 
 // ---- Tool arguments and results -------------------------------------------
 
@@ -184,8 +180,6 @@ export type BrowserScreenshot = {
 export type BrowserPageResult = {
   url: string;
   title: string;
-  /** The page is a daemon `localhost` port forwarded to this local port. */
-  tunnel?: { remotePort: number; localPort: number };
 };
 
 export type BrowserSnapshotResult = BrowserPageResult & {
@@ -274,25 +268,6 @@ export type ComputerActResult = {
   detail?: string;
 };
 
-// ---- Tunnel frames (both directions, no ids) ------------------------------
-
-/** Client → daemon: a local TCP connection was accepted for `port` on the daemon host. */
-export type TunnelOpenPayload = { streamId: string; conversationId: string; port: number };
-/** Daemon → client: the daemon connected to its loopback port. */
-export type TunnelOpenedPayload = { streamId: string };
-/** Base64 bytes; each side may have at most {@link TUNNEL_WINDOW_BYTES} unacknowledged. */
-export type TunnelDataPayload = { streamId: string; data: string };
-export type TunnelAckPayload = { streamId: string; bytes: number };
-/** Either side; `error` set when the stream failed rather than ended. */
-export type TunnelClosePayload = { streamId: string; error?: string };
-
-/** Raw bytes per `tunnel.data` frame. */
-export const TUNNEL_CHUNK_BYTES = 32 * 1024;
-/** Unacknowledged raw bytes per stream and direction. */
-export const TUNNEL_WINDOW_BYTES = 256 * 1024;
-/** Concurrent streams per executor connection. */
-export const TUNNEL_MAX_STREAMS = 64;
-
 // ---- Conversation events and permissions ----------------------------------
 
 /** `desktop.browser.action`: one tool call, journaled without image data. */
@@ -311,7 +286,7 @@ export type DesktopBrowserActionEvent = {
   deviceName: string;
 };
 
-/** `desktop.browser.grant`: the conversation was bound to, or released from, an executor. */
+/** `desktop.browser.grant`: the conversation may (no longer) use the browser. */
 export type DesktopBrowserGrantEvent = {
   status: 'granted' | 'revoked';
   deviceId?: string;
@@ -341,7 +316,11 @@ export type DesktopComputerGrantEvent = {
   reason?: string;
 };
 
-/** `GET /v2/conversations/{id}/agent-desktop/frame`: the host's screen now, for the controlling conversation (404 otherwise). */
+/**
+ * `GET /v2/conversations/{id}/agent-desktop/frame[?capability=browser]`: the
+ * host's screen (Computer Use, 404 unless the conversation controls it) or
+ * the conversation's browser tab, now.
+ */
 export type ComputerFrame = { mimeType: string; dataUrl: string };
 
 /** `desktop.computer.session`: a conversation took or released the screen. */
@@ -370,7 +349,8 @@ export type DesktopComputerActionEvent = {
 
 /** `details` of a {@link DESKTOP_BROWSER_GRANT_KIND} permission. */
 export type DesktopBrowserGrantDetails = {
-  executors: Array<Pick<ExecutorInfo, 'deviceId' | 'deviceName' | 'platform'>>;
+  /** The computer the browser runs on. */
+  host: string;
 };
 
 /** `GET /v2/conversations/{id}/agent-shots/{shotId}`. */

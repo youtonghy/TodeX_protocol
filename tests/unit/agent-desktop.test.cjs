@@ -15,12 +15,6 @@ test('agent browser tool names are MCP- and model-API-safe', () => {
   assert.equal(desktop.isAgentBrowserTool(undefined), false);
 });
 
-test('tunnel flow-control constants keep frames far below the socket limit', () => {
-  const encodedChunk = Math.ceil(desktop.TUNNEL_CHUNK_BYTES / 3) * 4;
-  assert.ok(encodedChunk < 64 * 1024);
-  assert.ok(desktop.TUNNEL_WINDOW_BYTES >= desktop.TUNNEL_CHUNK_BYTES * 4);
-});
-
 test('device-restricted permissions are answerable only on the named devices', () => {
   const { permissionDeviceGate } = require(path.join(compiledDir, 'todex.js'));
   const request = (data) => ({ requestId: 'p', requestType: 'permission', title: 't', event: {}, data });

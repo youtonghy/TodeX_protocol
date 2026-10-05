@@ -828,6 +828,9 @@ function fillEarlierFields<T extends { id: string }>(older: T, newer: T): T {
  * every other field keeps the newer projection's value. */
 export type DesktopBrowserState = {
   granted: boolean;
+  /** The conversation has a tab open (the last successful open/close says so). */
+  tabOpen?: boolean;
+  /** The computer the browser runs on. */
   deviceName?: string;
   actions: Array<DesktopBrowserActionEvent & { time: string }>;
 };
@@ -838,7 +841,12 @@ export const DESKTOP_BROWSER_ACTION_LIMIT = 50;
 function projectDesktopBrowser(state: ConversationRuntime, type: string, payload: RecordValue, time: string): void {
   if (type === 'desktop.browser.grant') {
     const granted = payload.status === 'granted';
-    state.desktopBrowser = { ...state.desktopBrowser, granted, deviceName: granted ? string(payload.deviceName) || undefined : undefined };
+    state.desktopBrowser = {
+      ...state.desktopBrowser,
+      granted,
+      tabOpen: granted ? state.desktopBrowser.tabOpen : false,
+      deviceName: granted ? string(payload.deviceName) || undefined : undefined,
+    };
     return;
   }
   const actionId = string(payload.actionId);
@@ -848,6 +856,9 @@ function projectDesktopBrowser(state: ConversationRuntime, type: string, payload
     ...state.desktopBrowser,
     // Acting implies a grant even when the grant event lies below the window.
     granted: true,
+    tabOpen: action.ok
+      ? action.tool !== 'browser_close'
+      : action.error?.code === 'NO_TAB' ? false : state.desktopBrowser.tabOpen ?? action.tool !== 'browser_open',
     deviceName: string(payload.deviceName) || state.desktopBrowser.deviceName,
     actions: [...state.desktopBrowser.actions, action].slice(-DESKTOP_BROWSER_ACTION_LIMIT),
   };

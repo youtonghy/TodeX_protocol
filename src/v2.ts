@@ -20,7 +20,7 @@ import type {
   SshKeysResponse,
   SshTestResult,
 } from './ssh';
-import type { AgentDesktopSettings, AgentShot } from './agentDesktop';
+import type { AgentDesktopSettings, AgentShot, ComputerFrame } from './agentDesktop';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -1119,7 +1119,17 @@ export class V2ApiClient {
     return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ computerEnabled }) });
   }
 
-  /** Stops the agent's desktop browser for one conversation; its next tool call asks again. */
+  /** Shows the OS permission prompts (Screen Recording, Accessibility) on the daemon's host. */
+  async requestComputerPermissions(): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop/computer/permissions', { method: 'POST' });
+  }
+
+  /** The host's screen now; 404 (`ConnectionError.httpStatus`) unless the conversation controls it. */
+  async getComputerFrame(conversationId: string): Promise<ComputerFrame> {
+    return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop/frame`);
+  }
+
+  /** Stops the agent's desktop browser and/or Computer Use for one conversation; its next tool call asks again. */
   async revokeAgentDesktop(conversationId: string, capability?: 'browser' | 'screen'): Promise<{ conversationId: string; revoked: boolean }> {
     const query = capability ? `?capability=${capability}` : '';
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop${query}`, { method: 'DELETE' });

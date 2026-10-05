@@ -7,13 +7,18 @@
  * `executor.invoke` and waits for `executor.result`. When the daemon is not
  * on the desktop's machine, `localhost` pages are reached through `tunnel.*`
  * streams on the same connection.
+ *
+ * Computer Use (`computer_*`) runs in the daemon itself, on its own host:
+ * clients only watch it (live frames, screenshots, the action journal) and
+ * answer per-app and per-action prompts. The person at the host grants
+ * each conversation there.
  */
 
 /** MCP server name agents see; tools appear as `mcp__todex_desktop__browser_open`. */
 export const AGENT_DESKTOP_SERVER = 'todex_desktop';
 
-/** `browser`: agent browser tabs. `screen`: Computer Use (macOS 14+, both switches on). */
-export type ExecutorCapability = 'browser' | 'screen';
+/** `browser`: agent browser tabs. (Older desktops also announced `screen`, which daemons ignore.) */
+export type ExecutorCapability = 'browser';
 
 export const AGENT_BROWSER_TOOLS = [
   'browser_open',
@@ -35,6 +40,22 @@ export type ExecutorInfo = {
   capabilities: ExecutorCapability[];
 };
 
+/** Whether the daemon's host can run Computer Use. */
+export type ComputerHostStatus = {
+  /** The host's OS and session can run it at all. */
+  supported: boolean;
+  /** Supported, permitted, and someone at the host can confirm grants. */
+  available: boolean;
+  /** Why it is not available. */
+  reason?: string;
+  /** The computer agents would control. */
+  host: string;
+  /** `macos`, `windows`, `linux`, ... */
+  platform: string;
+  /** OS permissions granted to the TodeX backend on the host. */
+  permissions: { screen: boolean; accessibility: boolean };
+};
+
 /** `GET|PUT /v2/agent-desktop`. A 404 means the daemon predates desktop tools. */
 export type AgentDesktopSettings = {
   /** Agents get the `todex_desktop` MCP server. Off by default. */
@@ -42,6 +63,8 @@ export type AgentDesktopSettings = {
   /** Agents also get the `computer_*` tools (needs `enabled`). Off by default. */
   computerEnabled: boolean;
   executors: ExecutorInfo[];
+  /** Absent from daemons where Computer Use still ran on desktops. */
+  computer?: ComputerHostStatus;
 };
 
 // ---- Client → daemon frames ------------------------------------------------
@@ -116,7 +139,7 @@ export type ExecutorCancelPayload = { invokeId: string };
 /** `{ type: 'executor.release', payload: { conversationId } }`: access revoked or conversation gone; close its tab. */
 export type ExecutorReleasePayload = {
   conversationId: string;
-  /** Only that capability's state (tab, or screen control); absent: all. */
+  /** Only that capability's state; absent: all. */
   capability?: ExecutorCapability;
 };
 
@@ -300,12 +323,26 @@ export type DesktopBrowserGrantEvent = {
 export const DESKTOP_BROWSER_GRANT_KIND = 'desktop_browser';
 /** `permission.requested.kind` of a single sensitive action. */
 export const DESKTOP_BROWSER_ACTION_KIND = 'desktop_browser_action';
-/** First Computer Use in a conversation; executor devices only. */
-export const DESKTOP_COMPUTER_GRANT_KIND = 'desktop_computer';
 /** First action in an app during a conversation; any device. */
 export const DESKTOP_COMPUTER_APP_KIND = 'desktop_computer_app';
 /** A sensitive Computer Use action (password field); any device. */
 export const DESKTOP_COMPUTER_ACTION_KIND = 'desktop_computer_action';
+
+/**
+ * `desktop.computer.grant`: the conversation's Computer Use grant, which the
+ * person at the host confirms there (`requested` → `granted` / `declined`),
+ * or the user revoked.
+ */
+export type DesktopComputerGrantEvent = {
+  status: 'requested' | 'granted' | 'declined' | 'revoked';
+  deviceId?: string;
+  /** The host's name. */
+  deviceName?: string;
+  reason?: string;
+};
+
+/** `GET /v2/conversations/{id}/agent-desktop/frame`: the host's screen now, for the controlling conversation (404 otherwise). */
+export type ComputerFrame = { mimeType: string; dataUrl: string };
 
 /** `desktop.computer.session`: a conversation took or released the screen. */
 export type DesktopComputerSessionEvent = {

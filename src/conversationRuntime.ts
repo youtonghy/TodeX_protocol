@@ -624,7 +624,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
   }
   if (type.startsWith('ssh.exec.')) projectSshExec(state, type.slice('ssh.exec.'.length), payload, event.time);
   if (type === 'desktop.browser.action' || type === 'desktop.browser.grant') projectDesktopBrowser(state, type, payload, event.time);
-  if (type === 'desktop.computer.action' || type === 'desktop.computer.session') projectDesktopComputer(state, type, payload, event.time);
+  if (type === 'desktop.computer.action' || type === 'desktop.computer.session' || type === 'desktop.computer.grant') projectDesktopComputer(state, type, payload, event.time);
   if (type === 'memory.updated' || type === 'memory.created') {
     const id = string(payload.memoryId ?? payload.id);
     const content = string(payload.content ?? payload.text);
@@ -854,14 +854,25 @@ function projectDesktopBrowser(state: ConversationRuntime, type: string, payload
 }
 
 export type DesktopComputerState = {
-  /** The conversation currently controls the executor's screen. */
+  /** The conversation currently controls the host's screen. */
   active: boolean;
+  /** Its first grant waits for the person at the host. */
+  awaitingHost?: boolean;
   deviceId?: string;
+  /** The host's name. */
   deviceName?: string;
   actions: Array<DesktopComputerActionEvent & { time: string }>;
 };
 
 function projectDesktopComputer(state: ConversationRuntime, type: string, payload: RecordValue, time: string): void {
+  if (type === 'desktop.computer.grant') {
+    state.desktopComputer = {
+      ...state.desktopComputer,
+      awaitingHost: payload.status === 'requested',
+      deviceName: string(payload.deviceName) || state.desktopComputer.deviceName,
+    };
+    return;
+  }
   if (type === 'desktop.computer.session') {
     const active = payload.status === 'started';
     state.desktopComputer = {

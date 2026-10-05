@@ -817,16 +817,21 @@ test('computer use sessions and actions collect without touching the timeline', 
   const action = (sequence, actionId, extra = {}) => event(sequence, 'desktop.computer.action', {
     actionId, tool: 'computer_act', ok: true, summary: 'click e3', deviceId: 'dev_mac', deviceName: 'Mac', ...extra,
   });
-  const started = apply(empty(),
-    event(1, 'desktop.computer.session', { status: 'started', deviceId: 'dev_mac', deviceName: 'Mac' }),
-    action(2, 'a', { app: 'TextEdit', path: 'background', shotId: 'shot_1' }),
-    action(2, 'a'),
+  const asking = apply(empty(), event(1, 'desktop.computer.grant', { status: 'requested', deviceId: 'host', deviceName: 'Mac' })).state;
+  assert.equal(asking.desktopComputer.awaitingHost, true);
+  assert.equal(asking.desktopComputer.deviceName, 'Mac');
+  const started = apply(asking,
+    event(2, 'desktop.computer.grant', { status: 'granted', deviceId: 'host', deviceName: 'Mac' }),
+    event(3, 'desktop.computer.session', { status: 'started', deviceId: 'dev_mac', deviceName: 'Mac' }),
+    action(4, 'a', { app: 'TextEdit', path: 'background', shotId: 'shot_1' }),
+    action(4, 'a'),
   ).state;
   assert.equal(started.timeline.length, 0);
   assert.equal(started.desktopComputer.active, true);
+  assert.equal(started.desktopComputer.awaitingHost, false);
   assert.equal(started.desktopComputer.deviceName, 'Mac');
   assert.deepEqual(started.desktopComputer.actions.map(item => [item.actionId, item.path, item.shotId]), [['a', 'background', 'shot_1']]);
-  const ended = apply(started, event(3, 'desktop.computer.session', { status: 'ended', reason: 'done' })).state;
+  const ended = apply(started, event(5, 'desktop.computer.session', { status: 'ended', reason: 'done' })).state;
   assert.equal(ended.desktopComputer.active, false);
   assert.equal(ended.desktopComputer.actions.length, 1);
 });

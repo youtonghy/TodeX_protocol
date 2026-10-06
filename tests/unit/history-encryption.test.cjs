@@ -21,8 +21,10 @@ const {
   historyRetryPrompt,
   historyRetryRequest,
   historyRetrySequence,
+  historyUpdateReaction,
   historyWrapsFetcher,
   parseHistoryEncryptionState,
+  parseHistoryEncryptionUpdate,
   rewrapHistoryKeys,
 } = require(path.join(lib, 'historyEncryption.js'));
 const { applyConversationRuntimeEvents, createConversationRuntime } = require(path.join(lib, 'conversationRuntime.js'));
@@ -279,6 +281,34 @@ test('command frames validate their batch limits', () => {
   assert.throws(() => parseHistoryEncryptionState({ mode: 'maybe' }), /格式无效/);
   const url = new URL(buildV2WebSocketUrlWithOptions('http://127.0.0.1:1', { historyEncryption: true }));
   assert.equal(url.searchParams.get('historyEncryption'), '1');
+});
+
+test('state carries this device access and the revoked devices; restore names a device', () => {
+  const state = parseHistoryEncryptionState({ mode: 'e2e', myAccess: 'revoked', revokedDevices: [{ deviceId: 'dev_2', revokedAt: 't' }, { deviceId: '' }, { deviceId: 'dev_3' }, 'x'] });
+  assert.equal(state.myAccess, 'revoked');
+  assert.deepEqual(state.revokedDevices, [{ deviceId: 'dev_2', revokedAt: 't' }, { deviceId: 'dev_3', revokedAt: '' }]);
+  // Older backends: no access field, no revoked devices.
+  const old = parseHistoryEncryptionState({ mode: 'off', myAccess: 'weird' });
+  assert.equal('myAccess' in old, false);
+  assert.deepEqual(old.revokedDevices, []);
+  assert.deepEqual(historyCommands.restoreDevice('dev_2'), { type: 'history.device.restore', payload: { deviceId: 'dev_2' } });
+  assert.throws(() => historyCommands.restoreDevice(' '), /缺少设备 ID/);
+});
+
+test('pushed updates unlock only when wraps arrived for this device', () => {
+  assert.equal(parseHistoryEncryptionUpdate({ mode: 'e2e' }), null);
+  assert.equal(parseHistoryEncryptionUpdate({ mode: 'maybe', reason: 'mode' }), null);
+  const progress = parseHistoryEncryptionUpdate({ epoch: 4, mode: 'e2e', reason: 'grant.progress', rid: 'me', grantId: 'g', conversationIds: ['c1', 7, 'c2'] });
+  assert.deepEqual(progress, { epoch: 4, mode: 'e2e', reason: 'grant.progress', rid: 'me', grantId: 'g', conversationIds: ['c1', 'c2'] });
+  assert.deepEqual(historyUpdateReaction(progress, ['me']).unlock, ['c1', 'c2']);
+  assert.equal(historyUpdateReaction(progress, ['other', undefined]).unlock, null);
+  const fulfilled = parseHistoryEncryptionUpdate({ epoch: 5, mode: 'e2e', reason: 'grant.fulfilled', rid: 'me', grantId: 'g' });
+  assert.equal(historyUpdateReaction(fulfilled, ['me']).unlock, 'all');
+  for (const reason of ['mode', 'recipient.revoked', 'device.restored', 'grant.requested', 'something.new']) {
+    const update = parseHistoryEncryptionUpdate({ epoch: 1, mode: 'off', reason, rid: 'me' });
+    assert.equal(update.reason, reason);
+    assert.equal(historyUpdateReaction(update, ['me']).unlock, null);
+  }
 });
 
 test('grant re-wrap walks keys.list pages, re-wraps for the target and resumes from a cursor', async () => {

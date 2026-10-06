@@ -24,6 +24,11 @@ export { HISTORY_ENCRYPTION_CAPABILITY } from './v2';
 /** Backend error codes this feature introduces. */
 export const HISTORY_CLIENT_UPGRADE_REQUIRED = 'CLIENT_UPGRADE_REQUIRED';
 export const HISTORY_STORAGE_LOW = 'STORAGE_LOW';
+/** This device was revoked: every `history.*` command except
+ * `history.encryption.get` fails with it until another device restores it. */
+export const HISTORY_ACCESS_REVOKED = 'HISTORY_ACCESS_REVOKED';
+/** Global server frame pushed when the encryption state changes. */
+export const HISTORY_ENCRYPTION_UPDATED = 'history.encryption.updated';
 /** `history.keys.*` / `history.grant.fulfill` batch ceiling. */
 export const HISTORY_BATCH_LIMIT = 500;
 
@@ -77,13 +82,21 @@ export type HistoryGrant = {
   publicKey?: string;
 };
 
-/** Response of `history.encryption.get|enable|disable` and `recipient.revoke`. */
+/** This device's standing: `revoked` devices are blocked until restored. */
+export type HistoryAccess = 'active' | 'unregistered' | 'revoked';
+export type HistoryRevokedDevice = { deviceId: string; revokedAt: string };
+
+/** Response of `history.encryption.get|enable|disable`, `recipient.revoke`
+ * and `device.restore`. */
 export type HistoryEncryptionState = {
   mode: HistoryEncryptionMode;
   epoch: number;
   recipients: HistoryRecipient[];
   myRid?: string;
   grants: HistoryGrant[];
+  /** Absent from backends that predate permanent revocation. */
+  myAccess?: HistoryAccess;
+  revokedDevices: HistoryRevokedDevice[];
 };
 
 export type HistoryKeyRef = { conversationId: string; kid: string };
@@ -94,7 +107,7 @@ export type HistoryCommandType =
   | 'history.encryption.get' | 'history.encryption.enable' | 'history.encryption.disable'
   | 'history.recipient.register' | 'history.recipient.revoke' | 'history.recovery.set'
   | 'history.grant.request' | 'history.grant.list' | 'history.grant.dismiss' | 'history.grant.fulfill'
-  | 'history.keys.list' | 'history.keys.wraps';
+  | 'history.keys.list' | 'history.keys.wraps' | 'history.device.restore';
 
 export type HistoryCommandFrame = { type: HistoryCommandType; payload: Record<string, unknown> };
 /** Sends one §7 command over the v2 socket and resolves its result payload. */
@@ -111,6 +124,10 @@ export const historyCommands = {
     type: 'history.recipient.register', payload: { publicKey: encodeBase64Url(publicKey) },
   }),
   revoke: (rid: string): HistoryCommandFrame => ({ type: 'history.recipient.revoke', payload: { rid: requireText(rid, '接收方') } }),
+  /** Lifts a revoked device's block; it then registers a fresh key. */
+  restoreDevice: (deviceId: string): HistoryCommandFrame => ({
+    type: 'history.device.restore', payload: { deviceId: requireText(deviceId, '设备') },
+  }),
   setRecovery: (publicKey: Uint8Array): HistoryCommandFrame => ({
     type: 'history.recovery.set', payload: { publicKey: encodeBase64Url(publicKey) },
   }),
@@ -179,7 +196,64 @@ export function parseHistoryEncryptionState(value: unknown): HistoryEncryptionSt
     recipients,
     ...(typeof source.myRid === 'string' && source.myRid ? { myRid: source.myRid } : {}),
     grants: parseHistoryGrants(source.grants),
+    ...(HISTORY_ACCESS.has(source.myAccess as HistoryAccess) ? { myAccess: source.myAccess as HistoryAccess } : {}),
+    revokedDevices: Array.isArray(source.revokedDevices) ? source.revokedDevices.flatMap((item): HistoryRevokedDevice[] => {
+      const entry = record(item);
+      return entry && typeof entry.deviceId === 'string' && entry.deviceId
+        ? [{ deviceId: entry.deviceId, revokedAt: typeof entry.revokedAt === 'string' ? entry.revokedAt : '' }] : [];
+    }) : [],
   };
+}
+
+const HISTORY_ACCESS: ReadonlySet<HistoryAccess> = new Set(['active', 'unregistered', 'revoked']);
+
+// ---------------------------------------------------------------------------
+// Pushed updates
+
+/** Why `history.encryption.updated` was pushed. Unknown reasons still mean
+ * the state changed. */
+export type HistoryUpdateReason =
+  | 'mode' | 'recipient.registered' | 'recipient.revoked' | 'device.restored' | 'device.revoked'
+  | 'recovery.set' | 'grant.requested' | 'grant.dismissed' | 'grant.progress' | 'grant.fulfilled';
+
+/** Payload of the global `history.encryption.updated` frame; never carries
+ * key material. */
+export type HistoryEncryptionUpdate = {
+  epoch: number;
+  mode: HistoryEncryptionMode;
+  reason: HistoryUpdateReason | (string & {});
+  /** Grant events: the recipient that received wraps. */
+  rid?: string;
+  deviceId?: string;
+  grantId?: string;
+  /** `grant.progress`: conversations that received new wraps. */
+  conversationIds?: string[];
+};
+
+export function parseHistoryEncryptionUpdate(value: unknown): HistoryEncryptionUpdate | null {
+  const source = record(value);
+  if (!source || typeof source.reason !== 'string' || (source.mode !== 'off' && source.mode !== 'e2e')) return null;
+  const text = (key: 'rid' | 'deviceId' | 'grantId') => (typeof source[key] === 'string' && source[key] ? { [key]: source[key] as string } : {});
+  return {
+    epoch: typeof source.epoch === 'number' ? source.epoch : 0,
+    mode: source.mode,
+    reason: source.reason,
+    ...text('rid'), ...text('deviceId'), ...text('grantId'),
+    ...(Array.isArray(source.conversationIds)
+      ? { conversationIds: source.conversationIds.filter((id): id is string => typeof id === 'string' && Boolean(id)) } : {}),
+  };
+}
+
+/** What an update means for this device: the state is always re-read; when
+ * wraps arrived for one of `localRids`, `unlock` names the conversations to
+ * re-decrypt (`'all'`: every loaded encrypted one) after forgetting the
+ * decryptor's negative cache. */
+export type HistoryUpdateReaction = { unlock: readonly string[] | 'all' | null };
+
+export function historyUpdateReaction(update: HistoryEncryptionUpdate, localRids: readonly (string | undefined)[]): HistoryUpdateReaction {
+  const grant = update.reason === 'grant.progress' || update.reason === 'grant.fulfilled';
+  if (!grant || !update.rid || !localRids.includes(update.rid)) return { unlock: null };
+  return { unlock: update.conversationIds ?? 'all' };
 }
 
 const GRANT_STATUSES: ReadonlySet<HistoryGrantStatus> = new Set(['pending', 'fulfilled', 'dismissed', 'revoked']);

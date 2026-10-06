@@ -317,7 +317,7 @@ function concatBytes(...arrays: Uint8Array[]): Uint8Array {
   return output;
 }
 
-function encodeBase64Url(bytes: Uint8Array): string {
+export function encodeBase64Url(bytes: Uint8Array): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   let output = '';
   for (let idx = 0; idx < bytes.length; idx += 3) {
@@ -337,7 +337,7 @@ function encodeBase64Url(bytes: Uint8Array): string {
   return output;
 }
 
-function decodeBase64UrlBytes(value: string): Uint8Array {
+export function decodeBase64UrlBytes(value: string): Uint8Array {
   const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
   const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
   const globalAtob = (globalThis as unknown as { atob?: (input: string) => string }).atob;

@@ -13,7 +13,7 @@ Keep this repository checked out as a sibling directory (`../TodeX_protocol`) of
 
 ## Layout
 
-- `src/` — platform-agnostic protocol sources (`v2`, `todex`, `transport`, `transportCrypto`, `deviceAuth`, `conversationRuntime`, `mobileParity`, `connectionProbe`, `connectionError`, and supporting modules). `netinfo.d.ts` is an ambient declaration for the optional React Native NetInfo dynamic import.
+- `src/` — platform-agnostic protocol sources (`v2`, `todex`, `transport`, `transportCrypto`, `historyCrypto`, `deviceAuth`, `conversationRuntime`, `mobileParity`, `connectionProbe`, `connectionError`, and supporting modules). `netinfo.d.ts` is an ambient declaration for the optional React Native NetInfo dynamic import.
 - `tests/unit/` — `node --test` suites run against `tsc` output in `dist/unit/lib/`.
 - `scripts/check-protocol.cjs` — protocol consistency check against the compiled `todex.js`.
 

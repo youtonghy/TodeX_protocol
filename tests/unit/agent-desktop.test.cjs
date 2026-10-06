@@ -32,6 +32,23 @@ test('device-restricted permissions are answerable only on the named devices', (
   assert.deepEqual(permissionDeviceGate(request({ allowedDeviceIds: ['dev_desk'] }), undefined), { allowed: false, deviceNames: [] });
 });
 
+test('permission summaries expose the full command and why the provider asked', () => {
+  const { permissionRequestSummary } = require(path.join(compiledDir, 'todex.js'));
+  const request = (details) => ({ requestId: 'p', requestType: 'permission', title: 't', event: {}, data: { details } });
+  const command = 'L=/tmp/x && rm -f $L/*; cat $L/summary';
+  assert.deepEqual(permissionRequestSummary(request({
+    tool_name: 'Bash',
+    command,
+    reason: 'Dangerous rm operation',
+    decision_reason_type: 'safetyCheck',
+    input: { command, description: 'Run checks' },
+  })), { tool: 'Bash', command, cwd: undefined, description: 'Run checks', reason: 'Dangerous rm operation', safetyCheck: true });
+  assert.equal(permissionRequestSummary(request({ command: ['git', 'status'], cwd: '/repo' })).command, 'git status');
+  assert.deepEqual(permissionRequestSummary({ ...request(undefined), data: {} }), {
+    tool: undefined, command: undefined, cwd: undefined, description: undefined, reason: undefined, safetyCheck: false,
+  });
+});
+
 test('computer tool names are MCP- and model-API-safe', () => {
   for (const tool of desktop.AGENT_COMPUTER_TOOLS) {
     assert.match(tool, /^[a-zA-Z0-9_-]{1,64}$/);

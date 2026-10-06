@@ -313,6 +313,42 @@ export function permissionDeviceGate(request: PendingRequest, deviceId: string |
   return { allowed: false, deviceNames: [...new Set(deviceNames)] };
 }
 
+export type PermissionRequestSummary = {
+  /** Provider tool the request is for (Claude `tool_name`), if named. */
+  tool?: string;
+  /** Full command line to run, never truncated. */
+  command?: string;
+  cwd?: string;
+  /** The agent's own description of what the action is for. */
+  description?: string;
+  /** Why the provider asked, e.g. a Claude safety check that ignores bypass. */
+  reason?: string;
+  /** The provider's built-in safety check raised this prompt. */
+  safetyCheck: boolean;
+};
+
+/**
+ * What a person needs to judge a tool permission. Reads the shared
+ * `details.command` / `details.cwd` / `details.reason` keys (Codex native,
+ * lifted by the daemon for Claude) plus Claude's own descriptive fields.
+ */
+export function permissionRequestSummary(request: PendingRequest): PermissionRequestSummary {
+  const details = isObject(request.data.details) ? request.data.details : {};
+  const input = isObject(details.input) ? details.input : {};
+  const text = (value: unknown) => typeof value === 'string' && value.trim() ? value : undefined;
+  const command = Array.isArray(details.command)
+    ? details.command.filter((part): part is string => typeof part === 'string').join(' ') || undefined
+    : text(details.command);
+  return {
+    tool: text(details.tool_name),
+    command,
+    cwd: text(details.cwd),
+    description: text(details.description) ?? text(input.description),
+    reason: text(details.reason) ?? text(details.decision_reason),
+    safetyCheck: details.decision_reason_type === 'safetyCheck',
+  };
+}
+
 export function permissionActions(request: PendingRequest): Array<boolean | PermissionOption> {
   if (request.data.options === undefined) return [true, false];
   const options = permissionOptions(request);

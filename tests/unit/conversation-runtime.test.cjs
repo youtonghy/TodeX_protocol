@@ -436,7 +436,11 @@ test('backend follow-up queue snapshots replace the queue without touching the n
   state = apply(state, event(4, 'followups.updated', { items: [{ id: 'a', text: 'Next' }], paused: true, pauseReason: 'turn_failed', pauseMessage: 'boom' })).state;
   assert.equal(state.followUps.paused, true); assert.equal(state.followUps.pauseReason, 'turn_failed');
   assert.equal(state.followUps.pauseMessage, 'boom');
-  state = apply(state, event(5, 'followups.updated', { items: [], paused: true, pauseReason: 'stale' })).state;
+  assert.equal(state.followUps.resumeAt, '');
+  state = apply(state, event(5, 'followups.updated', { items: [{ id: 'rate-limit-continue-t1', text: 'Continue' }], paused: true, pauseReason: 'rate_limited', pauseMessage: null, resumeAt: '2026-10-06T09:30:00Z' })).state;
+  assert.equal(state.followUps.pauseReason, 'rate_limited');
+  assert.equal(state.followUps.resumeAt, '2026-10-06T09:30:00Z');
+  state = apply(state, event(6, 'followups.updated', { items: [], paused: true, pauseReason: 'stale' })).state;
   assert.deepEqual(state.followUps, runtime.EMPTY_FOLLOW_UP_QUEUE);
   assert.deepEqual(runtime.parseFollowUpQueue(null), runtime.EMPTY_FOLLOW_UP_QUEUE);
 });

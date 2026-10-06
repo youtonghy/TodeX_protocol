@@ -25,8 +25,9 @@ export type RuntimeCompaction = ContextCompactionState & { recommended: boolean 
 export type NativeQueueItem = { id: string; text: string; status: string };
 /** One prompt waiting in the daemon's follow-up queue (`followups.updated`). */
 export type FollowUpQueueItem = { id: string; text: string; status: string; queuedAt: string; contentCount: number; skills: string[] };
-export type FollowUpQueueState = { items: FollowUpQueueItem[]; paused: boolean; pauseReason: string; pauseMessage: string };
-export const EMPTY_FOLLOW_UP_QUEUE: FollowUpQueueState = Object.freeze({ items: [], paused: false, pauseReason: '', pauseMessage: '' }) as FollowUpQueueState;
+/** `resumeAt` (ISO 8601) is when a `rate_limited` pause lifts by itself; empty otherwise. */
+export type FollowUpQueueState = { items: FollowUpQueueItem[]; paused: boolean; pauseReason: string; pauseMessage: string; resumeAt: string };
+export const EMPTY_FOLLOW_UP_QUEUE: FollowUpQueueState = Object.freeze({ items: [], paused: false, pauseReason: '', pauseMessage: '', resumeAt: '' }) as FollowUpQueueState;
 /** Reads a backend follow-up queue snapshot (event payload or list result). */
 export function parseFollowUpQueue(value: unknown): FollowUpQueueState {
   const snapshot = object(value);
@@ -37,7 +38,8 @@ export function parseFollowUpQueue(value: unknown): FollowUpQueueState {
       contentCount: number(item.contentCount), skills: Array.isArray(item.skills) ? item.skills.map(string).filter(Boolean) : [] }] : [];
   });
   const paused = snapshot.paused === true && items.length > 0;
-  return { items, paused, pauseReason: paused ? string(snapshot.pauseReason) : '', pauseMessage: paused ? string(snapshot.pauseMessage) : '' };
+  return { items, paused, pauseReason: paused ? string(snapshot.pauseReason) : '', pauseMessage: paused ? string(snapshot.pauseMessage) : '',
+    resumeAt: paused ? string(snapshot.resumeAt) : '' };
 }
 type ExtensionEventIdentity = { runtimeId: string; eventId: string; sequence: number };
 export type ExtensionStatus = ExtensionEventIdentity & { key: string; text: string };

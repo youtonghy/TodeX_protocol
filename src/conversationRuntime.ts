@@ -23,6 +23,22 @@ const number = (value: unknown): number => typeof value === 'number' && Number.i
 export type RuntimePermission = { id: string; turnId: string; scope?: ExtensionScope; runtimeId?: string; event: ConversationEvent; payload: RecordValue };
 export type RuntimeCompaction = ContextCompactionState & { recommended: boolean };
 export type NativeQueueItem = { id: string; text: string; status: string };
+/** One prompt waiting in the daemon's follow-up queue (`followups.updated`). */
+export type FollowUpQueueItem = { id: string; text: string; status: string; queuedAt: string; contentCount: number; skills: string[] };
+export type FollowUpQueueState = { items: FollowUpQueueItem[]; paused: boolean; pauseReason: string; pauseMessage: string };
+export const EMPTY_FOLLOW_UP_QUEUE: FollowUpQueueState = Object.freeze({ items: [], paused: false, pauseReason: '', pauseMessage: '' }) as FollowUpQueueState;
+/** Reads a backend follow-up queue snapshot (event payload or list result). */
+export function parseFollowUpQueue(value: unknown): FollowUpQueueState {
+  const snapshot = object(value);
+  if (!Array.isArray(snapshot.items)) return EMPTY_FOLLOW_UP_QUEUE;
+  const items = snapshot.items.flatMap((entry): FollowUpQueueItem[] => {
+    const item = object(entry); const id = string(item.id);
+    return id ? [{ id, text: string(item.text), status: string(item.status) || 'queued', queuedAt: string(item.queuedAt),
+      contentCount: number(item.contentCount), skills: Array.isArray(item.skills) ? item.skills.map(string).filter(Boolean) : [] }] : [];
+  });
+  const paused = snapshot.paused === true && items.length > 0;
+  return { items, paused, pauseReason: paused ? string(snapshot.pauseReason) : '', pauseMessage: paused ? string(snapshot.pauseMessage) : '' };
+}
 type ExtensionEventIdentity = { runtimeId: string; eventId: string; sequence: number };
 export type ExtensionStatus = ExtensionEventIdentity & { key: string; text: string };
 export type ExtensionWidget = ExtensionEventIdentity & { key: string; lines: string[]; placement: 'aboveEditor' | 'belowEditor' };
@@ -91,6 +107,8 @@ export type ConversationRuntime = {
   floorAssistantSegment?: string | null;
   queueItems: NativeQueueItem[];
   queuePaused: boolean;
+  /** The daemon-held follow-up queue; separate from a provider's native queue. */
+  followUps: FollowUpQueueState;
   lastProgressAt: string | null;
 };
 export function createConversationRuntime(conversationId: string, workspaceId: string, appliedSequence = 0): ConversationRuntime {
@@ -98,7 +116,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
     subagents: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
-    messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
+    messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false, followUps: EMPTY_FOLLOW_UP_QUEUE,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
   };
@@ -681,6 +699,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
   if (type === 'queue.paused' || ['turn.failed', 'turn.cancelled', 'turn.interrupted'].includes(type)) {
     state.queuePaused = state.queueItems.length > 0;
   }
+  if (type === 'followups.updated') state.followUps = parseFollowUpQueue(payload);
   state.lastProgressAt = event.time;
 }
 

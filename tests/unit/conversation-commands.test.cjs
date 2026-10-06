@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { ConversationCommands, CommandOutcomeUnknown, controlFrame, promptContentFromAttachments } = require('../../dist/unit/lib/conversationCommands.js');
+const { ConversationCommands, CommandOutcomeUnknown, controlFrame, followUpQueueFrame, promptContentFromAttachments } = require('../../dist/unit/lib/conversationCommands.js');
 const frame = { id: 'request-1', type: 'conversation.prompt', payload: { conversationId: 'c', text: 'hello' } };
 
 test('command rejection is correlated, settles once, and does not resend', async () => {
@@ -65,4 +65,18 @@ test('live controls use the backend strict conversation.control envelope', () =>
   assert.throws(() => controlFrame('queue', 'c', { expectedTurnId: 't', control: { action: 'configure', itemId: 'x', text: 'x' } }), /不支持/);
   assert.deepEqual(controlFrame('followUp', 'c', { text: 'follow up' }), { type: 'conversation.followUp', payload: { text: 'follow up', conversationId: 'c' } });
   assert.deepEqual(controlFrame('cancel', 'c'), { type: 'conversation.cancel', payload: { conversationId: 'c' } });
+});
+
+test('follow-up queue frames name the backend queue command and require item ids', () => {
+  assert.deepEqual(followUpQueueFrame('add', 'c', { itemId: ' q1 ', text: 'next', front: true, content: [{ type: 'text', text: 'x' }] }), {
+    type: 'conversation.queue.add',
+    payload: { itemId: 'q1', text: 'next', front: true, content: [{ type: 'text', text: 'x' }], conversationId: 'c' },
+  });
+  assert.deepEqual(followUpQueueFrame('remove', 'c', { itemId: 'q1', text: 'ignored' }), { type: 'conversation.queue.remove', payload: { itemId: 'q1', conversationId: 'c' } });
+  for (const operation of ['clear', 'resume', 'list']) {
+    assert.deepEqual(followUpQueueFrame(operation, 'c', { itemId: 'q1' }), { type: `conversation.queue.${operation}`, payload: { conversationId: 'c' } });
+  }
+  assert.throws(() => followUpQueueFrame('add', 'c', { text: 'next' }), /消息 ID/);
+  assert.throws(() => followUpQueueFrame('remove', 'c', { itemId: ' ' }), /消息 ID/);
+  assert.throws(() => followUpQueueFrame('list', ' '), /会话 ID/);
 });

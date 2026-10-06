@@ -58,6 +58,21 @@ export function promptContentFromAttachments(attachments: readonly { kind: strin
   });
 }
 
+export type FollowUpQueueOperation = 'add' | 'remove' | 'clear' | 'resume' | 'list';
+
+/** `conversation.queue.*` frames for the daemon-held follow-up queue. `add`
+ * takes the `conversation.prompt` fields plus `itemId` (and `front`). */
+export function followUpQueueFrame(operation: FollowUpQueueOperation, conversationId: string, payload: Record<string, unknown> = {}): Omit<CommandFrame, 'id'> {
+  if (!conversationId.trim()) throw new Error('队列操作需要会话 ID。');
+  if (operation === 'add' || operation === 'remove') {
+    const itemId = typeof payload.itemId === 'string' ? payload.itemId.trim() : '';
+    if (!itemId) throw new Error('队列操作需要消息 ID。');
+    return { type: `conversation.queue.${operation}`, payload: operation === 'add'
+      ? { ...payload, itemId, conversationId } : { itemId, conversationId } };
+  }
+  return { type: `conversation.queue.${operation}`, payload: { conversationId } };
+}
+
 export function controlFrame(action: ConversationControlAction, conversationId: string, payload: Record<string, unknown> = {}): Omit<CommandFrame, 'id'> {
   if (action === 'steer' || action === 'queue') {
     const expectedTurnId = typeof payload.expectedTurnId === 'string' ? payload.expectedTurnId.trim() : '';

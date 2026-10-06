@@ -424,6 +424,23 @@ test('native queue snapshots replay deterministically and failures pause pending
   assert.deepEqual(apply(state, ...events).state.queueItems, state.queueItems);
 });
 
+test('backend follow-up queue snapshots replace the queue without touching the native one', () => {
+  let state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'followups.updated', { items: [{ id: 'a', text: 'Next', status: 'queued', queuedAt: '2026-10-06T00:00:00Z', contentCount: 2, skills: ['review', 3] }, { text: 'no id' }], paused: false })).state;
+  assert.deepEqual(state.followUps.items, [{ id: 'a', text: 'Next', status: 'queued', queuedAt: '2026-10-06T00:00:00Z', contentCount: 2, skills: ['review'] }]);
+  assert.equal(state.followUps.paused, false);
+  assert.deepEqual(state.queueItems, []);
+  // Turn endings do not guess the backend pause; the daemon reports it.
+  state = apply(state, event(3, 'turn.failed', { turnId: 't' })).state;
+  assert.equal(state.followUps.paused, false);
+  state = apply(state, event(4, 'followups.updated', { items: [{ id: 'a', text: 'Next' }], paused: true, pauseReason: 'turn_failed', pauseMessage: 'boom' })).state;
+  assert.equal(state.followUps.paused, true); assert.equal(state.followUps.pauseReason, 'turn_failed');
+  assert.equal(state.followUps.pauseMessage, 'boom');
+  state = apply(state, event(5, 'followups.updated', { items: [], paused: true, pauseReason: 'stale' })).state;
+  assert.deepEqual(state.followUps, runtime.EMPTY_FOLLOW_UP_QUEUE);
+  assert.deepEqual(runtime.parseFollowUpQueue(null), runtime.EMPTY_FOLLOW_UP_QUEUE);
+});
+
 test('summary stubs keep folded entries and hydrate fills content by id', () => {
   const stubbed = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'provider.event', { turnId: 't', detailStub: true,

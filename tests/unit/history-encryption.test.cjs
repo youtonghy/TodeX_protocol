@@ -18,6 +18,7 @@ const {
 const {
   HistoryDecryptor,
   historyCommands,
+  historyRetryPrompt,
   historyWrapsFetcher,
   parseHistoryEncryptionState,
   rewrapHistoryKeys,
@@ -229,6 +230,22 @@ test('locked events project one quiet notice per turn and never append', () => {
   assert.equal(rows[0].subtitle, '此设备尚未获授权查看这段历史');
   assert.equal(state.appliedSequence, 5);
   assert.equal(state.activeTurnId, '');
+});
+
+test('retry carries the latest user message of the newest-first timeline', () => {
+  const event = (sequence, type, payload) => ({ schemaVersion: 1, eventId: `e${sequence}`, conversationId: CONVERSATION, sequence, time: '2026-10-06T00:00:00Z', type, payload });
+  const turn = (base, id, text) => [
+    event(base, 'message.created', { turnId: id, role: 'user', content: text }),
+    event(base + 1, 'message.completed', { turnId: id, role: 'assistant', message: { text: `re: ${text}` } }),
+    event(base + 2, 'turn.completed', { turnId: id, status: 'completed' }),
+  ];
+  const { state } = applyConversationRuntimeEvents(createConversationRuntime(CONVERSATION, 'ws'), [
+    ...turn(1, 't1', 'first prompt'), ...turn(4, 't2', 'second prompt  '),
+  ]);
+  assert.equal(historyRetryPrompt(state.timeline), 'second prompt  ');
+  const locked = applyConversationRuntimeEvents(state, [event(7, 'message.created', { turnId: 't3', role: 'user', detailLocked: true })]).state;
+  assert.equal(historyRetryPrompt(locked.timeline), null);
+  assert.equal(historyRetryPrompt([]), null);
 });
 
 test('command frames validate their batch limits', () => {

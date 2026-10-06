@@ -12,6 +12,7 @@ import {
   type HistoryWrappedKeyJson,
 } from './historyCrypto';
 import { decodeBase64UrlBytes, encodeBase64Url } from './transportCrypto';
+import type { TimelineEntry } from './mobileParity';
 
 // Client side of end-to-end encrypted conversation history
 // (TodeX_backend docs/history-encryption.md). The backend relays ciphertext
@@ -605,6 +606,15 @@ export function parseFrames(value: unknown): HistoryFrames {
     }
   }
   return result;
+}
+
+/** The text `conversation.retry` must carry while history is encrypted (§7):
+ * the latest user message of a runtime timeline, which is newest-first.
+ * `null` when that message is locked on this device or empty, since the
+ * backend only accepts the exact original text. */
+export function historyRetryPrompt(timeline: readonly Pick<TimelineEntry, 'kind' | 'subtitle' | 'detailLocked'>[]): string | null {
+  const latest = timeline.find((entry) => entry.kind === 'outgoing');
+  return latest && !latest.detailLocked && latest.subtitle.trim() ? latest.subtitle : null;
 }
 
 // ---------------------------------------------------------------------------

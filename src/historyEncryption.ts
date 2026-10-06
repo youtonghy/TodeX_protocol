@@ -282,6 +282,11 @@ export class HistoryDecryptor {
   private readonly now: () => number;
   /** Single-flight key fetches per conversation+kid. */
   private readonly inflight = new Map<string, Promise<void>>();
+  /** Recently opened frames. Socket backfill attaches the same frame to every
+   * message referring to it and each message is decrypted on its own, so
+   * without this a ~1 MiB frame is opened and inflated once per event. Reused
+   * only for a byte-identical frame under the same conversation. */
+  private recentFrames: { scope: string; frame: HistoryFrame; items: Promise<unknown[] | null> }[] = [];
 
   constructor(options: HistoryDecryptorOptions) {
     this.fetchWraps = options.fetchWraps;
@@ -315,6 +320,7 @@ export class HistoryDecryptor {
 
   /** Zeroes and forgets every DEK and seed. */
   clear(): void {
+    this.recentFrames = [];
     for (const entry of this.keys.values()) if ('key' in entry) entry.key.dek.fill(0);
     this.keys.clear();
     for (const entry of this.seeds) entry.seed.fill(0);
@@ -425,8 +431,20 @@ export class HistoryDecryptor {
     }
   }
 
-  private async openFrame(scope: string, frame: HistoryFrame | undefined): Promise<unknown[] | null> {
-    if (!frame) return null;
+  private openFrame(scope: string, frame: HistoryFrame | undefined): Promise<unknown[] | null> {
+    if (!frame) return Promise.resolve(null);
+    const hit = this.recentFrames.find((entry) => entry.scope === scope && sameFrame(entry.frame, frame));
+    if (hit) return hit.items;
+    const items = this.openFrameUncached(scope, frame);
+    // A frame that could not be opened (key not here yet) is asked again.
+    void items.then((opened) => {
+      if (!opened) this.recentFrames = this.recentFrames.filter((entry) => entry.items !== items);
+    });
+    this.recentFrames = [{ scope, frame, items }, ...this.recentFrames].slice(0, RECENT_FRAMES);
+    return items;
+  }
+
+  private async openFrameUncached(scope: string, frame: HistoryFrame): Promise<unknown[] | null> {
     const key = this.cachedKey(scope, frame.kid);
     if (!key || (frame.stream !== HistoryContentStream.FrameSummary && frame.stream !== HistoryContentStream.FrameFull)) return null;
     try {
@@ -536,6 +554,13 @@ export class HistoryDecryptor {
     const missingUntil = this.now() + this.missingTtlMs;
     for (const kid of remaining) this.remember(scope, kid, { missingUntil });
   }
+}
+
+/** Opened frames kept for reuse across separately decrypted messages. */
+const RECENT_FRAMES = 2;
+
+function sameFrame(a: HistoryFrame, b: HistoryFrame): boolean {
+  return a.kid === b.kid && a.stream === b.stream && a.counter === b.counter && a.c === b.c && a.ct === b.ct;
 }
 
 function eventScope(event: HistoryWireEvent, fallback?: string): string {

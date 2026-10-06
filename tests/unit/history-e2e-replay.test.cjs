@@ -74,3 +74,28 @@ test('without a wrap for this device every event stays in place, locked', async 
     assert.equal(event.payload.turnId, fixture.expected[event.sequence - 1].turnId);
   }
 });
+
+test('a frame repeated on every socket message is opened once; a forged copy is not served from memory', async () => {
+  const zlib = require('node:zlib');
+  let inflations = 0;
+  const instance = new HistoryDecryptor({
+    seeds: [Buffer.from(fixture.seed, 'hex')],
+    inflateFrame: (bytes) => { inflations++; return zlib.inflateRawSync(bytes); },
+    fetchWraps: async ({ kids, rid }) => Object.fromEntries(kids.flatMap((kid) => {
+      const wrap = (fixture.keyring[kid] ?? []).find((entry) => entry.rid === rid);
+      return wrap ? [[kid, wrap]] : [];
+    })),
+  });
+  const framed = fixture.socketBackfillSummary.filter((message) => message.frames);
+  assert.ok(framed.length > 1);
+  for (const message of framed) {
+    await instance.decryptEvents([message.payload], { frames: message.frames, detail: 'summary', conversationId: fixture.conversationId });
+  }
+  assert.equal(inflations, new Set(framed.flatMap((message) => Object.keys(message.frames))).size);
+  // Same frame id, different ciphertext: opened again, and it fails closed.
+  const [message] = framed;
+  const [id, frame] = Object.entries(message.frames)[0];
+  const forged = { [id]: { ...frame, ct: frame.ct.slice(0, -4) + (frame.ct.endsWith('AAAA') ? 'BBBB' : 'AAAA') } };
+  const [event] = await instance.decryptEvents([message.payload], { frames: forged, detail: 'summary', conversationId: fixture.conversationId });
+  assert.equal(event.payload.detailLocked, true);
+});

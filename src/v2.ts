@@ -518,6 +518,9 @@ export type ConversationManifest = {
   workspace: string;
   workspaceId?: string;
   title?: string;
+  /** End-to-end encrypted title (docs/history-encryption.md §3.2); `title`
+   * is empty then. Decrypt with HistoryDecryptor.decryptTitle. */
+  titleEnc?: { kid: string; ct: string };
   providerProfile?: string;
   status: string;
   lastSequence: number;
@@ -679,6 +682,9 @@ export type ConversationReplay = {
   nextSequence: number;
   hasMore: boolean;
   events: ConversationEvent[];
+  /** Sealed-segment ciphertext frames referenced by `payload.$enc.fr`
+   * (history e2e, §5.3); consumed by HistoryDecryptor.decryptPage. */
+  frames?: Record<string, unknown>;
 };
 
 export type V2Message = {
@@ -694,6 +700,9 @@ export type V2ApiOptions = {
   device?: DeviceIdentity | null;
   fetchImpl?: typeof fetch;
   timeout?: number;
+  /** Declare `historyEncryption=1` on history reads: this client decrypts
+   * `$enc` payloads (§5.4). An e2e backend rejects history reads without it. */
+  historyEncryption?: boolean;
 };
 
 export type CreateConversationInput = {
@@ -771,6 +780,11 @@ export function buildV2WebSocketUrl(serverUrl: string): string {
   return url.toString();
 }
 
+/** Value a client declares as `historyEncryption` (WS handshake query,
+ * history page query, subscribe payload) when it decrypts `$enc` payloads
+ * (TodeX_backend docs/history-encryption.md §5.4). */
+export const HISTORY_ENCRYPTION_CAPABILITY = 1;
+
 export type V2WebSocketUrlOptions = {
   /** Raw pairing-crypto query string (e.g. `enc=x25519&client_key=...`). */
   cryptoQueryString?: string;
@@ -779,6 +793,8 @@ export type V2WebSocketUrlOptions = {
   /** Paired device identity; browsers cannot set WebSocket headers, so the
    * credential rides as a signed query covering the crypto parameters. */
   device?: DeviceIdentity | null;
+  /** Declare end-to-end history support in the handshake (§5.4). */
+  historyEncryption?: boolean;
 };
 
 export function buildV2WebSocketUrlWithOptions(
@@ -791,6 +807,9 @@ export function buildV2WebSocketUrlWithOptions(
     for (const [key, value] of new URLSearchParams(query)) {
       url.searchParams.set(key, value);
     }
+  }
+  if (options.historyEncryption) {
+    url.searchParams.set('historyEncryption', String(HISTORY_ENCRYPTION_CAPABILITY));
   }
   if (options.authToken) {
     url.searchParams.set('access_token', options.authToken);
@@ -819,6 +838,7 @@ export class V2ApiClient {
   private readonly device: DeviceIdentity | null;
   private readonly fetchImpl: typeof fetch;
   private readonly timeout: number;
+  private readonly historyEncryption: boolean;
 
   constructor(options: V2ApiOptions) {
     this.serverUrl = options.serverUrl;
@@ -827,6 +847,7 @@ export class V2ApiClient {
     // Browser fetch requires its Window receiver when called outside `window`.
     this.fetchImpl = options.fetchImpl ?? (typeof window !== 'undefined' ? fetch.bind(window) : fetch);
     this.timeout = options.timeout ?? 30000;
+    this.historyEncryption = options.historyEncryption === true;
   }
 
   async listProviders(): Promise<{ providers: ProviderDescriptor[] }> {
@@ -1033,6 +1054,7 @@ export class V2ApiClient {
     // `summary` folds process-only events down to detailStub markers; clients
     // fetch the full payloads for a sequence range when a group is expanded.
     if (detail !== 'full') query.set('detail', detail);
+    if (this.historyEncryption) query.set('historyEncryption', String(HISTORY_ENCRYPTION_CAPABILITY));
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/events?${query}`);
   }
 
@@ -1043,6 +1065,7 @@ export class V2ApiClient {
   async replayEventsBefore(id: string, beforeSequence: number, limit = 200, detail: 'full' | 'summary' = 'full'): Promise<ConversationReplay> {
     const query = new URLSearchParams({ beforeSequence: String(beforeSequence), limit: String(limit) });
     if (detail !== 'full') query.set('detail', detail);
+    if (this.historyEncryption) query.set('historyEncryption', String(HISTORY_ENCRYPTION_CAPABILITY));
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/events?${query}`);
   }
 

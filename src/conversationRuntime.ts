@@ -808,7 +808,7 @@ export function hydrateConversationRuntimeEvents(
 
 /** Row fields that describe how a projection built the row rather than what
  * it shows; an older projection must not copy them onto a newer row. */
-const PROJECTION_FLAGS: ReadonlySet<string> = new Set(['detailStub', 'streamedText']);
+const PROJECTION_FLAGS: ReadonlySet<string> = new Set(['detailStub', 'detailLocked', 'streamedText']);
 
 /** Merge a row projected from an earlier history page into the loaded row of
  * the same id. Streamed text continues the earlier text; any other newer row

@@ -712,6 +712,10 @@ export type TimelineEntry = {
   firstSequence?: number;
   /** Placeholder for a `detail=summary` replay event: content loads on expand. */
   detailStub?: boolean;
+  /** Stands for end-to-end encrypted events this device holds no key for
+   * (`payload.detailLocked`, docs/history-encryption.md §5.3): one quiet
+   * notice per turn instead of the content. */
+  detailLocked?: boolean;
   /** Progress block ids a final answer was streamed under (`block.supersedes`). */
   supersedes?: string[];
   /** Subagent run the row belongs to (providers tag events emitted for a
@@ -924,6 +928,8 @@ export function shouldAppendV2ConversationEvent(event: ConversationEvent): boole
   const delta = asRecord(payload?.delta);
   const type = canonicalConversationEventType(event);
   const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
+  // A locked placeholder replaces, never extends, the turn's notice row.
+  if (payload?.detailLocked === true) return false;
   const block = payload ? conversationBlock(payload, '') : null;
   // Tool blocks are structured snapshots ({toolName, arguments, result});
   // appending them would corrupt the JSON subtitle instead of streaming text.
@@ -1166,6 +1172,20 @@ export function classifyV2ConversationEvent(
   }
   if (type === 'message.completed' && (role === 'user' || role === 'human')) {
     return null;
+  }
+  // Encrypted content this device cannot open yet: every content event of a
+  // turn merges into one notice. Lifecycle, usage and status events keep their
+  // plaintext envelope fields and project as usual.
+  if (payload.detailLocked === true && (block || role === 'user' || role === 'human'
+    || /^(?:message|thought|tool|subagent|assistant|reasoning|permission)\./.test(type) || type === 'provider.event')) {
+    return {
+      ...base,
+      id: `v2-locked-${conversationId}-${turnId || 'turnless'}`,
+      kind: 'system',
+      title: '历史已加密',
+      subtitle: '此设备尚未获授权查看这段历史',
+      detailLocked: true,
+    };
   }
   if (
     type === 'message.completed'

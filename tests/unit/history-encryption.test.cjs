@@ -83,7 +83,7 @@ test('event-level ciphertext opens per detail; plaintext events pass through in 
   assert.equal(await decryptor.decryptPage(clear, 'summary'), clear);
 });
 
-test('frame-level ciphertext resolves through the page frames map, zstd included', async () => {
+test('frame-level ciphertext is raw DEFLATE and resolves through the page frames map', async () => {
   const device = generateHistoryRecipientKeyPair();
   const key = newHistorySegmentKey();
   const ring = keyring();
@@ -91,22 +91,29 @@ test('frame-level ciphertext resolves through the page frames map, zstd included
   const summaries = [{ turnId: 't', n: 0, detailStub: true }, { turnId: 't', n: 1, detailStub: true }];
   const fulls = [{ turnId: 't', n: 0, text: 'a' }, { turnId: 't', n: 1, text: 'b' }];
   const frames = {
-    fs: { kid: b64(key.kid), stream: 3, counter: 7, c: 'conv_source', ct: b64(sealHistoryContent(key, 'conv_source', 3, 7, json(summaries))) },
-    ff: { kid: b64(key.kid), stream: 4, counter: 8, c: 'conv_source', ct: b64(sealHistoryContent(key, 'conv_source', 4, 8, zlib.zstdCompressSync(Buffer.from(JSON.stringify(fulls))))) },
+    fs: { kid: b64(key.kid), stream: 3, counter: 7, c: 'conv_source', ct: b64(sealHistoryContent(key, 'conv_source', 3, 7, zlib.deflateRawSync(Buffer.from(JSON.stringify(summaries))))) },
+    ff: { kid: b64(key.kid), stream: 4, counter: 8, c: 'conv_source', ct: b64(sealHistoryContent(key, 'conv_source', 4, 8, zlib.deflateRawSync(Buffer.from(JSON.stringify(fulls))))) },
   };
   const events = [0, 1].map((index) => ({ eventId: `e${index}`, conversationId: CONVERSATION, sequence: index + 1, time: 't', type: 'tool.updated',
     payload: { turnId: 't', $enc: { v: 1, kid: b64(key.kid), c: 'conv_source', n: 40 + index, fr: { s: 'fs', f: 'ff', i: index } } } }));
-  const decompressed = [];
-  const decryptor = new HistoryDecryptor({ seeds: [device.secretKey], fetchWraps: ring.fetchWraps,
-    decompress: (bytes) => { decompressed.push(bytes.length); return zlib.zstdDecompressSync(bytes); } });
+  // The default inflater is DecompressionStream('deflate-raw').
+  const decryptor = new HistoryDecryptor({ seeds: [device.secretKey], fetchWraps: ring.fetchWraps });
 
   const summary = await decryptor.decryptPage({ conversationId: CONVERSATION, events, frames }, 'summary');
   assert.equal('frames' in summary, false);
   assert.deepEqual(summary.events.map((event) => event.payload), summaries);
   const full = await decryptor.decryptPage({ conversationId: CONVERSATION, events, frames }, 'full');
   assert.deepEqual(full.events.map((event) => event.payload), fulls);
-  // The full frame was opened and inflated once for both events.
-  assert.equal(decompressed.length, 1);
+  // Each frame is opened and inflated once per page, shared by its events.
+  const inflated = [];
+  const counting = new HistoryDecryptor({ seeds: [device.secretKey], fetchWraps: ring.fetchWraps,
+    inflateFrame: (bytes) => { inflated.push(bytes.length); return zlib.inflateRawSync(bytes); } });
+  await counting.decryptPage({ conversationId: CONVERSATION, events, frames }, 'full');
+  assert.equal(inflated.length, 1);
+  // A frame that is not DEFLATE locks its events instead of failing the page.
+  const raw = { ...frames.fs, ct: b64(sealHistoryContent(key, 'conv_source', 3, 7, json(summaries))) };
+  const notDeflate = await decryptor.decryptPage({ conversationId: CONVERSATION, events, frames: { fs: raw } }, 'summary');
+  assert.equal(notDeflate.events[0].payload.detailLocked, true);
   // A summary-only page still serves a full request from the frame it has.
   const onlySummary = await decryptor.decryptPage({ conversationId: CONVERSATION, events, frames: { fs: frames.fs } }, 'full');
   assert.deepEqual(onlySummary.events.map((event) => event.payload), summaries);
@@ -229,11 +236,13 @@ test('command frames validate their batch limits', () => {
   assert.throws(() => historyCommands.wraps('c', []), /最多/);
   assert.throws(() => historyCommands.wraps('c', new Array(501).fill('k')), /最多/);
   assert.throws(() => historyCommands.fulfill('rid', []), /最多/);
+  assert.deepEqual(historyCommands.fulfill('rid', [], 'g', true).payload, { grantId: 'g', rid: 'rid', wraps: [], complete: true });
   assert.deepEqual(historyCommands.fulfill('rid', [{ conversationId: 'c', kid: 'k', wrapped: {} }]).payload, { rid: 'rid', wraps: [{ conversationId: 'c', kid: 'k', wrapped: {} }] });
   assert.equal(historyCommands.register(new Uint8Array([1, 2])).payload.publicKey, 'AQI');
-  const state = parseHistoryEncryptionState({ mode: 'e2e', epoch: 3, myRid: 'r1', recipients: [{ rid: 'r1', kind: 'device', deviceId: 'dev_1', publicKey: 'pk', addedAt: 'a', revokedAt: null }, { bad: true }], grants: [{ grantId: 'g', rid: 'r2', deviceId: 'dev_2', requestedAt: 'b', status: 'pending' }] });
+  const state = parseHistoryEncryptionState({ mode: 'e2e', epoch: 3, myRid: 'r1', recipients: [{ rid: 'r1', kind: 'device', deviceId: 'dev_1', publicKey: 'pk', addedAt: 'a', revokedAt: null }, { bad: true }], grants: [{ grantId: 'g', rid: 'r2', deviceId: 'dev_2', requestedAt: 'b', status: 'fulfilled', publicKey: 'pk2' }, { grantId: 'h', rid: 'r3', status: 'weird' }, { grantId: 'i', rid: 'r4' }] });
   assert.equal(state.recipients.length, 1);
-  assert.equal(state.grants[0].grantId, 'g');
+  assert.deepEqual(state.grants[0], { grantId: 'g', rid: 'r2', deviceId: 'dev_2', requestedAt: 'b', status: 'fulfilled', publicKey: 'pk2' });
+  assert.deepEqual(state.grants.map((grant) => [grant.grantId, grant.status]), [['g', 'fulfilled'], ['i', 'pending']]);
   assert.throws(() => parseHistoryEncryptionState({ mode: 'maybe' }), /格式无效/);
   const url = new URL(buildV2WebSocketUrlWithOptions('http://127.0.0.1:1', { historyEncryption: true }));
   assert.equal(url.searchParams.get('historyEncryption'), '1');
@@ -251,6 +260,7 @@ test('grant re-wrap walks keys.list pages, re-wraps for the target and resumes f
   ring.grant(keys[2], source.publicKey);
   const sent = [];
   const fulfilled = [];
+  const completes = [];
   const send = async ({ type, payload }) => {
     sent.push(type);
     if (type === 'history.keys.list') {
@@ -266,6 +276,7 @@ test('grant re-wrap walks keys.list pages, re-wraps for the target and resumes f
     if (type === 'history.grant.fulfill') {
       assert.equal(payload.rid, targetRid);
       assert.equal(payload.grantId, 'grt_1');
+      completes.push(payload.complete === true);
       fulfilled.push(...payload.wraps);
       return { added: payload.wraps.length };
     }
@@ -275,6 +286,8 @@ test('grant re-wrap walks keys.list pages, re-wraps for the target and resumes f
   const result = await rewrapHistoryKeys({ send, sourceSeed: source.secretKey, targetPublicKey: target.publicKey, grantId: 'grt_1', batchSize: 2, onProgress: (value) => progress.push(value) });
   assert.deepEqual(result, { processed: 3, added: 2, skipped: 1 });
   assert.deepEqual(progress.map((value) => value.cursor), ['2', undefined]);
+  // Only the last batch of the grant is marked complete.
+  assert.deepEqual(completes, [false, true]);
   // The target can open what it was given.
   for (const wrap of fulfilled) {
     const key = items.find((item) => b64(item.key.kid) === wrap.kid).key;
@@ -287,6 +300,7 @@ test('grant re-wrap walks keys.list pages, re-wraps for the target and resumes f
   fulfilled.length = 0;
   const resumed = await rewrapHistoryKeys({ send, sourceSeed: source.secretKey, targetPublicKey: target.publicKey, grantId: 'grt_1', batchSize: 2, cursor: '2' });
   assert.deepEqual(resumed, { processed: 1, added: 1, skipped: 0 });
+  assert.deepEqual(completes.slice(2), [true]);
 
   const controller = new AbortController();
   controller.abort();

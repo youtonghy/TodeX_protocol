@@ -65,12 +65,15 @@ export type HistoryRecipient = {
   revokedAt: string | null;
 };
 
+export type HistoryGrantStatus = 'pending' | 'fulfilled' | 'dismissed' | 'revoked';
 export type HistoryGrant = {
   grantId: string;
   rid: string;
   deviceId: string;
   requestedAt: string;
-  status: string;
+  status: HistoryGrantStatus;
+  /** The requesting device's history public key (base64url): the re-wrap target. */
+  publicKey?: string;
 };
 
 /** Response of `history.encryption.get|enable|disable` and `recipient.revoke`. */
@@ -130,11 +133,12 @@ export const historyCommands = {
       payload: { conversationId: requireText(conversationId, '会话'), kids: [...kids], ...(rid ? { rid } : {}) },
     };
   },
-  fulfill: (rid: string, wraps: readonly HistoryGrantWrap[], grantId?: string): HistoryCommandFrame => {
-    if (!wraps.length || wraps.length > HISTORY_BATCH_LIMIT) throw new Error(`每批最多上传 ${HISTORY_BATCH_LIMIT} 个密钥`);
+  /** `complete` marks a grant's last batch (it may then carry no wraps). */
+  fulfill: (rid: string, wraps: readonly HistoryGrantWrap[], grantId?: string, complete = false): HistoryCommandFrame => {
+    if ((!wraps.length && !complete) || wraps.length > HISTORY_BATCH_LIMIT) throw new Error(`每批最多上传 ${HISTORY_BATCH_LIMIT} 个密钥`);
     return {
       type: 'history.grant.fulfill',
-      payload: { ...(grantId ? { grantId } : {}), rid: requireText(rid, '接收方'), wraps: [...wraps] },
+      payload: { ...(grantId ? { grantId } : {}), rid: requireText(rid, '接收方'), wraps: [...wraps], ...(complete ? { complete: true } : {}) },
     };
   },
 };
@@ -177,16 +181,21 @@ export function parseHistoryEncryptionState(value: unknown): HistoryEncryptionSt
   };
 }
 
+const GRANT_STATUSES: ReadonlySet<HistoryGrantStatus> = new Set(['pending', 'fulfilled', 'dismissed', 'revoked']);
+
 export function parseHistoryGrants(value: unknown): HistoryGrant[] {
   return Array.isArray(value) ? value.flatMap((item): HistoryGrant[] => {
     const entry = record(item);
     if (!entry || typeof entry.grantId !== 'string' || typeof entry.rid !== 'string') return [];
+    // A status this client does not know is never offered as actionable.
+    if (entry.status !== undefined && !GRANT_STATUSES.has(entry.status as HistoryGrantStatus)) return [];
     return [{
       grantId: entry.grantId,
       rid: entry.rid,
       deviceId: typeof entry.deviceId === 'string' ? entry.deviceId : '',
       requestedAt: typeof entry.requestedAt === 'string' ? entry.requestedAt : '',
-      status: typeof entry.status === 'string' ? entry.status : 'pending',
+      status: (entry.status as HistoryGrantStatus | undefined) ?? 'pending',
+      ...(typeof entry.publicKey === 'string' && entry.publicKey ? { publicKey: entry.publicKey } : {}),
     }];
   }) : [];
 }
@@ -235,10 +244,10 @@ export type HistoryDecryptorOptions = {
   /** How long a kid without a usable wrap stays locked before it is asked
    * for again. Default 30 s; `forgetMissing()` clears it at once. */
   missingTtlMs?: number;
-  /** Frame plaintext arrives zstd-compressed when it starts with the zstd
-   * magic (§4.3); supply a decoder for it. Defaults to
-   * `DecompressionStream('zstd')` where the runtime offers it. */
-  decompress?: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>;
+  /** Inflates a decrypted frame: sealed frames are always raw DEFLATE
+   * (RFC 1951) of the JSON payload array (§4.3). Defaults to
+   * `DecompressionStream('deflate-raw')`. */
+  inflateFrame?: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>;
   now?: () => number;
 };
 
@@ -248,7 +257,6 @@ export type HistoryWirePage<E extends HistoryWireEvent = HistoryWireEvent> = { c
 
 type CachedKey = { key: HistorySegmentKey } | { missingUntil: number };
 
-const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
 /** Does this payload carry ciphertext? */
@@ -270,7 +278,7 @@ export class HistoryDecryptor {
   private readonly fetchWraps: HistoryWrapsFetcher;
   private readonly maxKeys: number;
   private readonly missingTtlMs: number;
-  private readonly decompress?: HistoryDecryptorOptions['decompress'];
+  private readonly inflateFrame?: HistoryDecryptorOptions['inflateFrame'];
   private readonly now: () => number;
   /** Single-flight key fetches per conversation+kid. */
   private readonly inflight = new Map<string, Promise<void>>();
@@ -279,7 +287,7 @@ export class HistoryDecryptor {
     this.fetchWraps = options.fetchWraps;
     this.maxKeys = Math.max(1, options.maxKeys ?? 512);
     this.missingTtlMs = options.missingTtlMs ?? 30_000;
-    this.decompress = options.decompress;
+    this.inflateFrame = options.inflateFrame;
     this.now = options.now ?? Date.now;
     this.setSeeds(options.seeds ?? []);
   }
@@ -353,7 +361,7 @@ export class HistoryDecryptor {
     for (const event of events) {
       const scope = eventScope(event, options.conversationId);
       if (this.kidsOf(event, options.frames ?? {}, options.detail).some((kid) => !this.cachedEntry(scope, kid))) return null;
-      // Frame plaintext may need an async decompressor.
+      // Frame plaintext is inflated asynchronously.
       if (record(record(record(event.payload)?.$enc)?.fr)) return null;
     }
     return this.openEventsSync(events, options);
@@ -422,9 +430,8 @@ export class HistoryDecryptor {
     const key = this.cachedKey(scope, frame.kid);
     if (!key || (frame.stream !== HistoryContentStream.FrameSummary && frame.stream !== HistoryContentStream.FrameFull)) return null;
     try {
-      let plaintext = openHistoryContent(key, frame.c, frame.stream, frame.counter, decodeBase64UrlBytes(frame.ct));
-      if (ZSTD_MAGIC.every((byte, index) => plaintext[index] === byte)) plaintext = await this.inflate(plaintext);
-      const items: unknown = JSON.parse(decoder.decode(plaintext));
+      const compressed = openHistoryContent(key, frame.c, frame.stream, frame.counter, decodeBase64UrlBytes(frame.ct));
+      const items: unknown = JSON.parse(decoder.decode(await this.inflate(compressed)));
       return Array.isArray(items) ? items : null;
     } catch {
       return null;
@@ -432,9 +439,8 @@ export class HistoryDecryptor {
   }
 
   private async inflate(bytes: Uint8Array): Promise<Uint8Array> {
-    if (this.decompress) return this.decompress(bytes);
-    if (typeof DecompressionStream === 'undefined') throw new Error('zstd unsupported');
-    const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream('zstd' as CompressionFormat));
+    if (this.inflateFrame) return this.inflateFrame(bytes);
+    const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
@@ -596,7 +602,8 @@ export type HistoryRewrapOptions = {
   sourceSeed: Uint8Array;
   /** Recipient that receives the new wraps. */
   targetPublicKey: Uint8Array;
-  /** Omitted for the recovery self-grant. */
+  /** Omitted for the recovery self-grant; with it the last batch is sent
+   * with `complete: true`. */
   grantId?: string;
   /** Continue an interrupted run from this `keys.list` cursor. */
   cursor?: string;
@@ -643,9 +650,13 @@ export async function rewrapHistoryKeys(options: HistoryRewrapOptions): Promise<
           }
         }
       }
-      for (let offset = 0; offset < rewrapped.length; offset += batchSize) {
+      // A grant's last batch says so (`complete`), even when it is empty.
+      const finishing = !page.nextCursor && Boolean(options.grantId);
+      for (let offset = 0; offset < rewrapped.length || (finishing && offset === 0); offset += batchSize) {
         checkAbort();
-        const result = await options.send(historyCommands.fulfill(targetRid, rewrapped.slice(offset, offset + batchSize), options.grantId));
+        const batch = rewrapped.slice(offset, offset + batchSize);
+        const complete = finishing && offset + batchSize >= rewrapped.length;
+        const result = await options.send(historyCommands.fulfill(targetRid, batch, options.grantId, complete));
         progress.added += typeof result.added === 'number' ? result.added : 0;
       }
       progress.processed += page.items.length;

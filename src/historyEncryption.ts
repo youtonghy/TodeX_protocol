@@ -617,6 +617,27 @@ export function historyRetryPrompt(timeline: readonly Pick<TimelineEntry, 'kind'
   return latest && !latest.detailLocked && latest.subtitle.trim() ? latest.subtitle : null;
 }
 
+/** The original request an encrypted user `message.created` carries for
+ * retries (§7): the trimmed text and the original `content` items. Summary
+ * pages leave it out, so it is read from the message in full detail. */
+export type HistoryRetryRequest = { text: string; content: unknown[] };
+
+/** `retryRequest` of a decrypted user message payload, or `null` when the
+ * message predates it or is not readable. */
+export function historyRetryRequest(payload: unknown): HistoryRetryRequest | null {
+  const request = record(record(payload)?.retryRequest);
+  if (!request || typeof request.text !== 'string' || !Array.isArray(request.content)) return null;
+  return { text: request.text, content: request.content };
+}
+
+/** Sequence of the latest user message of a newest-first runtime timeline,
+ * to fetch in full detail for its `retryRequest`; `null` when that message
+ * is locked on this device (projected empty) or has no sequence. */
+export function historyRetrySequence(timeline: readonly Pick<TimelineEntry, 'kind' | 'subtitle' | 'detailLocked' | 'sequence'>[]): number | null {
+  const latest = timeline.find((entry) => entry.kind === 'outgoing');
+  return latest && !latest.detailLocked && latest.subtitle.trim() && typeof latest.sequence === 'number' ? latest.sequence : null;
+}
+
 // ---------------------------------------------------------------------------
 // Grants and recovery (§3.3)
 

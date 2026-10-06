@@ -19,6 +19,8 @@ const {
   HistoryDecryptor,
   historyCommands,
   historyRetryPrompt,
+  historyRetryRequest,
+  historyRetrySequence,
   historyWrapsFetcher,
   parseHistoryEncryptionState,
   rewrapHistoryKeys,
@@ -246,6 +248,20 @@ test('retry carries the latest user message of the newest-first timeline', () =>
   const locked = applyConversationRuntimeEvents(state, [event(7, 'message.created', { turnId: 't3', role: 'user', detailLocked: true })]).state;
   assert.equal(historyRetryPrompt(locked.timeline), null);
   assert.equal(historyRetryPrompt([]), null);
+  assert.equal(historyRetrySequence(state.timeline), 4);
+  assert.equal(historyRetrySequence(locked.timeline), null);
+  assert.equal(historyRetrySequence([]), null);
+});
+
+test('retry request is read from the full user message payload', () => {
+  const content = [{ type: 'text', text: 'inline' }, { type: 'file', path: '/w/a.txt' }];
+  assert.deepEqual(
+    historyRetryRequest({ role: 'user', content: 'x', retryRequest: { text: '', content } }),
+    { text: '', content },
+  );
+  assert.equal(historyRetryRequest({ role: 'user', content: 'x' }), null);
+  assert.equal(historyRetryRequest({ retryRequest: { text: 1, content: [] } }), null);
+  assert.equal(historyRetryRequest(null), null);
 });
 
 test('command frames validate their batch limits', () => {

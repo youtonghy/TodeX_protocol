@@ -383,6 +383,8 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
         body: inner.body.length || !['GET', 'HEAD'].includes(inner.method)
           ? inner.body as Uint8Array<ArrayBuffer>
           : undefined,
+        // A redirect would replay the signed request to another URL.
+        redirect: 'error',
         signal: request.signal,
       });
       const headers = headersRecord(response.headers);
@@ -407,6 +409,9 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
         method: 'POST',
         headers: sealed.headers,
         body: sealed.body as Uint8Array<ArrayBuffer>,
+        // The backend never redirects `/v2/sealed`; following one would hand
+        // the sealed request to whatever the redirect names.
+        redirect: 'error',
         signal: request.signal,
       });
     } catch (error) {

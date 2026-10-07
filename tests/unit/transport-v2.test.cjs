@@ -434,6 +434,8 @@ test('policy: pinned key uses the tunnel (even on loopback); remote without key 
   assert.equal(loopback.mode, 'plaintext');
   const response = await loopback.fetch({ method: 'GET', path: '/v2/providers', query: { a: 'b' } });
   assert.equal(server.calls[0].url.pathname, '/v2/providers');
+  // A redirect must not replay the (signed) request to another URL.
+  assert.equal(server.calls[0].init.redirect, 'error');
   assert.deepEqual(JSON.parse(new TextDecoder().decode(response.body)), { plain: true, path: '/v2/providers', query: '?a=b' });
 });
 
@@ -535,6 +537,7 @@ test('REST tunnel end to end: signed inner request, streamed sealed response', a
   assert.equal(call.url.pathname, '/v2/sealed');
   assert.equal(call.url.search, '');
   assert.equal(call.init.method, 'POST');
+  assert.equal(call.init.redirect, 'error');
   assert.equal(call.inner.method, 'POST');
   assert.equal(call.inner.path, '/v2/workspaces');
   assert.equal(call.inner.query, 'x=1');

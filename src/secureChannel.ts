@@ -36,6 +36,13 @@ export const TRANSPORT_V2_WS_FRAME_OVERHEAD = 8 + TRANSPORT_V2_TAG_LENGTH;
  * keeps a hostile peer from making the client buffer an unbounded head.
  */
 export const TRANSPORT_V2_MAX_HEAD_BYTES = 65536;
+/**
+ * Largest REST request body a backend accepts (`MAX_AUTH_BODY` in the
+ * backend's device_auth.rs): signed bodies are buffered up to it, and the
+ * sealed tunnel bounds its inner plaintext by it. A larger body comes back
+ * as an opaque 400, so clients check it before sending.
+ */
+export const MAX_REST_BODY_BYTES = 32 * 1024 * 1024;
 export const TRANSPORT_V2_SEALED_CONTENT_TYPE = 'application/vnd.todex.sealed';
 export const TRANSPORT_V2_SEALED_PATH = '/v2/sealed';
 export const TRANSPORT_V2_WS_CLOSE_CODE = 4400;

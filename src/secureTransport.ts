@@ -7,7 +7,9 @@ import {
   TRANSPORT_V2_WS_CLOSE_CODE,
   TRANSPORT_V2_WS_CLOSE_REASON,
   TRANSPORT_V2_VERSION,
+  MAX_REST_BODY_BYTES,
   TransportCryptoError,
+  assertPlaintextFits,
   assertWsPlaintextFits,
   clientHandshake,
   createWsChannel,
@@ -74,6 +76,8 @@ export type SecureTransportOptions = {
   signer?: DeviceRequestSigner | null;
   /** Encrypted/plaintext WebSocket frame limit for the pre-check. */
   maxFrameBytes?: number;
+  /** REST request body limit for the pre-check (defaults to `MAX_REST_BODY_BYTES`). */
+  maxBodyBytes?: number;
 };
 
 export type SecureRequest = {
@@ -123,6 +127,7 @@ export type SecureSocket = {
 
 export type SecureTransport = {
   readonly mode: SecureTransportMode;
+  /** Throws `TransportPayloadTooLargeError` before sending a body over the limit. */
   fetch: (request: SecureRequest) => Promise<SecureResponse>;
   fetchStream: (request: SecureRequest) => Promise<SecureStreamResponse>;
   openSocket: (options?: SecureSocketOptions) => SecureSocket;
@@ -352,6 +357,7 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
   const mode = secureTransportMode(profile);
   const signer = options.signer ?? null;
   const maxFrameBytes = options.maxFrameBytes ?? MAX_LEGACY_MESSAGE_BYTES;
+  const maxBodyBytes = options.maxBodyBytes ?? MAX_REST_BODY_BYTES;
   const fetchImpl = (): typeof fetch => {
     if (options.fetchImpl) return options.fetchImpl;
     // Browser fetch requires its Window receiver when called detached.
@@ -376,6 +382,9 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
   const send = async (request: SecureRequest, streaming: boolean): Promise<SecureResponse | SecureStreamResponse> => {
     requireAllowed();
     const inner = prepare(request);
+    // Before anything leaves: the backend answers an oversized body with an
+    // opaque 400 that reads like a pairing failure.
+    assertPlaintextFits(inner.body.length, maxBodyBytes);
     if (mode === 'plaintext') {
       const response = await fetchImpl()(originUrl(profile.serverUrl, inner.path, inner.query), {
         method: inner.method,

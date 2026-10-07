@@ -439,6 +439,21 @@ test('policy: pinned key uses the tunnel (even on loopback); remote without key 
   assert.deepEqual(JSON.parse(new TextDecoder().decode(response.body)), { plain: true, path: '/v2/providers', query: '?a=b' });
 });
 
+test('REST bodies over the limit are refused before anything is sent', async () => {
+  assert.equal(channel.MAX_REST_BODY_BYTES, 32 * 1024 * 1024);
+  for (const profile of [pinnedProfile('http://10.0.0.5:7345'), { serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'none', encryptionPublicKey: '' }]) {
+    const server = fakeSealedServer();
+    const transport = createSecureTransport({ profile, fetchImpl: server.fetchImpl, maxBodyBytes: 16 });
+    await assert.rejects(
+      transport.fetch({ method: 'POST', path: '/v2/workspaces', body: 'x'.repeat(17) }),
+      (error) => error instanceof channel.TransportPayloadTooLargeError && error.size === 17 && error.limit === 16,
+    );
+    assert.equal(server.calls.length, 0);
+    await transport.fetch({ method: 'POST', path: '/v2/workspaces', body: 'x'.repeat(16) });
+    assert.equal(server.calls.length, 1);
+  }
+});
+
 test('policy check: a different required protocol asks for re-pairing; a plaintext answer never downgrades', () => {
   const profile = pinnedProfile('http://10.0.0.5:7345');
   assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'ml-kem-768', transportVersion: 2 }), TransportRepairRequiredError);

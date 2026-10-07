@@ -8,6 +8,31 @@
 // src/secureChannel.ts, so the fixture is a second, independent rendering of
 // the spec and tests/unit/transport-v2.test.cjs cross-checks the two. All
 // randomness comes from SHA-256 of fixed labels: the output is deterministic.
+//
+// Sealed REST revision 2 (response nonce), per protocol under `rest`:
+//   prk                 HKDF-Extract(salt = th, ikm = shared), hex
+//   responseNonce       the fixed 32-byte response_nonce of `response`, hex
+//   kDown               HKDF-Expand(prk, "todex.transport.v2/rest/down" ||
+//                       responseNonce, 32): the r2 down key, hex
+//   kDownWithoutNonce   HKDF-Expand(prk, "todex.transport.v2/rest/down", 32),
+//                       the revision 1 key; only used by the
+//                       `rest-down-key-without-nonce` failure, hex
+//   secondResponse      the same `response` plaintext answered with another
+//                       nonce: {responseNonce, kDown, stream}; kDown differs
+//   outerHeaders        now include `x-todex-sealed-revision: 2`
+//   responseHeaders     the outer response headers (content type with r=2)
+//   response.stream     the full outer response body: responseNonce ||
+//                       records (sealed with kDown); `recordStream` is the
+//                       records alone
+//   multiRecordResponse streamLength / streamSha256 cover the full body with
+//                       the nonce prefix (responseNonce); recordStreamLength /
+//                       recordStreamSha256 cover the records alone
+//   failures (rest-*)   inputs are full response bodies (prefix included)
+//                       that must fail to open against `prk`.
+// Device pairing v3 (`pairingV3`) binds the device name: the transcript ends
+// with LP(utf8(deviceName)); `nonAsciiName` and `tamperedName` give the hash
+// and code for other names; `deviceNameRules` / `validDeviceNames` /
+// `invalidDeviceNames` pin the name check every implementation applies.
 'use strict';
 
 const fs = require('node:fs');
@@ -65,10 +90,17 @@ function schedule({ label, protocol, deviceId, serverPublic, clientMaterial, cli
   const prk = extract(sha256, shared, th);
   return {
     th,
+    prk,
     kUp: expand(sha256, prk, enc.encode(`${label}/up`), 32),
+    // WebSocket down key; for REST this is the revision 1 key without nonce.
     kDown: expand(sha256, prk, enc.encode(`${label}/down`), 32),
   };
 }
+
+/** REST revision 2: `k_down = HKDF-Expand(prk, "todex.transport.v2/rest/down" || response_nonce, 32)`. */
+const restDownKey = (prk, responseNonce) => expand(sha256, prk, concat(enc.encode('todex.transport.v2/rest/down'), responseNonce), 32);
+const RESPONSE_NONCE_LENGTH = 32;
+const SEALED_RESPONSE_CONTENT_TYPE = 'application/vnd.todex.sealed; r=2';
 
 function seal(key, th, direction, counter, final, plaintext) {
   const nonce = concat(new Uint8Array(16), u64(counter));
@@ -210,28 +242,38 @@ function protocolVector(protocol) {
     },
   }, requestBody);
   const requestRecords = restRecords(rest.kUp, rest.th, UP, request.plaintext);
+  const responseNonce = seed(`${protocol}/rest/response-nonce`);
+  const kDown = restDownKey(rest.prk, responseNonce);
+  const responseNonce2 = seed(`${protocol}/rest/response-nonce-2`);
+  const kDown2 = restDownKey(rest.prk, responseNonce2);
+  if (hex(kDown) === hex(kDown2) || hex(kDown) === hex(rest.kDown)) throw new Error('rest down keys must differ');
   const responseBody = enc.encode('{"workspace":{"id":"ws_1","name":"demo"}}');
   const response = inner({ status: 201, headers: { 'content-type': 'application/json' } }, responseBody);
-  const responseRecords = restRecords(rest.kDown, rest.th, DOWN, response.plaintext);
-  const responseStream = restStream(responseRecords);
+  const responseRecords = restRecords(kDown, rest.th, DOWN, response.plaintext);
+  const responseRecordStream = restStream(responseRecords);
+  const responseStream = concat(responseNonce, responseRecordStream);
+  const secondStream = concat(responseNonce2, restStream(restRecords(kDown2, rest.th, DOWN, response.plaintext)));
 
   // Multi-record response: a 140000-byte body, byte i = i % 251. Only digests
   // are pinned to keep the fixture small; implementations seal the same
   // plaintext with k_down and compare.
   const bigBody = Uint8Array.from({ length: 140000 }, (_, index) => index % 251);
   const big = inner({ status: 200, headers: { 'content-type': 'application/octet-stream' } }, bigBody);
-  const bigRecords = restRecords(rest.kDown, rest.th, DOWN, big.plaintext);
-  const bigStream = restStream(bigRecords);
+  const bigRecords = restRecords(kDown, rest.th, DOWN, big.plaintext);
+  const bigRecordStream = restStream(bigRecords);
+  const bigStream = concat(responseNonce, bigRecordStream);
 
+  // Every REST failure input is a full response body: nonce prefix + records.
+  const withNonce = (records) => concat(responseNonce, records);
   const flippedStream = Uint8Array.from(responseStream);
   flippedStream[flippedStream.length - 1] ^= 0x01;
   const tooLong = Uint8Array.from(responseStream);
-  new DataView(tooLong.buffer).setUint32(0, RECORD_MAX + 16 + 1, false);
+  new DataView(tooLong.buffer).setUint32(RESPONSE_NONCE_LENGTH, RECORD_MAX + 16 + 1, false);
   const twoRecordPlaintext = concat(response.plaintext);
-  const finalFirst = restStream([
-    { ciphertext: seal(rest.kDown, rest.th, DOWN, 0, true, twoRecordPlaintext.subarray(0, 10)) },
-    { ciphertext: seal(rest.kDown, rest.th, DOWN, 1, true, twoRecordPlaintext.subarray(10)) },
-  ]);
+  const finalFirst = withNonce(restStream([
+    { ciphertext: seal(kDown, rest.th, DOWN, 0, true, twoRecordPlaintext.subarray(0, 10)) },
+    { ciphertext: seal(kDown, rest.th, DOWN, 1, true, twoRecordPlaintext.subarray(10)) },
+  ]));
 
   const restVector = {
     label: 'todex.transport.v2/rest',
@@ -242,15 +284,25 @@ function protocolVector(protocol) {
     serverNonce: '',
     shared: hex(shared),
     th: hex(rest.th),
+    prk: hex(rest.prk),
     kUp: hex(rest.kUp),
-    kDown: hex(rest.kDown),
+    responseNonce: hex(responseNonce),
+    kDown: hex(kDown),
+    kDownWithoutNonce: hex(rest.kDown),
+    secondResponse: {
+      responseNonce: hex(responseNonce2),
+      kDown: hex(kDown2),
+      stream: hex(secondStream),
+    },
     outerHeaders: {
       'content-type': 'application/vnd.todex.sealed',
       'x-todex-transport': '2',
+      'x-todex-sealed-revision': '2',
       'x-todex-encryption': protocol,
       [protocol === 'x25519' ? 'x-todex-client-key' : 'x-todex-kem-ciphertext']: b64(clientMaterial),
       'x-todex-request-nonce': b64(restClientNonce),
     },
+    responseHeaders: { 'content-type': SEALED_RESPONSE_CONTENT_TYPE },
     request: {
       headJson: request.headJson,
       body: hex(requestBody),
@@ -262,6 +314,7 @@ function protocolVector(protocol) {
       headJson: response.headJson,
       body: hex(responseBody),
       plaintext: hex(response.plaintext),
+      recordStream: hex(responseRecordStream),
       stream: hex(responseStream),
     },
     multiRecordResponse: {
@@ -277,6 +330,8 @@ function protocolVector(protocol) {
         ciphertextLength: record.ciphertext.length,
         ciphertextSha256: hex(sha256(record.ciphertext)),
       })),
+      recordStreamLength: bigRecordStream.length,
+      recordStreamSha256: hex(sha256(bigRecordStream)),
       streamLength: bigStream.length,
       streamSha256: hex(sha256(bigStream)),
     },
@@ -289,13 +344,18 @@ function protocolVector(protocol) {
     { name: 'ws-short-frame', kind: 'ws', receive: 'down', input: hex(down0.subarray(0, 23)) },
     { name: 'rest-truncated', kind: 'rest', receive: 'down', input: hex(responseStream.subarray(0, responseStream.length - 1)) },
     { name: 'rest-trailing-bytes', kind: 'rest', receive: 'down', input: hex(concat(responseStream, Uint8Array.of(0))) },
-    { name: 'rest-missing-final', kind: 'rest', receive: 'down', input: hex(restStream(restRecords(rest.kDown, rest.th, DOWN, response.plaintext, { finalAt: -1 }))) },
+    { name: 'rest-missing-final', kind: 'rest', receive: 'down', input: hex(withNonce(restStream(restRecords(kDown, rest.th, DOWN, response.plaintext, { finalAt: -1 })))) },
     { name: 'rest-final-not-last', kind: 'rest', receive: 'down', input: hex(finalFirst) },
-    { name: 'rest-wrong-counter', kind: 'rest', receive: 'down', input: hex(restStream(restRecords(rest.kDown, rest.th, DOWN, response.plaintext, { firstCounter: 1 }))) },
+    { name: 'rest-wrong-counter', kind: 'rest', receive: 'down', input: hex(withNonce(restStream(restRecords(kDown, rest.th, DOWN, response.plaintext, { firstCounter: 1 })))) },
     { name: 'rest-flipped-tag-bit', kind: 'rest', receive: 'down', input: hex(flippedStream) },
     { name: 'rest-record-too-long', kind: 'rest', receive: 'down', input: hex(tooLong) },
-    { name: 'rest-wrong-direction', kind: 'rest', receive: 'down', input: restVector.request.stream, note: 'the up request stream offered as a response' },
+    { name: 'rest-wrong-direction', kind: 'rest', receive: 'down', input: hex(withNonce(restStream(requestRecords))), note: 'the up request records offered as a response' },
     { name: 'rest-empty', kind: 'rest', receive: 'down', input: '' },
+    { name: 'rest-short-prefix', kind: 'rest', receive: 'down', input: hex(responseNonce.subarray(0, RESPONSE_NONCE_LENGTH - 1)), note: '31 bytes: the response nonce is incomplete' },
+    { name: 'rest-prefix-only', kind: 'rest', receive: 'down', input: hex(responseNonce), note: 'a complete nonce and no records' },
+    { name: 'rest-down-key-without-nonce', kind: 'rest', receive: 'down', input: hex(withNonce(restStream(restRecords(rest.kDown, rest.th, DOWN, response.plaintext)))), note: 'records sealed with the revision 1 k_down (kDownWithoutNonce)' },
+    { name: 'rest-missing-prefix', kind: 'rest', receive: 'down', input: hex(responseRecordStream), note: 'a revision 1 body: records with no nonce prefix' },
+    { name: 'rest-nonce-swapped', kind: 'rest', receive: 'down', input: hex(concat(responseNonce, restStream(restRecords(kDown2, rest.th, DOWN, response.plaintext)))), note: 'records of secondResponse behind the first nonce' },
   ];
 
   return {
@@ -325,7 +385,11 @@ function pairingVector() {
   const transportProtocol = 'ml-kem-768';
   const transportPublicKey = ml_kem768.keygen(seed('ml-kem-768/server-keygen-seed', 64)).publicKey;
   const tamperedPublicKey = ml_kem768.keygen(seed('pairing/tampered-keygen-seed', 64)).publicKey;
-  const transcriptFor = (protocol, key) => concat(
+  // The name the create request sends (`deviceNameBinding: 1`), bound last.
+  const deviceName = 'TodeX Vector Mac';
+  const nonAsciiName = 'Yoh 的 iPhone 📱';
+  const tamperedName = 'TodeX Vector Mad';
+  const transcriptFor = (protocol, key, name = deviceName) => concat(
     enc.encode('todex.device-pairing.v3/transcript\0'),
     enc.encode(requestId),
     Uint8Array.of(0),
@@ -336,6 +400,7 @@ function pairingVector() {
     clientNonce,
     lp(enc.encode(protocol)),
     lp(key),
+    lp(enc.encode(name)),
   );
   const code = (hash) => {
     const short = hex(hash.subarray(0, 5)).toUpperCase();
@@ -356,6 +421,22 @@ function pairingVector() {
   const fingerprint = hex(sha256(transportPublicKey).subarray(0, 8)).toUpperCase().match(/.{4}/g).join('-');
   const tamperedHash = sha256(transcriptFor(transportProtocol, tamperedPublicKey));
   const noneHash = sha256(transcriptFor('none', new Uint8Array()));
+  const nameCase = (name) => {
+    const hash = sha256(transcriptFor(transportProtocol, transportPublicKey, name));
+    return {
+      deviceName: name,
+      deviceNameUtf8: hex(enc.encode(name)),
+      scalarCount: Array.from(name).length,
+      transcriptHash: hex(hash),
+      verificationCode: code(hash),
+    };
+  };
+  const nameEntry = (name, deviceNameValue, failure) => ({
+    name,
+    deviceName: deviceNameValue,
+    deviceNameUtf8: hex(enc.encode(deviceNameValue)),
+    ...(failure ? { failure } : {}),
+  });
   return {
     requestId,
     clientSecretKey: hex(clientSecret),
@@ -370,6 +451,8 @@ function pairingVector() {
     commitmentBase64Url: b64(commitment),
     transportProtocol,
     transportPublicKey: b64(transportPublicKey),
+    deviceName,
+    deviceNameUtf8: hex(enc.encode(deviceName)),
     transcript: hex(transcript),
     transcriptHash: hex(transcriptHash),
     verificationCode: code(transcriptHash),
@@ -397,11 +480,44 @@ function pairingVector() {
       verificationCode: code(noneHash),
       fingerprint: 'none',
     },
+    // Same request with another device name: the transcript tail
+    // LP(utf8(name)) changes, so does the code.
+    nonAsciiName: nameCase(nonAsciiName),
+    tamperedName: nameCase(tamperedName),
+    deviceNameRules: {
+      maxScalars: 80,
+      whitespace: 'Unicode White_Space (Rust char::is_whitespace); no leading or trailing',
+      forbidden: ['Cc U+0000-U+001F', 'Cc U+007F-U+009F', 'U+200E', 'U+200F', 'U+202A-U+202E', 'U+2066-U+2069'],
+      note: 'clients trim and fall back to a default name before sending; the backend validates the name as sent (400 INVALID_REQUEST) and stores it unchanged',
+    },
+    validDeviceNames: [
+      nameEntry('ascii', deviceName),
+      nameEntry('non-ascii', nonAsciiName),
+      nameEntry('80-scalars', '📱'.repeat(80)),
+      nameEntry('inner-whitespace', 'Yoh\u00a0Mac\u3000Pro'),
+      nameEntry('single-scalar', 'x'),
+      nameEntry('bom-edge', '\ufeffMac'),
+    ],
+    invalidDeviceNames: [
+      nameEntry('empty', '', 'empty'),
+      nameEntry('leading-space', ' Mac', 'surrounding_whitespace'),
+      nameEntry('trailing-space', 'Mac ', 'surrounding_whitespace'),
+      nameEntry('trailing-ideographic-space', 'Mac\u3000', 'surrounding_whitespace'),
+      nameEntry('leading-nbsp', '\u00a0Mac', 'surrounding_whitespace'),
+      nameEntry('81-scalars', 'a'.repeat(81), 'too_long'),
+      nameEntry('81-emoji', '📱'.repeat(81), 'too_long'),
+      nameEntry('bidi-override', 'Mac\u202egnp.exe', 'bidi_control'),
+      nameEntry('bidi-isolate', 'Mac\u2066x\u2069', 'bidi_control'),
+      nameEntry('lrm', '\u200eMac', 'bidi_control'),
+      nameEntry('control-bel', 'Mac\u0007', 'control'),
+      nameEntry('control-newline', 'Mac\nPro', 'control'),
+      nameEntry('control-c1', 'Mac\u0085Pro', 'control'),
+    ],
   };
 }
 
 const fixture = {
-  description: 'TodeX transport v2 vectors. Binary values are lowercase hex; header/query values and pairing wire fields (transportPublicKey, *Base64Url) are base64url without padding. Generated by TodeX_protocol/scripts/generate-transport-v2-vectors.cjs; do not edit by hand.',
+  description: 'TodeX transport v2 vectors (sealed REST revision 2, device pairing v3 with device-name binding). Binary values are lowercase hex; header/query values and pairing wire fields (transportPublicKey, *Base64Url) are base64url without padding. Field meanings are documented at the top of TodeX_protocol/scripts/generate-transport-v2-vectors.cjs, which generates this file; do not edit by hand.',
   version: 2,
   constants: {
     wsLabel: 'todex.transport.v2/ws',
@@ -413,6 +529,11 @@ const fixture = {
     wsCloseCode: 4400,
     wsCloseReason: 'transport crypto failure',
     failureCode: 'TRANSPORT_CRYPTO_FAILED',
+    sealedRevision: 2,
+    sealedRevisionHeader: 'x-todex-sealed-revision',
+    sealedResponseContentType: SEALED_RESPONSE_CONTENT_TYPE,
+    responseNonceLength: RESPONSE_NONCE_LENGTH,
+    restDownInfo: 'todex.transport.v2/rest/down',
   },
   protocols: [protocolVector('x25519'), protocolVector('ml-kem-768')],
   pairingV3: pairingVector(),

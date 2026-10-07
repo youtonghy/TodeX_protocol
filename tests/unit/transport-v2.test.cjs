@@ -22,7 +22,11 @@ const {
   decodeInnerRequest,
   DevicePairingTransportError,
   deriveDevicePairingV3Material,
+  deriveRestDownKey,
+  deriveRestTransportKeys,
   deriveTransportKeys,
+  devicePairingNameFailure,
+  normalizeDevicePairingName,
   devicePairingV3Commitment,
   devicePairingV3Transcript,
   parseDevicePairingTransport,
@@ -36,10 +40,12 @@ const {
   sealRestRequest,
 } = channel;
 const {
+  BackendUpgradeRequiredError,
   EncryptionRequiredError,
   InvalidPinnedKeyError,
   TransportPolicyError,
   TransportRepairRequiredError,
+  backendClockOffsetMs,
   cachedSecureTransport,
   checkTransportPolicy,
   createSecureTransport,
@@ -91,8 +97,7 @@ function wsKeys(vector) {
 }
 
 function restKeys(vector) {
-  return deriveTransportKeys({
-    label: fixture.constants.restLabel,
+  return deriveRestTransportKeys({
     protocol: vector.protocol,
     deviceId: '',
     serverStaticPublic: hex(vector.server.publicKey),
@@ -124,11 +129,38 @@ for (const vector of fixture.protocols) {
   });
 
   test(`${protocol}: key schedule matches th, k_up and k_down`, () => {
-    for (const [side, keys] of [['ws', wsKeys(vector)], ['rest', restKeys(vector)]]) {
-      assert.equal(toHex(keys.th), vector[side].th);
-      assert.equal(toHex(keys.kUp), vector[side].kUp);
-      assert.equal(toHex(keys.kDown), vector[side].kDown);
-    }
+    const ws = wsKeys(vector);
+    assert.equal(toHex(ws.th), vector.ws.th);
+    assert.equal(toHex(ws.kUp), vector.ws.kUp);
+    assert.equal(toHex(ws.kDown), vector.ws.kDown);
+
+    // REST revision 2: k_down is bound to the per-response nonce.
+    const rest = restKeys(vector);
+    assert.equal(toHex(rest.th), vector.rest.th);
+    assert.equal(toHex(rest.prk), vector.rest.prk);
+    assert.equal(toHex(rest.kUp), vector.rest.kUp);
+    const kDown = deriveRestDownKey(rest.prk, hex(vector.rest.responseNonce));
+    assert.equal(toHex(kDown), vector.rest.kDown);
+    const kDown2 = deriveRestDownKey(rest.prk, hex(vector.rest.secondResponse.responseNonce));
+    assert.equal(toHex(kDown2), vector.rest.secondResponse.kDown);
+    assert.notEqual(vector.rest.kDown, vector.rest.secondResponse.kDown);
+    assert.notEqual(vector.rest.kDown, vector.rest.kDownWithoutNonce);
+    assert.equal(
+      toHex(hkdf(sha256, hex(vector.rest.shared), hex(vector.rest.th), utf8(fixture.constants.restDownInfo), 32)),
+      vector.rest.kDownWithoutNonce,
+    );
+    assert.throws(() => deriveRestDownKey(rest.prk, new Uint8Array(31)), TransportCryptoError);
+    // The nonce-less REST down key is never derived by the library.
+    assert.throws(() => deriveTransportKeys({
+      label: fixture.constants.restLabel,
+      protocol,
+      deviceId: '',
+      serverStaticPublic: hex(vector.server.publicKey),
+      clientMaterial: hex(vector.rest.clientMaterial),
+      clientNonce: hex(vector.rest.clientNonce),
+      serverNonce: new Uint8Array(),
+      shared: hex(vector.rest.shared),
+    }), TypeError);
   });
 
   test(`${protocol}: WebSocket channel builds the query, accepts the hello and seals/opens frames`, () => {
@@ -150,7 +182,7 @@ for (const vector of fixture.protocols) {
     session.dispose();
   });
 
-  test(`${protocol}: REST request seals byte-for-byte and the response opens`, () => {
+  test(`${protocol}: REST request seals byte-for-byte and the response opens`, async () => {
     const head = JSON.parse(vector.rest.request.headJson);
     const sealed = sealRestRequest({
       protocol,
@@ -165,12 +197,31 @@ for (const vector of fixture.protocols) {
       randomness: randomnessFor(vector, 'rest'),
     });
     assert.deepEqual(sealed.headers, vector.rest.outerHeaders);
+    assert.equal(sealed.headers['x-todex-sealed-revision'], '2');
     assert.equal(toHex(sealed.body), vector.rest.request.stream);
-    const response = openRestResponse(sealed.context, hex(vector.rest.response.stream));
+    const stream = hex(vector.rest.response.stream);
+    assert.equal(toHex(stream.subarray(0, 32)), vector.rest.responseNonce);
+    assert.equal(toHex(stream.subarray(32)), vector.rest.response.recordStream);
+    const response = openRestResponse(sealed.context, stream);
     assert.equal(response.status, vector.rest.response.status);
     assert.deepEqual(response.headers, JSON.parse(vector.rest.response.headJson).headers);
     assert.equal(toHex(response.body), vector.rest.response.body);
-    assert.throws(() => openRestResponse(sealed.context, hex(vector.rest.response.stream)), TransportCryptoError);
+    assert.throws(() => openRestResponse(sealed.context, stream), TransportCryptoError);
+
+    // The same answer under another nonce opens too; the nonce may span chunks.
+    const again = () => sealRestRequest({
+      protocol,
+      serverPublicKey: hex(vector.server.publicKey),
+      request: { method: 'GET', path: '/v2/x' },
+      randomness: randomnessFor(vector, 'rest'),
+    });
+    assert.equal(toHex(openRestResponse(again().context, hex(vector.rest.secondResponse.stream)).body), vector.rest.response.body);
+    const second = hex(vector.rest.secondResponse.stream);
+    const chunks = [second.subarray(0, 5), second.subarray(5, 31), second.subarray(31, 33), second.subarray(33)];
+    const streamed = await openRestResponseStream(again().context, chunks);
+    const received = [];
+    for await (const chunk of streamed.body) received.push(...chunk);
+    assert.equal(toHex(Uint8Array.from(received)), vector.rest.response.body);
 
     // Server view: the request stream opens to the pinned inner request.
     const keys = restKeys(vector);
@@ -194,7 +245,13 @@ for (const vector of fixture.protocols) {
       return out;
     })();
     assert.equal(sha(plaintext), big.plaintextSha256);
-    const stream = sealRecordStream(new RecordCipher(keys.kDown, keys.th, DOWN), plaintext);
+    const kDown = deriveRestDownKey(keys.prk, hex(vector.rest.responseNonce));
+    const records = sealRecordStream(new RecordCipher(kDown, keys.th, DOWN), plaintext);
+    assert.equal(records.length, big.recordStreamLength);
+    assert.equal(sha(records), big.recordStreamSha256);
+    const stream = new Uint8Array(32 + records.length);
+    stream.set(hex(vector.rest.responseNonce));
+    stream.set(records, 32);
     assert.equal(stream.length, big.streamLength);
     assert.equal(sha(stream), big.streamSha256);
 
@@ -216,6 +273,10 @@ for (const vector of fixture.protocols) {
   });
 
   test(`${protocol}: every failure vector is rejected`, async () => {
+    const names = vector.failures.map((failure) => failure.name);
+    for (const name of ['rest-short-prefix', 'rest-prefix-only', 'rest-down-key-without-nonce', 'rest-missing-prefix', 'rest-nonce-swapped']) {
+      assert.ok(names.includes(name), name);
+    }
     const ws = wsKeys(vector);
     const rest = restKeys(vector);
     for (const failure of vector.failures) {
@@ -232,26 +293,32 @@ for (const vector of fixture.protocols) {
         assert.ok(cipher.nextCounter === 0n);
         continue;
       }
-      assert.throws(
-        () => openRecordStream(new RecordCipher(rest.kDown, rest.th, DOWN), hex(failure.input)),
-        TransportCryptoError,
-        failure.name,
-      );
-      const sealed = sealRestRequest({
+      // Independent check: split the nonce prefix and open with its k_down.
+      const input = hex(failure.input);
+      assert.throws(() => {
+        if (input.length < 32) throw new TransportCryptoError('short prefix');
+        const kDown = deriveRestDownKey(rest.prk, input.subarray(0, 32));
+        openRecordStream(new RecordCipher(kDown, rest.th, DOWN), input.subarray(32));
+      }, TransportCryptoError, failure.name);
+      const sealed = () => sealRestRequest({
         protocol,
         serverPublicKey: hex(vector.server.publicKey),
         request: { method: 'GET', path: '/v2/x' },
         randomness: randomnessFor(vector, 'rest'),
       });
-      await assert.rejects(async () => {
-        const response = await openRestResponseStream(sealed.context, [hex(failure.input)]);
-        for await (const _chunk of response.body) { /* drain */ }
-      }, TransportCryptoError, `${failure.name} (stream)`);
+      assert.throws(() => openRestResponse(sealed().context, input), TransportCryptoError, `${failure.name} (one-shot)`);
+      // Byte-sized chunks: the nonce and every record span chunk boundaries.
+      for (const chunks of [[input], Array.from(input, (byte) => Uint8Array.of(byte))]) {
+        await assert.rejects(async () => {
+          const response = await openRestResponseStream(sealed().context, chunks);
+          for await (const _chunk of response.body) { /* drain */ }
+        }, TransportCryptoError, `${failure.name} (stream)`);
+      }
     }
   });
 }
 
-function pairingMaterial(vector, transportProtocol, transportPublicKey) {
+function pairingMaterial(vector, transportProtocol, transportPublicKey, deviceName = vector.deviceName) {
   return deriveDevicePairingV3Material({
     requestId: vector.requestId,
     clientSecretKey: hex(vector.clientSecretKey),
@@ -260,6 +327,7 @@ function pairingMaterial(vector, transportProtocol, transportPublicKey) {
     clientNonce: hex(vector.clientNonce),
     transportProtocol,
     transportPublicKey: fromB64(transportPublicKey),
+    deviceName,
   });
 }
 
@@ -278,9 +346,12 @@ test('pairing v3 commitment, transcript, code and keys match the vector', () => 
   assert.equal(toHex(material.wrapKey), vector.wrapKey);
   assert.equal(toHex(material.pollProof), vector.pollProof);
   assert.equal(toHex(material.cancelProof), vector.cancelProof);
-  // The transcript ends with LP(protocol) || LP(key).
+  // The transcript ends with LP(protocol) || LP(key) || LP(utf8(name)).
+  const name = Buffer.from(vector.deviceName, 'utf8');
+  assert.equal(name.toString('hex'), vector.deviceNameUtf8);
   const tail = Buffer.concat([
     Buffer.from([0, 0, 0, 10]), Buffer.from('ml-kem-768'), Buffer.from([0, 0, 0x04, 0xa0]), Buffer.from(fromB64(vector.transportPublicKey)),
+    Buffer.from([0, 0, 0, name.length]), name,
   ]);
   assert.equal(toHex(material.transcript.subarray(material.transcript.length - tail.length)), tail.toString('hex'));
 });
@@ -295,7 +366,11 @@ test('pairing v3: a different transport key or none changes transcript and code'
   const none = pairingMaterial(vector, 'none', '');
   assert.equal(toHex(none.transcriptHash), vector.noneCase.transcriptHash);
   assert.equal(none.verificationCode, vector.noneCase.verificationCode);
-  assert.deepEqual([...none.transcript.subarray(none.transcript.length - 12)], [0, 0, 0, 4, ...Buffer.from('none'), 0, 0, 0, 0]);
+  const nameTail = 4 + Buffer.byteLength(vector.deviceName);
+  assert.deepEqual(
+    [...none.transcript.subarray(none.transcript.length - 12 - nameTail, none.transcript.length - nameTail)],
+    [0, 0, 0, 4, ...Buffer.from('none'), 0, 0, 0, 0],
+  );
   assert.equal(transportFingerprint('none', ''), vector.noneCase.fingerprint);
 
   const base = {
@@ -304,10 +379,53 @@ test('pairing v3: a different transport key or none changes transcript and code'
     serverPublic: hex(vector.serverPublicKey),
     devicePublic: hex(vector.devicePublicKey),
     clientNonce: hex(vector.clientNonce),
+    deviceName: vector.deviceName,
   };
   assert.throws(() => devicePairingV3Transcript({ ...base, transportProtocol: 'x25519', transportPublicKey: new Uint8Array(31) }), TypeError);
   assert.throws(() => devicePairingV3Transcript({ ...base, transportProtocol: 'none', transportPublicKey: new Uint8Array(1) }), TypeError);
   assert.throws(() => devicePairingV3Transcript({ ...base, transportProtocol: 'rot13', transportPublicKey: new Uint8Array() }), TypeError);
+});
+
+test('pairing v3: the device name is bound; another name changes transcript and code', () => {
+  const vector = fixture.pairingV3;
+  for (const entry of [vector.nonAsciiName, vector.tamperedName]) {
+    assert.equal(Buffer.from(entry.deviceName, 'utf8').toString('hex'), entry.deviceNameUtf8);
+    assert.equal(Array.from(entry.deviceName).length, entry.scalarCount);
+    const material = pairingMaterial(vector, vector.transportProtocol, vector.transportPublicKey, entry.deviceName);
+    assert.equal(toHex(material.transcriptHash), entry.transcriptHash);
+    assert.equal(material.verificationCode, entry.verificationCode);
+    assert.notEqual(material.verificationCode, vector.verificationCode);
+    // A credential sealed for the original name does not open under another.
+    assert.throws(() => xchacha20poly1305(material.wrapKey, fromB64(vector.credential.nonceBase64Url), material.transcript)
+      .decrypt(fromB64(vector.credential.ciphertextBase64Url)));
+  }
+  assert.equal(vector.nonAsciiName.deviceName, 'Yoh 的 iPhone 📱');
+  for (const entry of vector.invalidDeviceNames) {
+    assert.throws(() => pairingMaterial(vector, vector.transportProtocol, vector.transportPublicKey, entry.deviceName), TypeError, entry.name);
+  }
+});
+
+test('pairing device names: the shared rule and the client normalizer', () => {
+  const vector = fixture.pairingV3;
+  assert.equal(vector.deviceNameRules.maxScalars, 80);
+  for (const entry of vector.validDeviceNames) {
+    assert.equal(Buffer.from(entry.deviceName, 'utf8').toString('hex'), entry.deviceNameUtf8, entry.name);
+    assert.equal(devicePairingNameFailure(entry.deviceName), null, entry.name);
+    assert.equal(normalizeDevicePairingName(entry.deviceName), entry.deviceName, entry.name);
+  }
+  for (const entry of vector.invalidDeviceNames) {
+    assert.equal(Buffer.from(entry.deviceName, 'utf8').toString('hex'), entry.deviceNameUtf8, entry.name);
+    assert.equal(devicePairingNameFailure(entry.deviceName), entry.failure, entry.name);
+    const normalized = normalizeDevicePairingName(entry.deviceName, 'Fallback');
+    assert.equal(devicePairingNameFailure(normalized), null, `${entry.name} normalized`);
+  }
+  assert.equal(devicePairingNameFailure('a\ud800b'), 'not_scalar');
+  assert.equal(normalizeDevicePairingName('  Yoh 的 iPhone 📱 \n'), 'Yoh 的 iPhone 📱');
+  assert.equal(normalizeDevicePairingName('Mac\u202egnp'), 'Macgnp');
+  assert.equal(normalizeDevicePairingName('   ', 'Desktop'), 'Desktop');
+  assert.equal(normalizeDevicePairingName('', ' \u0007 '), 'TodeX');
+  assert.equal(normalizeDevicePairingName('a'.repeat(79) + ' bcd'), 'a'.repeat(79), 'trimmed again after the cut');
+  assert.equal(normalizeDevicePairingName('📱'.repeat(100)), '📱'.repeat(80));
 });
 
 test('pairing v3: the approval credential decrypts and pins exactly the create-response key', () => {
@@ -502,8 +620,14 @@ const pinnedProfile = (serverUrl, transportVerified = true) => ({
   transportVerified,
 });
 
-/** In-memory backend that opens `/v2/sealed` per the spec. */
-function fakeSealedServer({ chunkSize } = {}) {
+const concatBytes = (...parts) => Uint8Array.from(Buffer.concat(parts.map((part) => Buffer.from(part))));
+
+/**
+ * In-memory backend that opens `/v2/sealed` per the spec (revision 2). By
+ * default it answers `202` with a 70 KB JSON echo; `respond(inner, index)`
+ * may return another `{status, headers, body}` inner answer.
+ */
+function fakeSealedServer({ chunkSize, respond, contentType = 'application/vnd.todex.sealed; r=2' } = {}) {
   const calls = [];
   const fetchImpl = async (url, init) => {
     const parsed = new URL(url);
@@ -516,11 +640,11 @@ function fakeSealedServer({ chunkSize } = {}) {
     }
     const headers = init.headers;
     assert.equal(headers['x-todex-transport'], '2');
+    assert.equal(headers['x-todex-sealed-revision'], '2');
     const clientMaterial = fromB64(headers['x-todex-client-key']);
     const clientNonce = fromB64(headers['x-todex-request-nonce']);
     const serverPublic = hex(x25519Vector.server.publicKey);
-    const keys = deriveTransportKeys({
-      label: fixture.constants.restLabel,
+    const keys = deriveRestTransportKeys({
       protocol: 'x25519',
       deviceId: '',
       serverStaticPublic: serverPublic,
@@ -533,17 +657,23 @@ function fakeSealedServer({ chunkSize } = {}) {
     try {
       inner = decodeInnerRequest(openRecordStream(new RecordCipher(keys.kUp, keys.th, UP), init.body));
     } catch {
-      return new Response('{"error":{"code":"TRANSPORT_CRYPTO_FAILED","message":"transport crypto failure"}}', {
+      return new Response('{"code":"TRANSPORT_CRYPTO_FAILED","message":"transport crypto failure"}', {
         status: 400,
         headers: { 'content-type': 'application/json' },
       });
     }
     calls[calls.length - 1].inner = inner;
-    const body = utf8(JSON.stringify({ echo: inner.path, query: inner.query, size: inner.body.length, payload: 'y'.repeat(70000) }));
-    const sealed = sealRecordStream(
-      new RecordCipher(keys.kDown, keys.th, DOWN),
-      encodeInnerResponse({ status: 202, headers: { 'content-type': 'application/json' } }, body),
-    );
+    const answer = respond?.(inner, calls.length - 1) ?? {
+      status: 202,
+      headers: { 'content-type': 'application/json' },
+      body: utf8(JSON.stringify({ echo: inner.path, query: inner.query, size: inner.body.length, payload: 'y'.repeat(70000) })),
+    };
+    // A fresh response nonce per answer, as the backend does.
+    const responseNonce = crypto.getRandomValues(new Uint8Array(32));
+    const sealed = concatBytes(responseNonce, sealRecordStream(
+      new RecordCipher(deriveRestDownKey(keys.prk, responseNonce), keys.th, DOWN),
+      encodeInnerResponse({ status: answer.status, headers: answer.headers }, answer.body),
+    ));
     const stream = new ReadableStream({
       start(controller) {
         const size = chunkSize ?? sealed.length;
@@ -551,7 +681,7 @@ function fakeSealedServer({ chunkSize } = {}) {
         controller.close();
       },
     });
-    return new Response(stream, { status: 200, headers: { 'content-type': 'application/vnd.todex.sealed' } });
+    return new Response(stream, { status: 200, headers: { 'content-type': contentType } });
   };
   return { calls, fetchImpl };
 }
@@ -639,7 +769,12 @@ test('REST bodies over the limit are refused before anything is sent', async () 
 test('policy check: a different required protocol asks for re-pairing; a plaintext answer never downgrades', () => {
   const profile = pinnedProfile('http://10.0.0.5:7345');
   assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'ml-kem-768', transportVersion: 2 }), TransportRepairRequiredError);
-  checkTransportPolicy(profile, { requiredProtocol: 'x25519', transportVersion: 2 });
+  checkTransportPolicy(profile, { requiredProtocol: 'x25519', transportVersion: 2, sealedRevision: 2 });
+  // A backend without sealed REST revision 2 must be updated; no fallback.
+  for (const sealedRevision of [undefined, 1, 3, '2']) {
+    assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'x25519', transportVersion: 2, sealedRevision }),
+      (error) => error instanceof BackendUpgradeRequiredError && error.detail === 'policy' && !error.retryable);
+  }
   // `none` has no static key to run v2 against: re-pair, never plaintext.
   assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'none', transportVersion: 2 }), TransportRepairRequiredError);
   // A backend without transport v2 cannot serve a pinned profile.
@@ -670,7 +805,7 @@ test('verifyTransportPolicy: refuses unpaired remotes offline, reads the policy 
   }
   assert.equal(unpaired.calls.length, 0);
 
-  const ok = policyFetch(() => Response.json({ requiredProtocol: 'x25519', transportVersion: 2 }));
+  const ok = policyFetch(() => Response.json({ requiredProtocol: 'x25519', transportVersion: 2, sealedRevision: 2 }));
   await verifyTransportPolicy(pinnedProfile('http://10.0.0.5:7345/'), { fetchImpl: ok.fetchImpl });
   assert.equal(ok.calls[0].url.href, 'http://10.0.0.5:7345/v2/transport-policy');
   assert.equal(ok.calls[0].init.credentials, 'omit');
@@ -678,6 +813,7 @@ test('verifyTransportPolicy: refuses unpaired remotes offline, reads the policy 
 
   const cases = [
     [() => Response.json({ requiredProtocol: 'ml-kem-768', transportVersion: 2 }), (error) => error instanceof TransportRepairRequiredError],
+    [() => Response.json({ requiredProtocol: 'x25519', transportVersion: 2 }), (error) => error instanceof BackendUpgradeRequiredError],
     [() => new Response('nope', { status: 404 }), (error) => error.reason === 'outdated' && !error.retryable],
     [() => new Response('', { status: 503 }), (error) => error.reason === 'http' && error.retryable && error.status === 503],
     [() => new Response('{', { status: 200 }), (error) => error.reason === 'invalid' && !error.retryable],
@@ -798,13 +934,130 @@ test('V2ApiClient and the backend probe go through the tunnel when a key is pinn
 test('REST tunnel surfaces an unsealed 400 as a request failure, never as the inner response', async () => {
   const transport = createSecureTransport({
     profile: pinnedProfile('http://10.0.0.5:7345'),
-    fetchImpl: async () => new Response('{"error":{"code":"TRANSPORT_CRYPTO_FAILED","message":"transport crypto failure"}}', {
+    fetchImpl: async () => new Response('{"code":"TRANSPORT_CRYPTO_FAILED","message":"transport crypto failure"}', {
       status: 400,
       headers: { 'content-type': 'application/json' },
     }),
   });
   await assert.rejects(transport.fetch({ method: 'GET', path: '/v2/providers' }), (error) =>
     error.httpStatus === 400 && error.backendCode === 'TRANSPORT_CRYPTO_FAILED');
+});
+
+test('REST tunnel: a sealed answer without r=2 means the backend must be updated', async () => {
+  for (const contentType of ['application/vnd.todex.sealed', 'application/vnd.todex.sealed; r=1', 'Application/Vnd.Todex.Sealed; R=3']) {
+    const server = fakeSealedServer({ contentType });
+    const transport = createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: server.fetchImpl });
+    for (const call of [() => transport.fetch({ method: 'GET', path: '/v2/providers' }), () => transport.fetchStream({ method: 'GET', path: '/v2/providers' })]) {
+      await assert.rejects(call(), (error) => error instanceof BackendUpgradeRequiredError && error.detail === 'response', contentType);
+    }
+  }
+  // Parameters may be quoted and spaced; r=2 opens.
+  const quoted = fakeSealedServer({ contentType: 'application/vnd.todex.sealed ; charset=binary; r="2"' });
+  const response = await createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: quoted.fetchImpl })
+    .fetch({ method: 'GET', path: '/v2/providers' });
+  assert.equal(response.status, 202);
+});
+
+test('REST tunnel: an inner 503 TRANSPORT_BUSY is retried once with a fresh signature', async () => {
+  const busy = { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '0' }, body: utf8('{"code":"TRANSPORT_BUSY","message":"busy"}') };
+  const device = generateDeviceIdentity();
+  for (const streaming of [false, true]) {
+    const server = fakeSealedServer({ respond: (_inner, index) => (index === 0 ? busy : undefined) });
+    const transport = createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: server.fetchImpl, signer: deviceRequestSigner(device) });
+    const request = { method: 'POST', path: '/v2/workspaces', body: '{"name":"demo"}' };
+    const response = streaming ? await transport.fetchStream(request) : await transport.fetch(request);
+    assert.equal(response.status, 202);
+    if (streaming) for await (const _chunk of response.body) { /* drain */ }
+    assert.equal(server.calls.length, 2);
+    const [first, second] = server.calls.map((call) => call.inner.headers);
+    assert.notEqual(first['x-todex-auth-nonce'], second['x-todex-auth-nonce']);
+    assert.notEqual(first['x-todex-auth-sig'], second['x-todex-auth-sig']);
+    assert.equal(new TextDecoder().decode(server.calls[1].inner.body), '{"name":"demo"}');
+  }
+
+  // Only once: a second busy answer reaches the caller; other 503s are not retried.
+  const always = fakeSealedServer({ respond: () => busy });
+  const once = await createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: always.fetchImpl })
+    .fetch({ method: 'GET', path: '/v2/providers' });
+  assert.equal(once.status, 503);
+  assert.equal(always.calls.length, 2);
+  const other = fakeSealedServer({ respond: () => ({ ...busy, body: utf8('{"code":"PROVIDER_UNAVAILABLE","message":"x"}') }) });
+  assert.equal((await createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: other.fetchImpl })
+    .fetch({ method: 'GET', path: '/v2/providers' })).status, 503);
+  assert.equal(other.calls.length, 1);
+
+  // The Retry-After wait honours the caller's abort signal.
+  const waiting = fakeSealedServer({ respond: () => ({ ...busy, headers: { ...busy.headers, 'retry-after': '1' } }) });
+  const controller = new AbortController();
+  const pending = createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: waiting.fetchImpl })
+    .fetch({ method: 'GET', path: '/v2/providers', signal: controller.signal });
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(waiting.calls.length, 1);
+});
+
+test('REST: 401 AUTH_TIMESTAMP_REJECTED records the backend clock offset and re-signs once', async () => {
+  const device = generateDeviceIdentity();
+  const serverTime = Math.floor(Date.now() / 1000) + 3600;
+  const rejected = { status: 401, headers: { 'content-type': 'application/json' }, body: utf8(JSON.stringify({ code: 'AUTH_TIMESTAMP_REJECTED', message: 'clock', serverTime })) };
+  const server = fakeSealedServer({ respond: (_inner, index) => (index === 0 ? rejected : undefined) });
+  const url = 'http://10.0.0.21:7345';
+  assert.equal(backendClockOffsetMs(url), 0);
+  const transport = createSecureTransport({ profile: pinnedProfile(url), fetchImpl: server.fetchImpl, signer: deviceRequestSigner(device) });
+  assert.equal((await transport.fetch({ method: 'GET', path: '/v2/providers' })).status, 202);
+  assert.equal(server.calls.length, 2);
+  const [first, second] = server.calls.map((call) => call.inner.headers);
+  assert.ok(Math.abs(Number(first['x-todex-auth-ts']) - Math.floor(Date.now() / 1000)) <= 2);
+  assert.ok(Math.abs(Number(second['x-todex-auth-ts']) - serverTime) <= 2, 'signed with server time');
+  assert.notEqual(first['x-todex-auth-nonce'], second['x-todex-auth-nonce']);
+  assert.ok(Math.abs(backendClockOffsetMs(`${url}/`) - 3600_000) < 2000);
+  // Later requests (and the WebSocket upgrade) sign with the offset right away.
+  await transport.fetch({ method: 'GET', path: '/v2/version' });
+  assert.equal(server.calls.length, 3);
+  assert.ok(Math.abs(Number(server.calls[2].inner.headers['x-todex-auth-ts']) - serverTime) <= 2);
+  FakeWebSocket.instances = [];
+  createSecureTransport({ profile: pinnedProfile(url), WebSocketImpl: FakeWebSocket, signer: deviceRequestSigner(device) }).openSocket();
+  assert.ok(Math.abs(Number(FakeWebSocket.instances[0].url.searchParams.get('auth_ts')) - serverTime) <= 2);
+
+  // Retried once only; without a signer or serverTime nothing is retried.
+  const always = fakeSealedServer({ respond: () => rejected });
+  assert.equal((await createSecureTransport({ profile: pinnedProfile('http://10.0.0.22:7345'), fetchImpl: always.fetchImpl, signer: deviceRequestSigner(device) })
+    .fetch({ method: 'GET', path: '/v2/providers' })).status, 401);
+  assert.equal(always.calls.length, 2);
+  const noTime = fakeSealedServer({ respond: () => ({ ...rejected, body: utf8('{"code":"AUTH_TIMESTAMP_REJECTED","message":"x"}') }) });
+  assert.equal((await createSecureTransport({ profile: pinnedProfile('http://10.0.0.23:7345'), fetchImpl: noTime.fetchImpl, signer: deviceRequestSigner(device) })
+    .fetch({ method: 'GET', path: '/v2/providers' })).status, 401);
+  assert.equal(noTime.calls.length, 1);
+  assert.equal(backendClockOffsetMs('http://10.0.0.23:7345'), 0);
+
+  // An unsealed (unauthenticated) 401 on the tunnel never moves the clock.
+  const forged = createSecureTransport({
+    profile: pinnedProfile('http://10.0.0.24:7345'),
+    signer: deviceRequestSigner(device),
+    fetchImpl: async () => new Response(JSON.stringify({ code: 'AUTH_TIMESTAMP_REJECTED', message: 'x', serverTime }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+  await assert.rejects(forged.fetch({ method: 'GET', path: '/v2/providers' }), (error) => error.httpStatus === 401);
+  assert.equal(backendClockOffsetMs('http://10.0.0.24:7345'), 0);
+
+  // Loopback plaintext: the answer is the backend's own, so it is honoured.
+  let plainCalls = 0;
+  const plain = createSecureTransport({
+    profile: { serverUrl: 'http://127.0.0.1:7399', encryptionProtocol: 'none', encryptionPublicKey: '' },
+    signer: deviceRequestSigner(device),
+    fetchImpl: async (_url, init) => {
+      plainCalls += 1;
+      if (plainCalls === 1) return new Response(rejected.body, { status: 401, headers: { 'content-type': 'application/json' } });
+      return Response.json({ ts: init.headers['x-todex-auth-ts'] });
+    },
+  });
+  const streamed = await plain.fetchStream({ method: 'GET', path: '/v2/providers' });
+  const chunks = [];
+  for await (const chunk of streamed.body) chunks.push(...chunk);
+  assert.equal(streamed.status, 200);
+  assert.ok(Math.abs(Number(JSON.parse(new TextDecoder().decode(Uint8Array.from(chunks))).ts) - serverTime) <= 2);
 });
 
 class FakeWebSocket {

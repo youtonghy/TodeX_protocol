@@ -45,6 +45,15 @@ export const TRANSPORT_V2_MAX_HEAD_BYTES = 65536;
  */
 export const MAX_REST_BODY_BYTES = 32 * 1024 * 1024;
 export const TRANSPORT_V2_SEALED_CONTENT_TYPE = 'application/vnd.todex.sealed';
+/**
+ * Sealed REST revision (spec: "REST response nonce"): requests carry
+ * `X-Todex-Sealed-Revision: 2`, responses `Content-Type:
+ * application/vnd.todex.sealed; r=2` and a body of `response_nonce ||
+ * records`, and `/v2/transport-policy` reports `"sealedRevision": 2`.
+ */
+export const TRANSPORT_V2_SEALED_REVISION = 2;
+/** Length of the raw `response_nonce` that prefixes every sealed REST response body. */
+export const TRANSPORT_V2_RESPONSE_NONCE_LENGTH = 32;
 export const TRANSPORT_V2_SEALED_PATH = '/v2/sealed';
 export const TRANSPORT_V2_WS_CLOSE_CODE = 4400;
 export const TRANSPORT_V2_WS_CLOSE_REASON = 'transport crypto failure';
@@ -55,6 +64,7 @@ export const TRANSPORT_V2_HEADERS = {
   clientKey: 'x-todex-client-key',
   kemCiphertext: 'x-todex-kem-ciphertext',
   requestNonce: 'x-todex-request-nonce',
+  sealedRevision: 'x-todex-sealed-revision',
 } as const;
 
 const X25519_PUBLIC_KEY_LENGTH = 32;
@@ -246,8 +256,16 @@ export function transportTranscriptHash(input: Omit<TransportKeyScheduleInput, '
   }
 }
 
-/** HKDF-SHA256 with `salt = th`, `ikm = shared`, info `label/up` and `label/down`. */
+/**
+ * WebSocket key schedule: HKDF-SHA256 with `salt = th`, `ikm = shared`, info
+ * `label/up` and `label/down`. REST derives its down key per response
+ * (`deriveRestTransportKeys` + `deriveRestDownKey`), so the REST label is
+ * refused here.
+ */
 export function deriveTransportKeys(input: TransportKeyScheduleInput): TransportKeys {
+  if (input.label === TRANSPORT_V2_REST_LABEL) {
+    throw new TypeError('REST keys come from deriveRestTransportKeys and deriveRestDownKey');
+  }
   const th = transportTranscriptHash(input);
   const prk = extract(sha256, input.shared, th);
   try {
@@ -259,6 +277,35 @@ export function deriveTransportKeys(input: TransportKeyScheduleInput): Transport
   } finally {
     wipe(prk);
   }
+}
+
+export type RestTransportKeys = {
+  th: Uint8Array;
+  /** `HKDF-Extract(salt = th, ikm = shared)`; kept until the response nonce arrives. */
+  prk: Uint8Array;
+  kUp: Uint8Array;
+};
+
+/**
+ * REST key schedule up to the request: `th`, `prk` and `k_up =
+ * HKDF-Expand(prk, "todex.transport.v2/rest/up", 32)`. The response key needs
+ * the server's `response_nonce` (`deriveRestDownKey`). The caller owns and
+ * wipes `prk`.
+ */
+export function deriveRestTransportKeys(input: Omit<TransportKeyScheduleInput, 'label'>): RestTransportKeys {
+  const th = transportTranscriptHash({ ...input, label: TRANSPORT_V2_REST_LABEL });
+  const prk = extract(sha256, input.shared, th);
+  return { th, prk, kUp: expand(sha256, prk, encoder.encode(`${TRANSPORT_V2_REST_LABEL}/up`), TRANSPORT_V2_KEY_LENGTH) };
+}
+
+/** `k_down = HKDF-Expand(prk, "todex.transport.v2/rest/down" || response_nonce, 32)`. */
+export function deriveRestDownKey(prk: Uint8Array, responseNonce: Uint8Array): Uint8Array {
+  if (prk.length !== TRANSPORT_V2_KEY_LENGTH) throw new TransportCryptoError('rest prk length');
+  if (responseNonce.length !== TRANSPORT_V2_RESPONSE_NONCE_LENGTH) {
+    throw new TransportCryptoError('response nonce length');
+  }
+  const info = concat(encoder.encode(`${TRANSPORT_V2_REST_LABEL}/down`), responseNonce);
+  return expand(sha256, prk, info, TRANSPORT_V2_KEY_LENGTH);
 }
 
 // ---------------------------------------------------------------------------
@@ -786,11 +833,45 @@ export type RestSealOptions = {
   randomness?: ClientHandshakeRandomness & { clientNonce?: Uint8Array };
 };
 
-/** Keeps `k_down` for the response of one sealed request. */
+/**
+ * The response key material of one sealed request: `prk` and `th`, waiting
+ * for the 32-byte `response_nonce` that prefixes the response body. Single
+ * use: `cipherFor` derives `k_down` and wipes `prk`.
+ */
+export class RestResponseKey {
+  private prk: Uint8Array | null;
+  private readonly th: Uint8Array;
+
+  constructor(prk: Uint8Array, th: Uint8Array) {
+    this.prk = Uint8Array.from(prk);
+    this.th = Uint8Array.from(th);
+  }
+
+  /** Derives the down cipher for `responseNonce`; a second call throws. */
+  cipherFor(responseNonce: Uint8Array): RecordCipher {
+    const prk = this.prk;
+    if (!prk) throw new TransportCryptoError('response already opened');
+    this.prk = null;
+    let kDown: Uint8Array | undefined;
+    try {
+      kDown = deriveRestDownKey(prk, responseNonce);
+      return new RecordCipher(kDown, this.th, TRANSPORT_V2_DIRECTION_DOWN);
+    } finally {
+      wipe(prk, kDown, this.th);
+    }
+  }
+
+  dispose(): void {
+    wipe(this.prk, this.th);
+    this.prk = null;
+  }
+}
+
+/** Keeps `prk` for the response of one sealed request. */
 export type RestResponseContext = {
   readonly protocol: SecureTransportProtocol;
-  /** Takes ownership of the response key; second use throws. */
-  takeResponseCipher: () => RecordCipher;
+  /** Takes ownership of the response key material; second use throws. */
+  takeResponseKey: () => RestResponseKey;
   dispose: () => void;
 };
 
@@ -816,10 +897,9 @@ export function sealRestRequest(options: RestSealOptions): SealedRestRequest {
     throw new TransportCryptoError('client nonce length');
   }
   const handshake = clientHandshake(protocol, serverStaticPublic, options.randomness);
-  let keys: TransportKeys;
+  let keys: RestTransportKeys;
   try {
-    keys = deriveTransportKeys({
-      label: TRANSPORT_V2_REST_LABEL,
+    keys = deriveRestTransportKeys({
       protocol,
       deviceId: '',
       serverStaticPublic,
@@ -832,11 +912,14 @@ export function sealRestRequest(options: RestSealOptions): SealedRestRequest {
     wipe(handshake.shared);
   }
   const up = new RecordCipher(keys.kUp, keys.th, TRANSPORT_V2_DIRECTION_UP);
-  let down: RecordCipher | null = new RecordCipher(keys.kDown, keys.th, TRANSPORT_V2_DIRECTION_DOWN);
-  wipe(keys.kUp, keys.kDown, keys.th);
+  let down: RestResponseKey | null = new RestResponseKey(keys.prk, keys.th);
+  wipe(keys.kUp, keys.prk, keys.th);
   let sealedBody: Uint8Array;
   try {
     sealedBody = sealRecordStream(up, plaintext);
+  } catch (error) {
+    down.dispose();
+    throw error;
   } finally {
     up.dispose();
     wipe(plaintext);
@@ -845,6 +928,7 @@ export function sealRestRequest(options: RestSealOptions): SealedRestRequest {
     headers: {
       'content-type': TRANSPORT_V2_SEALED_CONTENT_TYPE,
       [TRANSPORT_V2_HEADERS.transport]: String(TRANSPORT_V2_VERSION),
+      [TRANSPORT_V2_HEADERS.sealedRevision]: String(TRANSPORT_V2_SEALED_REVISION),
       [TRANSPORT_V2_HEADERS.encryption]: protocol,
       [protocol === 'x25519' ? TRANSPORT_V2_HEADERS.clientKey : TRANSPORT_V2_HEADERS.kemCiphertext]:
         encodeBase64Url(handshake.clientMaterial),
@@ -853,11 +937,11 @@ export function sealRestRequest(options: RestSealOptions): SealedRestRequest {
     body: sealedBody,
     context: {
       protocol,
-      takeResponseCipher: () => {
+      takeResponseKey: () => {
         if (!down) throw new TransportCryptoError('response already opened');
-        const cipher = down;
+        const key = down;
         down = null;
-        return cipher;
+        return key;
       },
       dispose: () => {
         down?.dispose();
@@ -867,14 +951,22 @@ export function sealRestRequest(options: RestSealOptions): SealedRestRequest {
   };
 }
 
-/** Opens a complete sealed response body (one-shot). */
+/**
+ * Opens a complete sealed response body (one-shot): `response_nonce` (32
+ * bytes) followed by the record stream sealed with the nonce-bound `k_down`.
+ */
 export function openRestResponse(
   context: RestResponseContext,
   body: Uint8Array,
 ): InnerResponseHead & { body: Uint8Array } {
-  const cipher = context.takeResponseCipher();
+  const key = context.takeResponseKey();
+  if (body.length < TRANSPORT_V2_RESPONSE_NONCE_LENGTH) {
+    key.dispose();
+    throw new TransportCryptoError('truncated response nonce');
+  }
+  const cipher = key.cipherFor(body.subarray(0, TRANSPORT_V2_RESPONSE_NONCE_LENGTH));
   try {
-    return decodeInnerResponse(openRecordStream(cipher, body));
+    return decodeInnerResponse(openRecordStream(cipher, body.subarray(TRANSPORT_V2_RESPONSE_NONCE_LENGTH)));
   } finally {
     cipher.dispose();
   }
@@ -912,23 +1004,32 @@ export type StreamingRestResponse = InnerResponseHead & {
 };
 
 /**
- * Opens a streamed sealed response: resolves once the inner head has been
- * authenticated, then yields body chunks as records arrive.
+ * Opens a streamed sealed response: collects the 32-byte `response_nonce`
+ * (it may span chunks), derives `k_down`, resolves once the inner head has
+ * been authenticated, then yields body chunks as records arrive.
  */
 export async function openRestResponseStream(
   context: RestResponseContext,
   source: ByteSource,
 ): Promise<StreamingRestResponse> {
-  const cipher = context.takeResponseCipher();
-  const decoder = new RecordStreamDecoder(cipher);
+  const key = context.takeResponseKey();
+  let decoder: RecordStreamDecoder | null = null;
+  const nonce = new Uint8Array(TRANSPORT_V2_RESPONSE_NONCE_LENGTH);
+  let nonceBytes = 0;
   const iterator = iterateByteSource(source)[Symbol.asyncIterator]();
   let pending: Uint8Array = new Uint8Array(0);
   let head: InnerResponseHead | null = null;
   let headBytes = -1;
   let finished = false;
 
+  const disposeKeys = () => {
+    if (decoder) decoder.dispose();
+    else key.dispose();
+    wipe(nonce);
+  };
+
   const fail = async (error: unknown): Promise<never> => {
-    decoder.dispose();
+    disposeKeys();
     await iterator.return?.(undefined).catch(() => undefined);
     throw error;
   };
@@ -936,12 +1037,23 @@ export async function openRestResponseStream(
   const pull = async (): Promise<Uint8Array[] | null> => {
     const next = await iterator.next();
     if (next.done) {
+      if (!decoder) throw new TransportCryptoError('truncated response nonce');
       decoder.finish();
       finished = true;
       decoder.dispose();
       return null;
     }
-    return decoder.push(next.value);
+    let chunk = next.value;
+    if (!decoder) {
+      const take = Math.min(chunk.length, TRANSPORT_V2_RESPONSE_NONCE_LENGTH - nonceBytes);
+      nonce.set(chunk.subarray(0, take), nonceBytes);
+      nonceBytes += take;
+      if (nonceBytes < TRANSPORT_V2_RESPONSE_NONCE_LENGTH) return [];
+      decoder = new RecordStreamDecoder(key.cipherFor(nonce));
+      wipe(nonce);
+      chunk = chunk.subarray(take);
+    }
+    return decoder.push(chunk);
   };
 
   try {
@@ -975,7 +1087,7 @@ export async function openRestResponseStream(
       // Error, early `return()` by the consumer, or a failed `finish()`:
       // wipe the key and stop reading the network body.
       if (!finished) {
-        decoder.dispose();
+        disposeKeys();
         await iterator.return?.(undefined).catch(() => undefined);
       }
     }
@@ -1148,10 +1260,73 @@ export function transportFingerprint(protocol: TransportEncryptionProtocol, publ
   return short.match(/.{4}/g)!.join('-');
 }
 
+/** Longest device name, in Unicode scalar values. */
+export const DEVICE_PAIRING_NAME_MAX_SCALARS = 80;
+
+export type DevicePairingNameFailure =
+  | 'empty'
+  | 'too_long'
+  /** Leading or trailing Unicode `White_Space`. */
+  | 'surrounding_whitespace'
+  /** A `Cc` control character (U+0000–U+001F, U+007F–U+009F). */
+  | 'control'
+  /** U+200E/U+200F, U+202A–U+202E or U+2066–U+2069. */
+  | 'bidi_control'
+  /** A lone UTF-16 surrogate, which is not a Unicode scalar value. */
+  | 'not_scalar';
+
+// Unicode `White_Space` (what Rust `char::is_whitespace` and Swift
+// `Character.isWhitespace` use). Not `String.prototype.trim`, which also
+// strips U+FEFF and would disagree with the backend.
+const PAIRING_NAME_EDGE_WHITESPACE = /^\p{White_Space}+|\p{White_Space}+$/gu;
+const PAIRING_NAME_CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const PAIRING_NAME_BIDI = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const PAIRING_NAME_LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+function stripAll(value: string, pattern: RegExp): string {
+  return value.replace(new RegExp(pattern.source, 'g'), '');
+}
+
+/**
+ * Why `name` is not a valid pairing device name, or null when it is (spec:
+ * device pairing v3, "device name binding"): 1–80 Unicode scalar values, no
+ * `Cc` control, no bidi control, no leading or trailing `White_Space`. The
+ * backend applies the same rule and stores the name as sent.
+ */
+export function devicePairingNameFailure(name: string): DevicePairingNameFailure | null {
+  if (PAIRING_NAME_LONE_SURROGATE.test(name)) return 'not_scalar';
+  const scalars = Array.from(name).length;
+  if (scalars === 0) return 'empty';
+  if (scalars > DEVICE_PAIRING_NAME_MAX_SCALARS) return 'too_long';
+  if (PAIRING_NAME_CONTROL.test(name)) return 'control';
+  if (PAIRING_NAME_BIDI.test(name)) return 'bidi_control';
+  if (name.replace(PAIRING_NAME_EDGE_WHITESPACE, '') !== name) return 'surrounding_whitespace';
+  return null;
+}
+
+/**
+ * The device name a client sends at pairing: drops control and bidi
+ * characters and lone surrogates, trims surrounding `White_Space`, keeps at
+ * most 80 scalar values (trimming again after the cut) and falls back to
+ * `fallback` (normalized the same way, then `'TodeX'`) when nothing is left.
+ * The result always passes `devicePairingNameFailure`.
+ */
+export function normalizeDevicePairingName(name: string, fallback = 'TodeX'): string {
+  const clean = (value: string) => {
+    let out = stripAll(stripAll(stripAll(value, PAIRING_NAME_LONE_SURROGATE), PAIRING_NAME_CONTROL), PAIRING_NAME_BIDI);
+    out = out.replace(PAIRING_NAME_EDGE_WHITESPACE, '');
+    out = Array.from(out).slice(0, DEVICE_PAIRING_NAME_MAX_SCALARS).join('');
+    return out.replace(PAIRING_NAME_EDGE_WHITESPACE, '');
+  };
+  return clean(name) || clean(fallback) || 'TodeX';
+}
+
 /**
  * `domain || request_id || 0 || client_public || server_public || 0 ||
  * device_public || client_nonce || LP(transport_protocol) ||
- * LP(transport_public_key)`; for `none` the key is empty (`LP("")`).
+ * LP(transport_public_key) || LP(utf8(device_name))`; for `none` the key is
+ * empty (`LP("")`). The name is the one sent in the create request
+ * (`deviceNameBinding: 1`) and must pass `devicePairingNameFailure`.
  */
 export function devicePairingV3Transcript(input: {
   requestId: string;
@@ -1161,6 +1336,7 @@ export function devicePairingV3Transcript(input: {
   clientNonce: Uint8Array;
   transportProtocol: TransportEncryptionProtocol;
   transportPublicKey: Uint8Array;
+  deviceName: string;
 }): Uint8Array {
   requirePairingLengths(input.clientPublic, input.clientNonce);
   if (input.serverPublic.length !== 32 || input.devicePublic.length !== 32) {
@@ -1170,6 +1346,8 @@ export function devicePairingV3Transcript(input: {
     throw new TypeError('pairing transport protocol is unknown');
   }
   requirePairingTransportKey(input.transportProtocol, input.transportPublicKey);
+  const nameFailure = devicePairingNameFailure(input.deviceName);
+  if (nameFailure) throw new TypeError(`pairing device name is invalid (${nameFailure})`);
   return concat(
     encoder.encode(DEVICE_PAIRING_V3_TRANSCRIPT_DOMAIN),
     encoder.encode(input.requestId),
@@ -1181,6 +1359,7 @@ export function devicePairingV3Transcript(input: {
     input.clientNonce,
     lengthPrefixed(encoder.encode(input.transportProtocol)),
     lengthPrefixed(input.transportPublicKey),
+    lengthPrefixed(encoder.encode(input.deviceName)),
   );
 }
 
@@ -1199,8 +1378,8 @@ export type DevicePairingV3Material = {
  * ephemeral secret and the server's per-request public key, then
  * HKDF-SHA256(salt = SHA256(transcript)) with the three v3 labels (the v2
  * pattern from the backend's `device_pairing.rs`). The transcript binds the
- * server's transport key, so validate it with `parseDevicePairingTransport`
- * first.
+ * server's transport key and the device name, so validate the key with
+ * `parseDevicePairingTransport` first and send the name exactly as passed.
  */
 export function deriveDevicePairingV3Material(input: {
   requestId: string;
@@ -1211,6 +1390,8 @@ export function deriveDevicePairingV3Material(input: {
   /** Raw key from a validated `DevicePairingTransport` (empty for `none`). */
   transportProtocol: TransportEncryptionProtocol;
   transportPublicKey: Uint8Array;
+  /** The exact device name sent in the create request. */
+  deviceName: string;
 }): DevicePairingV3Material {
   const clientPublic = x25519.getPublicKey(input.clientSecretKey);
   let shared: Uint8Array;

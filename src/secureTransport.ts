@@ -4,6 +4,7 @@ import { isLoopbackUrl } from './mobileParity';
 import {
   TRANSPORT_V2_SEALED_CONTENT_TYPE,
   TRANSPORT_V2_SEALED_PATH,
+  TRANSPORT_V2_SEALED_REVISION,
   TRANSPORT_V2_WS_CLOSE_CODE,
   TRANSPORT_V2_WS_CLOSE_REASON,
   TRANSPORT_V2_VERSION,
@@ -37,6 +38,15 @@ import { decodeBase64UrlBytes, type TransportEncryptionProtocol } from './transp
 // - no pinned key, loopback  -> plaintext.
 // A refusal never falls back to plaintext. Callers see plain requests,
 // responses and JSON text messages.
+//
+// Sealed REST is revision 2 (`X-Todex-Sealed-Revision: 2`, responses typed
+// `application/vnd.todex.sealed; r=2` and prefixed with a response nonce). A
+// sealed answer without `r=2` comes from an outdated backend
+// (`BackendUpgradeRequiredError`). Two authenticated inner answers are
+// retried once with a fresh signature: `503 TRANSPORT_BUSY` (the backend
+// guarantees the request did not run) after `Retry-After`, and `401
+// AUTH_TIMESTAMP_REJECTED` after recording the backend's clock offset from
+// its `serverTime`.
 
 export type SecureTransportProfile = {
   serverUrl: string;
@@ -56,23 +66,52 @@ export type SecureTransportMode = 'v2' | 'plaintext' | 'refused';
 /** What the device-auth signer covers: always the *inner* request. */
 export type SignableRequest = { method: string; path: string; query: string; body: Uint8Array };
 
+/** Signing time: local time corrected by the backend's clock offset. */
+export type SigningClock = { nowMs: number };
+
 export type DeviceRequestSigner = {
   /** Device id the credentials carry; bound into the WebSocket key schedule. */
   deviceId: string;
   /** Device-auth headers for a REST request. */
-  signRequest: (request: SignableRequest) => Record<string, string>;
+  signRequest: (request: SignableRequest, clock?: SigningClock) => Record<string, string>;
   /** Device-auth query parameters for the WebSocket upgrade (`GET`, empty body). */
-  signUpgrade: (request: { path: string; query: string }) => Record<string, string>;
+  signUpgrade: (request: { path: string; query: string }, clock?: SigningClock) => Record<string, string>;
 };
 
 /** Signer backed by `deviceAuth.ts` (`todex.device-auth.v1`). */
 export function deviceRequestSigner(device: DeviceIdentity): DeviceRequestSigner {
   return {
     deviceId: device.deviceId,
-    signRequest: ({ method, path, query, body }) =>
-      deviceAuthHeaders(device, method, query ? `${path}?${query}` : path, body),
-    signUpgrade: ({ path, query }) => deviceAuthQuery(device, 'GET', path, query),
+    signRequest: ({ method, path, query, body }, clock) =>
+      deviceAuthHeaders(device, method, query ? `${path}?${query}` : path, body, { now: clock?.nowMs }),
+    signUpgrade: ({ path, query }, clock) => deviceAuthQuery(device, 'GET', path, query, { now: clock?.nowMs }),
   };
+}
+
+const CLOCK_OFFSET_LIMIT = 32;
+const clockOffsets = new Map<string, number>();
+
+function clockKey(serverUrl: string): string {
+  return httpServerUrl(serverUrl).replace(/\/+$/, '').toLowerCase();
+}
+
+/**
+ * Milliseconds to add to local time when signing for `serverUrl`, learned
+ * from the backend's `serverTime` in an authenticated `401
+ * AUTH_TIMESTAMP_REJECTED`; 0 until then.
+ */
+export function backendClockOffsetMs(serverUrl: string): number {
+  return clockOffsets.get(clockKey(serverUrl)) ?? 0;
+}
+
+function recordClockOffset(serverUrl: string, serverTimeSeconds: number, nowMs = Date.now()): void {
+  const key = clockKey(serverUrl);
+  clockOffsets.delete(key);
+  if (clockOffsets.size >= CLOCK_OFFSET_LIMIT) {
+    const oldest = clockOffsets.keys().next().value;
+    if (oldest !== undefined) clockOffsets.delete(oldest);
+  }
+  clockOffsets.set(key, serverTimeSeconds * 1000 - nowMs);
 }
 
 export type SecureTransportOptions = {
@@ -177,6 +216,26 @@ export class TransportRepairRequiredError extends ConnectionError {
   }
 }
 
+/**
+ * The backend predates sealed REST revision 2: its `/v2/transport-policy`
+ * lacks `"sealedRevision": 2`, or it answered a sealed request without
+ * `r=2`. Never falls back; the backend must be updated.
+ */
+export class BackendUpgradeRequiredError extends ConnectionError {
+  constructor(readonly detail: 'policy' | 'response') {
+    super(
+      ConnectionErrorType.PROTOCOL_MISMATCH,
+      '后端版本过旧，请升级后端后重新连接',
+      detail === 'policy'
+        ? `transport policy lacks sealedRevision ${TRANSPORT_V2_SEALED_REVISION}`
+        : `sealed response without r=${TRANSPORT_V2_SEALED_REVISION}`,
+      false,
+      'protocol_mismatch',
+    );
+    this.name = 'BackendUpgradeRequiredError';
+  }
+}
+
 /** The pinned key cannot be used (malformed, wrong length or a low-order point). */
 export class InvalidPinnedKeyError extends ConnectionError {
   constructor(readonly protocol: string) {
@@ -248,11 +307,12 @@ export function secureTransportRefusal(profile: SecureTransportProfile): Connect
  * Checks a `/v2/transport-policy` answer against the profile. The answer
  * never downgrades a pinned profile to plaintext: a pinned profile whose
  * server now requires another protocol (including `none`, which has no
- * static key to run v2 against) must be re-paired.
+ * static key to run v2 against) must be re-paired, and one whose server does
+ * not report `sealedRevision: 2` needs a backend update.
  */
 export function checkTransportPolicy(
   profile: SecureTransportProfile,
-  policy: { requiredProtocol?: unknown; transportVersion?: unknown },
+  policy: { requiredProtocol?: unknown; transportVersion?: unknown; sealedRevision?: unknown },
 ): void {
   const refusal = secureTransportRefusal(profile);
   if (refusal) throw refusal;
@@ -264,6 +324,9 @@ export function checkTransportPolicy(
   }
   if (policy.transportVersion !== TRANSPORT_V2_VERSION) {
     throw new TransportPolicyError('outdated', false);
+  }
+  if (policy.sealedRevision !== TRANSPORT_V2_SEALED_REVISION) {
+    throw new BackendUpgradeRequiredError('policy');
   }
 }
 
@@ -286,7 +349,7 @@ const POLICY_MAX_BYTES = 2048;
  * and unsigned: it is on the plaintext allow-list and carries no secrets)
  * and applies `checkTransportPolicy`. Rejects with `EncryptionRequiredError`,
  * `InvalidPinnedKeyError`, `TransportRepairRequiredError`,
- * `TransportPolicyError`, or an `AbortError`
+ * `TransportPolicyError`, `BackendUpgradeRequiredError`, or an `AbortError`
  * when `signal` aborts.
  */
 export async function verifyTransportPolicy(
@@ -344,7 +407,7 @@ export async function verifyTransportPolicy(
   if (required !== 'none' && !parseSecureTransportProtocol(required)) {
     throw new TransportPolicyError('invalid', false);
   }
-  checkTransportPolicy(profile, policy as { requiredProtocol?: unknown; transportVersion?: unknown });
+  checkTransportPolicy(profile, policy as { requiredProtocol?: unknown; transportVersion?: unknown; sealedRevision?: unknown });
 }
 
 const encoder = new TextEncoder();
@@ -373,6 +436,102 @@ function headersRecord(headers: Headers): Record<string, string> {
     out[name.toLowerCase()] = value;
   });
   return out;
+}
+
+/** `type/subtype; name=value` -> lowercase media type and parameters (first wins, quotes removed). */
+function parseContentType(value: string | null): { media: string; params: Map<string, string> } {
+  const [media, ...parts] = (value ?? '').split(';');
+  const params = new Map<string, string>();
+  for (const part of parts) {
+    const at = part.indexOf('=');
+    if (at < 0) continue;
+    const name = part.slice(0, at).trim().toLowerCase();
+    let parameter = part.slice(at + 1).trim();
+    if (parameter.length >= 2 && parameter.startsWith('"') && parameter.endsWith('"')) parameter = parameter.slice(1, -1);
+    if (name && !params.has(name)) params.set(name, parameter);
+  }
+  return { media: media.trim().toLowerCase(), params };
+}
+
+/** Error answers worth inspecting are small JSON; a larger body is passed through untouched. */
+const ERROR_BODY_PEEK_BYTES = 64 * 1024;
+/** Upper bound for honouring `Retry-After` on `TRANSPORT_BUSY`. */
+const BUSY_RETRY_MAX_DELAY_MS = 5000;
+const BUSY_RETRY_DEFAULT_DELAY_MS = 1000;
+
+/** `{"code", "message", "serverTime"}`: the backend's top-level error body. */
+function parseErrorEnvelope(body: Uint8Array): { code?: string; serverTime?: number } {
+  let value: unknown;
+  try {
+    value = JSON.parse(decoder.decode(body));
+  } catch {
+    return {};
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const envelope = value as Record<string, unknown>;
+  const serverTime = envelope.serverTime;
+  return {
+    code: typeof envelope.code === 'string' ? envelope.code : undefined,
+    serverTime: typeof serverTime === 'number' && Number.isSafeInteger(serverTime) && serverTime > 0 ? serverTime : undefined,
+  };
+}
+
+/** `Retry-After` in delta-seconds, capped; anything else waits the default second. */
+function busyRetryDelayMs(value: string | undefined): number {
+  const trimmed = (value ?? '').trim();
+  if (!/^\d{1,6}$/.test(trimmed)) return BUSY_RETRY_DEFAULT_DELAY_MS;
+  return Math.min(Number(trimmed) * 1000, BUSY_RETRY_MAX_DELAY_MS);
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Reads a streamed body up to `limit` bytes. Returns its bytes when it ended
+ * within the limit (null otherwise) and an iterable that replays everything,
+ * including whatever was not read yet.
+ */
+async function peekStreamBody(
+  body: AsyncIterable<Uint8Array>,
+  limit: number,
+): Promise<{ bytes: Uint8Array | null; body: AsyncIterable<Uint8Array> }> {
+  const iterator = body[Symbol.asyncIterator]();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (size <= limit) {
+    const next = await iterator.next();
+    if (next.done) {
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return { bytes, body: iterateByteSource(chunks) };
+    }
+    chunks.push(next.value);
+    size += next.value.length;
+  }
+  async function* replay(): AsyncGenerator<Uint8Array> {
+    yield* chunks;
+    yield* { [Symbol.asyncIterator]: () => iterator };
+  }
+  return { bytes: null, body: replay() };
 }
 
 async function rejectUnsealed(response: Response): Promise<never> {
@@ -409,24 +568,31 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
     if (refusal) throw refusal;
   };
 
+  const signingClock = (): SigningClock => ({ nowMs: Date.now() + backendClockOffsetMs(profile.serverUrl) });
+
   const prepare = (request: SecureRequest) => {
     const query = queryString(request.query);
     const body = bodyBytes(request.body);
     const method = request.method.toUpperCase();
     const headers: Record<string, string> = {};
     for (const [name, value] of Object.entries(request.headers ?? {})) headers[name.toLowerCase()] = value;
-    if (signer) {
-      Object.assign(headers, signer.signRequest({ method, path: request.path, query, body }));
-    }
     return { method, path: request.path, query, body, headers };
   };
+  type PreparedRequest = ReturnType<typeof prepare>;
 
-  const send = async (request: SecureRequest, streaming: boolean): Promise<SecureResponse | SecureStreamResponse> => {
-    requireAllowed();
-    const inner = prepare(request);
-    // Before anything leaves: the backend answers an oversized body with an
-    // opaque 400 that reads like a pairing failure.
-    assertPlaintextFits(inner.body.length, maxBodyBytes);
+  /** Every attempt signs afresh: new nonce, current (offset-corrected) time. */
+  const signed = (inner: PreparedRequest): PreparedRequest => {
+    if (!signer) return inner;
+    const { method, path, query, body } = inner;
+    return { ...inner, headers: { ...inner.headers, ...signer.signRequest({ method, path, query, body }, signingClock()) } };
+  };
+
+  const attempt = async (
+    request: SecureRequest,
+    prepared: PreparedRequest,
+    streaming: boolean,
+  ): Promise<SecureResponse | SecureStreamResponse> => {
+    const inner = signed(prepared);
     if (mode === 'plaintext') {
       const response = await fetchImpl()(originUrl(profile.serverUrl, inner.path, inner.query), {
         method: inner.method,
@@ -469,8 +635,15 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
       sealed.context.dispose();
       throw error;
     }
-    const contentType = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
-    if (response.status !== 200 || contentType !== TRANSPORT_V2_SEALED_CONTENT_TYPE) {
+    const contentType = parseContentType(response.headers.get('content-type'));
+    const sealedType = contentType.media === TRANSPORT_V2_SEALED_CONTENT_TYPE;
+    if (sealedType && contentType.params.get('r') !== String(TRANSPORT_V2_SEALED_REVISION)) {
+      // A sealed answer of an older revision: the backend must be updated.
+      sealed.context.dispose();
+      await response.body?.cancel().catch(() => undefined);
+      throw new BackendUpgradeRequiredError('response');
+    }
+    if (response.status !== 200 || !sealedType) {
       sealed.context.dispose();
       return rejectUnsealed(response);
     }
@@ -489,6 +662,46 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
     return { status: opened.status, headers: opened.headers, body: opened.body };
   };
 
+  const send = async (request: SecureRequest, streaming: boolean): Promise<SecureResponse | SecureStreamResponse> => {
+    requireAllowed();
+    const prepared = prepare(request);
+    // Before anything leaves: the backend answers an oversized body with an
+    // opaque 400 that reads like a pairing failure.
+    assertPlaintextFits(prepared.body.length, maxBodyBytes);
+    let busyRetried = false;
+    let clockRetried = false;
+    for (;;) {
+      const response = await attempt(request, prepared, streaming);
+      // Only authenticated answers get here (sealed r=2, or loopback
+      // plaintext); an unsealed error on the tunnel was already thrown.
+      const busy = mode === 'v2' && response.status === 503 && !busyRetried;
+      const clock = signer !== null && response.status === 401 && !clockRetried;
+      if (!busy && !clock) return response;
+      let bytes: Uint8Array | null;
+      let replay: SecureResponse | SecureStreamResponse = response;
+      if (streaming) {
+        const peeked = await peekStreamBody(response.body as AsyncIterable<Uint8Array>, ERROR_BODY_PEEK_BYTES);
+        bytes = peeked.bytes;
+        replay = { ...response, body: peeked.body };
+      } else {
+        bytes = response.body as Uint8Array;
+      }
+      const envelope = bytes ? parseErrorEnvelope(bytes) : {};
+      if (busy && envelope.code === 'TRANSPORT_BUSY') {
+        // The backend did not run the request and did not spend the nonce.
+        busyRetried = true;
+        await delay(busyRetryDelayMs(response.headers['retry-after']), request.signal);
+        continue;
+      }
+      if (clock && envelope.code === 'AUTH_TIMESTAMP_REJECTED' && envelope.serverTime !== undefined) {
+        clockRetried = true;
+        recordClockOffset(profile.serverUrl, envelope.serverTime);
+        continue;
+      }
+      return replay;
+    }
+  };
+
   const openSocket = (socketOptions: SecureSocketOptions = {}): SecureSocket => {
     requireAllowed();
     const path = socketOptions.path ?? '/v2/ws';
@@ -505,7 +718,7 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
     }
     if (signer) {
       // The signature covers the transport parameters (tv, enc, nonce, key).
-      const signed = signer.signUpgrade({ path, query: params.toString() });
+      const signed = signer.signUpgrade({ path, query: params.toString() }, signingClock());
       if (signed.device_id !== undefined && signed.device_id !== signer.deviceId) {
         channel?.dispose();
         throw new TypeError('signer device id does not match its credential');

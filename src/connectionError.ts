@@ -12,6 +12,8 @@ export enum ConnectionErrorType {
   PROTOCOL_MISMATCH = 'PROTOCOL_MISMATCH',
   WEBSOCKET_FAILED = 'WEBSOCKET_FAILED',
   PROVIDER_UNAVAILABLE = 'PROVIDER_UNAVAILABLE',
+  /** Transport v2 cannot be used: unpinned remote host or a pinned protocol the server no longer accepts. */
+  ENCRYPTION_REQUIRED = 'ENCRYPTION_REQUIRED',
 }
 
 export type ConnectionFailureCode =
@@ -21,6 +23,7 @@ export type ConnectionFailureCode =
   | 'protocol_mismatch'
   | 'websocket_failed'
   | 'provider_unavailable'
+  | 'encryption_required'
   | 'request_failed';
 
 export class ConnectionError extends Error {
@@ -259,6 +262,8 @@ export function connectionFailureLabel(code?: ConnectionFailureCode | ''): strin
       return 'WebSocket 握手失败';
     case 'provider_unavailable':
       return 'Agent 不可用';
+    case 'encryption_required':
+      return '需要加密配对';
     case 'request_failed':
       return '请求失败';
     default:

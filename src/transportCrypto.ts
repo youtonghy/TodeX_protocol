@@ -77,6 +77,7 @@ export type TransportCryptoSession = {
 };
 
 const AAD = utf8('todex-ws-transport-crypto-v1');
+const MAX_U64 = (1n << 64n) - 1n;
 
 export async function resolvePairingPayload(raw: string): Promise<ParsedPairing> {
   const parsed = JSON.parse(raw) as Partial<PairingLinkPayload>;
@@ -223,6 +224,10 @@ export function createTransportCryptoSession(
       : createMlKem768Handshake(serverPublicKey);
   const key = hkdf(sha256, handshake.sharedSecret, handshake.salt, utf8(protocol), 32);
   let sendCounter = 0;
+  // Mirrors the backend's `decrypt_text`: frames must arrive with exactly
+  // the next counter, and every nonce byte outside the direction and the
+  // little-endian counter must be zero.
+  let receiveCounter = 0n;
 
   return {
     protocol,
@@ -254,9 +259,21 @@ export function createTransportCryptoSession(
       if (nonce.length !== 24 || nonce[0] !== 1) {
         throw new Error('收到的加密帧方向不正确');
       }
+      if (nonce.subarray(1, 8).some((byte) => byte !== 0) || nonce.subarray(16).some((byte) => byte !== 0)) {
+        throw new Error('收到的加密帧 nonce 格式不正确');
+      }
+      if (receiveCounter === MAX_U64) {
+        throw new Error('加密帧计数器已耗尽');
+      }
+      const counter = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getBigUint64(8, true);
+      if (counter !== receiveCounter) {
+        throw new Error('收到的加密帧计数器不连续');
+      }
       const plaintext = xchacha20poly1305(key, nonce, AAD).decrypt(
         decodeBase64UrlBytes(wrapped.ciphertext),
       );
+      // Advance only after the frame authenticated.
+      receiveCounter += 1n;
       return new TextDecoder().decode(plaintext);
     },
   };

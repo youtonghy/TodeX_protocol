@@ -14,7 +14,9 @@ Keep this repository checked out as a sibling directory (`../TodeX_protocol`) of
 ## Layout
 
 - `src/` — platform-agnostic protocol sources (`v2`, `todex`, `transport`, `transportCrypto`, `historyCrypto`, `historyEncryption` (end-to-end history: `HistoryDecryptor`, §7 command frames, grant re-wrap; spec in `TodeX_backend/docs/history-encryption.md`), `recoveryKey` (BIP39 24-word / QR recovery key), `qrCode` (local QR encoder), `deviceAuth`, `conversationRuntime`, `mobileParity`, `connectionProbe`, `connectionError`, and supporting modules). `netinfo.d.ts` is an ambient declaration for the optional React Native NetInfo dynamic import.
+- `secureChannel` / `secureTransport` — transport v2 (spec: `transport-v2.md`). `secureChannel` is the pure reference implementation shared with the backend and TodexCore: key schedule, sealed records, REST record streams and inner request/response heads, the WebSocket hello handshake, and device pairing v3 (commitment, transcript, code, derived keys). `secureTransport` is the single business-facing entry point (`createSecureTransport` → `fetch` / `fetchStream` / `openSocket`) and applies the client rules: pinned key → v2 everywhere (REST via `POST /v2/sealed`), unpinned remote host → `EncryptionRequiredError`, unpinned loopback → plaintext. `fetch`/`WebSocket` and the device-auth signer are injected.
 - `tests/unit/` — `node --test` suites run against `tsc` output in `dist/unit/lib/`.
+- `tests/fixtures/transport-v2.json` — cross-implementation transport v2 vectors (both protocols, WebSocket frames, REST streams, failure cases, pairing v3). Regenerate deterministically with `node scripts/generate-transport-v2-vectors.cjs`; the backend and TodexCore copy it verbatim.
 - `scripts/check-protocol.cjs` — protocol consistency check against the compiled `todex.js`.
 
 ## Commands

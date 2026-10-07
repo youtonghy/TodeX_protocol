@@ -1,7 +1,7 @@
 /** Shared deterministic projection for both realtime delivery and history replay. */
 import { canonicalConversationEventType, contextCompactionStatus, normalizeConversationEvent } from './v2';
 import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun, SubagentStatus } from './v2';
-import { classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
+import { assistantSegmentBase, classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 import { SSH_EXEC_RUN_LIMIT, type SshExecOutputChunk, type SshExecRun } from './ssh';
 import type { DesktopBrowserActionEvent, DesktopComputerActionEvent } from './agentDesktop';
@@ -323,6 +323,8 @@ type TimelineIndex = {
   superseding: Map<string, number>;
   /** Progress rows a final answer in the timeline supersedes. */
   superseded: Set<string>;
+  /** Assistant stream segment row ids by message (`assistantSegmentBase`). */
+  segments: Map<string, Set<string>>;
 };
 /** Each index belongs to exactly one timeline array. A batch takes it from
  * the array it starts from and hands it to the array it produces, so arrays
@@ -336,6 +338,12 @@ function supersededKeys(entry: TimelineEntry): string[] {
   return [...new Set(entry.supersedes.map((blockId) => `${entry.turnId ?? ''}\u0000${blockId}`))];
 }
 function indexEntry(index: TimelineIndex, entry: TimelineEntry): void {
+  const base = assistantSegmentBase(entry.id);
+  if (base) {
+    const ids = index.segments.get(base) ?? new Set<string>();
+    ids.add(entry.id);
+    index.segments.set(base, ids);
+  }
   if (entry.category === 'assistant_progress') {
     const key = progressKey(entry);
     const ids = index.progress.get(key) ?? new Set<string>();
@@ -350,6 +358,10 @@ function indexEntry(index: TimelineIndex, entry: TimelineEntry): void {
   }
 }
 function unindexEntry(index: TimelineIndex, entry: TimelineEntry): void {
+  const base = assistantSegmentBase(entry.id);
+  const segmentIds = base ? index.segments.get(base) : undefined;
+  segmentIds?.delete(entry.id);
+  if (segmentIds && !segmentIds.size) index.segments.delete(base);
   if (entry.category === 'assistant_progress') {
     const key = progressKey(entry);
     const ids = index.progress.get(key);
@@ -365,7 +377,7 @@ function unindexEntry(index: TimelineIndex, entry: TimelineEntry): void {
   }
 }
 function buildTimelineIndex(timeline: readonly TimelineEntry[]): TimelineIndex {
-  const index: TimelineIndex = { positions: new Map(), progress: new Map(), superseding: new Map(), superseded: new Set() };
+  const index: TimelineIndex = { positions: new Map(), progress: new Map(), superseding: new Map(), superseded: new Set(), segments: new Map() };
   // Oldest first, so a (never expected) duplicate id resolves to its newest row.
   for (let position = 0; position < timeline.length; position++) {
     const entry = timeline[timeline.length - 1 - position];
@@ -441,13 +453,17 @@ class TimelineDraft {
     this.removed = true;
   }
 
-  /** Rows newest→oldest without materializing the finished timeline. */
-  private *rowsNewestFirst(): Generator<TimelineEntry> {
-    const total = this.base.length + this.added.length;
-    for (let position = total - 1; position >= 0; position -= 1) {
-      const row = this.at(position);
-      if (row) yield row;
+  /** The stream segment rows of one assistant message, newest→oldest. Read
+   * from the index, so a completed message costs no scan of the timeline. */
+  private segmentRowsNewestFirst(base: string): TimelineEntry[] {
+    const positions: number[] = [];
+    for (const id of this.index.segments.get(base) ?? []) {
+      const position = this.index.positions.get(id);
+      if (position !== undefined) positions.push(position);
     }
+    return positions.sort((left, right) => right - left)
+      .map((position) => this.at(position))
+      .filter((row): row is TimelineEntry => Boolean(row));
   }
 
   /** A full assistant message carries the text its streamed fragments were
@@ -457,7 +473,9 @@ class TimelineDraft {
    * among dropped rows so the surviving entry keeps the message's start. */
   dropCoveredAssistantSegments(entryId: string, text: string): number | undefined {
     let first: number | undefined;
-    for (const id of coveredAssistantSegmentIds(this.rowsNewestFirst(), entryId, text)) {
+    const base = assistantSegmentBase(entryId);
+    if (!base) return undefined;
+    for (const id of coveredAssistantSegmentIds(this.segmentRowsNewestFirst(base), entryId, text)) {
       const position = this.index.positions.get(id);
       if (position === undefined) continue;
       const row = this.at(position);
@@ -1041,24 +1059,38 @@ function mergeEarlierCollection<T extends { id: string }>(
   return changed || appended.length ? [...merged, ...appended] : current;
 }
 
-/** Rows below `index` in event order (oldest first) — the order their
- * subtitles tile a completed message's text from its head. */
-function* olderEventOrder(timeline: readonly TimelineEntry[], index: number, skipped: ReadonlySet<string>): Generator<TimelineEntry> {
-  for (let position = timeline.length - 1; position > index; position -= 1) {
-    if (!skipped.has(timeline[position].id)) yield timeline[position];
+/** The message's segment rows below `index` in event order (oldest first) —
+ * the order their subtitles tile a completed message's text from its head.
+ * `positions` holds the message's row indexes in ascending order. */
+function* olderSegmentRows(timeline: readonly TimelineEntry[], positions: readonly number[], index: number, skipped: ReadonlySet<string>): Generator<TimelineEntry> {
+  for (let cursor = positions.length - 1; cursor >= 0 && positions[cursor] > index; cursor -= 1) {
+    const row = timeline[positions[cursor]];
+    if (!skipped.has(row.id)) yield row;
   }
 }
 
 /** Fragments of a completed message that page in below the loaded window
  * resurface as tail rows after `projectEvent` already collapsed them. Every
  * non-streamed `v2-assistant` segment is a full text whose covered prefix
- * chain drops; a still-streaming segment covers nothing. */
+ * chain drops; a still-streaming segment covers nothing. Segment rows are
+ * grouped by message once, so each message only walks its own rows. */
 function dropCoveredAssistantSegmentEntries(timeline: TimelineEntry[]): TimelineEntry[] {
+  const segments = new Map<string, number[]>();
+  for (let index = 0; index < timeline.length; index += 1) {
+    const base = assistantSegmentBase(timeline[index].id);
+    if (!base) continue;
+    const positions = segments.get(base);
+    if (positions) positions.push(index);
+    else segments.set(base, [index]);
+  }
+  if (!segments.size) return timeline;
   const dropped = new Set<string>();
   for (let index = 0; index < timeline.length; index += 1) {
     const cover = timeline[index];
     if (dropped.has(cover.id) || cover.kind !== 'incoming' || cover.streamedText) continue;
-    for (const id of coveredAssistantSegmentPrefixIds(olderEventOrder(timeline, index, dropped), cover.id, cover.subtitle)) {
+    const positions = segments.get(assistantSegmentBase(cover.id));
+    if (!positions) continue;
+    for (const id of coveredAssistantSegmentPrefixIds(olderSegmentRows(timeline, positions, index, dropped), cover.id, cover.subtitle)) {
       dropped.add(id);
     }
   }
@@ -1118,6 +1150,32 @@ export function prependConversationRuntimeEvents(
   const appended = scratch.timeline.filter((entry) => !loaded.has(entry.id));
   return { ...previous, ...stream, subagents, memoryEntries, sshExecs,
     timeline: dropCoveredAssistantSegmentEntries(dropSupersededProgressEntries([...merged, ...appended])) };
+}
+
+/** Keep the newest `limit` rows of a runtime's (newest-first) timeline; the
+ * runtime comes back unchanged within the limit. `floor` is the sequence at
+ * or below which history is already unloaded (0: none). The returned floor
+ * rises to just below the oldest event a kept row was built from, so the
+ * dropped rows become unloaded history that pages back in like any other —
+ * and no kept row is projected from events at or below it, so nothing merges
+ * twice. The window then no longer opens inside an assistant segment. */
+export function capConversationRuntimeTimeline(
+  state: ConversationRuntime,
+  limit: number,
+  floor = 0,
+): { state: ConversationRuntime; floor: number } {
+  if (state.timeline.length <= limit) return { state, floor };
+  const timeline = state.timeline.slice(0, Math.max(0, limit));
+  let start = Number.POSITIVE_INFINITY;
+  for (const entry of timeline) {
+    const sequence = entry.firstSequence ?? entry.sequence;
+    if (sequence !== undefined && sequence < start) start = sequence;
+  }
+  const nextFloor = Number.isFinite(start) ? Math.max(floor, start - 1) : floor;
+  return {
+    state: { ...state, timeline, ...(nextFloor > floor ? { floorAssistantSegment: null } : {}) },
+    floor: nextFloor,
+  };
 }
 
 /** Adopt a still-running turn whose `turn.started` lies below a lazily loaded

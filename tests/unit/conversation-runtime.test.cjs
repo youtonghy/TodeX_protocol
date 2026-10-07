@@ -826,3 +826,49 @@ test('computer use sessions and actions collect without touching the timeline', 
   assert.equal(ended.desktopComputer.active, false);
   assert.equal(ended.desktopComputer.actions.length, 1);
 });
+
+test('capping keeps the newest rows and raises the floor below every kept row', () => {
+  const events = [event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.delta', { text: 'First', turnId: 't' }),
+    event(3, 'message.delta', { text: ' part. ', turnId: 't' }),
+    event(4, 'tool.started', { turnId: 't', toolCallId: 'x', toolName: 'ls' }),
+    event(5, 'tool.completed', { turnId: 't', toolCallId: 'x', result: 'a.txt' }),
+    event(6, 'message.delta', { text: 'Second', turnId: 't' }),
+    event(7, 'message.delta', { text: ' part.', turnId: 't' }),
+    event(8, 'tool.started', { turnId: 't', toolCallId: 'y', toolName: 'cat' }),
+    event(9, 'message.delta', { text: 'Third.', turnId: 't' }),
+    event(10, 'tool.completed', { turnId: 't', toolCallId: 'y', result: 'body' }),
+    event(11, 'message.delta', { text: 'Done.', turnId: 't' }),
+    event(12, 'turn.completed', { turnId: 't' })];
+  const full = apply(empty(), ...events).state;
+  const unchanged = runtime.capConversationRuntimeTimeline(full, full.timeline.length, 0);
+  assert.equal(unchanged.state, full);
+  assert.equal(unchanged.floor, 0);
+  for (let limit = 1; limit < full.timeline.length; limit++) {
+    const capped = runtime.capConversationRuntimeTimeline(full, limit, 0);
+    assert.deepEqual(capped.state.timeline, full.timeline.slice(0, limit), `limit ${limit}`);
+    assert.ok(capped.floor > 0);
+    assert.ok(capped.state.timeline.every(row => (row.firstSequence ?? row.sequence) > capped.floor), `limit ${limit}`);
+    assert.equal(capped.state.floorAssistantSegment, null);
+    // A floor already above the kept rows' start never moves down.
+    assert.equal(runtime.capConversationRuntimeTimeline(full, limit, 11).floor, 11);
+    // History at or below the floor pages back in: no kept row merges twice
+    // and every dropped row returns.
+    let paged = capped.state;
+    for (let top = capped.floor; top > 0; top -= 2) {
+      paged = runtime.prependConversationRuntimeEvents(paged, events.filter(item => item.sequence <= top && item.sequence > top - 2));
+    }
+    for (const row of capped.state.timeline) assert.deepEqual(paged.timeline.find(item => item.id === row.id), row, `limit ${limit}`);
+    assert.deepEqual(paged.timeline.map(row => row.id).sort(), full.timeline.map(row => row.id).sort(), `limit ${limit}`);
+  }
+  // Cutting between rows whose events do not interleave rebuilds the full projection.
+  const clean = runtime.capConversationRuntimeTimeline(full, 3, 0);
+  assert.equal(clean.floor, 7);
+  assert.deepEqual(rows(lazyProjectionFrom(clean.state, events, clean.floor, 3)), rows(full));
+});
+function lazyProjectionFrom(state, events, floor, pageSize) {
+  for (let top = floor; top > 0; top -= pageSize) {
+    state = runtime.prependConversationRuntimeEvents(state, events.filter(item => item.sequence <= top && item.sequence > top - pageSize));
+  }
+  return state;
+}

@@ -958,18 +958,28 @@ export type ConversationReplayState = {
   normalizedEvents: AgentEventEnvelope[];
 };
 
+/** The message a `v2-assistant-…#s<start>` stream segment row belongs to:
+ * its id without the segment suffix; empty for every other row. Callers that
+ * run the covered-segment checks below for many messages index rows by this
+ * key once and pass each check only its own message's rows, which keeps the
+ * whole pass linear instead of rescanning the timeline per message. */
+export function assistantSegmentBase(id: string): string {
+  const cut = id.lastIndexOf('#s');
+  return cut < 0 || !id.startsWith('v2-assistant-') ? '' : id.slice(0, cut);
+}
+
 /** `v2-assistant-…#s` row ids whose joined text a full assistant message's
  * text already covers. Rows walk newest→oldest; a row stays covered only
  * while prepending its subtitle keeps a strict suffix match, so an older
- * segment of a different message ends the chain instead of being dropped. */
+ * segment of a different message ends the chain instead of being dropped.
+ * Rows of other messages are skipped. */
 export function coveredAssistantSegmentIds(
   rows: Iterable<TimelineEntry>,
   completedId: string,
   text: string,
 ): string[] {
-  const cut = completedId.lastIndexOf('#s');
-  if (cut < 0 || !completedId.startsWith('v2-assistant-') || !text) return [];
-  const base = completedId.slice(0, cut);
+  const base = assistantSegmentBase(completedId);
+  if (!base || !text) return [];
   const covered: string[] = [];
   let acc = '';
   for (const row of rows) {
@@ -993,9 +1003,8 @@ export function coveredAssistantSegmentPrefixIds(
   completedId: string,
   text: string,
 ): string[] {
-  const cut = completedId.lastIndexOf('#s');
-  if (cut < 0 || !completedId.startsWith('v2-assistant-') || !text) return [];
-  const base = completedId.slice(0, cut);
+  const base = assistantSegmentBase(completedId);
+  if (!base || !text) return [];
   const covered: string[] = [];
   let position = 0;
   for (const row of rows) {

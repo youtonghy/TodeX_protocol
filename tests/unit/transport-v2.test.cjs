@@ -20,9 +20,14 @@ const {
   clientHandshake,
   createWsChannel,
   decodeInnerRequest,
+  DevicePairingTransportError,
   deriveDevicePairingV3Material,
   deriveTransportKeys,
   devicePairingV3Commitment,
+  devicePairingV3Transcript,
+  parseDevicePairingTransport,
+  transportFingerprint,
+  verifyDevicePairingCredential,
   encodeInnerResponse,
   openRecordStream,
   openRestResponse,
@@ -40,8 +45,10 @@ const {
   createSecureTransport,
   deviceRequestSigner,
   toFetchResponse,
+  secureTransportRefusal,
   verifyTransportPolicy,
 } = require(path.join(compiledDir, 'secureTransport.js'));
+const { parsePairingAddress } = require(path.join(compiledDir, 'transportCrypto.js'));
 const { generateDeviceIdentity } = require(path.join(compiledDir, 'deviceAuth.js'));
 
 const fixture = JSON.parse(
@@ -244,16 +251,26 @@ for (const vector of fixture.protocols) {
   });
 }
 
-test('pairing v3 commitment, transcript, code and keys match the vector', () => {
-  const vector = fixture.pairingV3;
-  assert.equal(toHex(devicePairingV3Commitment(hex(vector.clientPublicKey), hex(vector.clientNonce))), vector.commitment);
-  const material = deriveDevicePairingV3Material({
+function pairingMaterial(vector, transportProtocol, transportPublicKey) {
+  return deriveDevicePairingV3Material({
     requestId: vector.requestId,
     clientSecretKey: hex(vector.clientSecretKey),
     serverPublic: hex(vector.serverPublicKey),
     devicePublic: hex(vector.devicePublicKey),
     clientNonce: hex(vector.clientNonce),
+    transportProtocol,
+    transportPublicKey: fromB64(transportPublicKey),
   });
+}
+
+test('pairing v3 commitment, transcript, code and keys match the vector', () => {
+  const vector = fixture.pairingV3;
+  assert.equal(toHex(devicePairingV3Commitment(hex(vector.clientPublicKey), hex(vector.clientNonce))), vector.commitment);
+  // The bound key is the ml-kem-768 static key of the protocol vectors.
+  const mlKem = fixture.protocols.find((entry) => entry.protocol === 'ml-kem-768');
+  assert.equal(vector.transportProtocol, 'ml-kem-768');
+  assert.equal(toHex(fromB64(vector.transportPublicKey)), mlKem.server.publicKey);
+  const material = pairingMaterial(vector, vector.transportProtocol, vector.transportPublicKey);
   assert.equal(toHex(material.transcript), vector.transcript);
   assert.equal(toHex(material.transcriptHash), vector.transcriptHash);
   assert.equal(material.verificationCode, vector.verificationCode);
@@ -261,6 +278,134 @@ test('pairing v3 commitment, transcript, code and keys match the vector', () => 
   assert.equal(toHex(material.wrapKey), vector.wrapKey);
   assert.equal(toHex(material.pollProof), vector.pollProof);
   assert.equal(toHex(material.cancelProof), vector.cancelProof);
+  // The transcript ends with LP(protocol) || LP(key).
+  const tail = Buffer.concat([
+    Buffer.from([0, 0, 0, 10]), Buffer.from('ml-kem-768'), Buffer.from([0, 0, 0x04, 0xa0]), Buffer.from(fromB64(vector.transportPublicKey)),
+  ]);
+  assert.equal(toHex(material.transcript.subarray(material.transcript.length - tail.length)), tail.toString('hex'));
+});
+
+test('pairing v3: a different transport key or none changes transcript and code', () => {
+  const vector = fixture.pairingV3;
+  const tampered = pairingMaterial(vector, vector.tampered.transportProtocol, vector.tampered.transportPublicKey);
+  assert.equal(toHex(tampered.transcriptHash), vector.tampered.transcriptHash);
+  assert.equal(tampered.verificationCode, vector.tampered.verificationCode);
+  assert.notEqual(tampered.verificationCode, vector.verificationCode);
+
+  const none = pairingMaterial(vector, 'none', '');
+  assert.equal(toHex(none.transcriptHash), vector.noneCase.transcriptHash);
+  assert.equal(none.verificationCode, vector.noneCase.verificationCode);
+  assert.deepEqual([...none.transcript.subarray(none.transcript.length - 12)], [0, 0, 0, 4, ...Buffer.from('none'), 0, 0, 0, 0]);
+  assert.equal(transportFingerprint('none', ''), vector.noneCase.fingerprint);
+
+  const base = {
+    requestId: vector.requestId,
+    clientPublic: hex(vector.clientPublicKey),
+    serverPublic: hex(vector.serverPublicKey),
+    devicePublic: hex(vector.devicePublicKey),
+    clientNonce: hex(vector.clientNonce),
+  };
+  assert.throws(() => devicePairingV3Transcript({ ...base, transportProtocol: 'x25519', transportPublicKey: new Uint8Array(31) }), TypeError);
+  assert.throws(() => devicePairingV3Transcript({ ...base, transportProtocol: 'none', transportPublicKey: new Uint8Array(1) }), TypeError);
+  assert.throws(() => devicePairingV3Transcript({ ...base, transportProtocol: 'rot13', transportPublicKey: new Uint8Array() }), TypeError);
+});
+
+test('pairing v3: the approval credential decrypts and pins exactly the create-response key', () => {
+  const vector = fixture.pairingV3;
+  const material = pairingMaterial(vector, vector.transportProtocol, vector.transportPublicKey);
+  const plaintext = xchacha20poly1305(material.wrapKey, fromB64(vector.credential.nonceBase64Url), material.transcript)
+    .decrypt(fromB64(vector.credential.ciphertextBase64Url));
+  assert.equal(new TextDecoder().decode(plaintext), vector.credential.plaintext);
+  assert.equal(toHex(fromB64(vector.credential.ciphertextBase64Url)), vector.credential.ciphertext);
+  const credential = JSON.parse(vector.credential.plaintext);
+  assert.deepEqual(Object.keys(credential), ['deviceId', 'transportProtocol', 'transportPublicKey']);
+
+  const transport = parseDevicePairingTransport(
+    { transportProtocol: vector.transportProtocol, transportPublicKey: vector.transportPublicKey },
+    'https://10.0.0.5:7345',
+  );
+  assert.deepEqual(verifyDevicePairingCredential(credential, { deviceId: 'dev_vector', transport }), {
+    encryptionProtocol: 'ml-kem-768',
+    encryptionPublicKey: vector.transportPublicKey,
+  });
+  assert.equal(transportFingerprint(transport.protocol, transport.publicKey), vector.fingerprint);
+  assert.equal(transportFingerprint(transport.protocol, transport.publicKeyRaw), vector.fingerprint);
+  assert.match(vector.fingerprint, /^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/);
+
+  const mismatch = (error) => error instanceof DevicePairingTransportError && error.reason === 'mismatch';
+  assert.throws(() => verifyDevicePairingCredential(credential, { deviceId: 'dev_other', transport }), mismatch);
+  assert.throws(() => verifyDevicePairingCredential({ ...credential, transportPublicKey: vector.tampered.transportPublicKey }, { deviceId: 'dev_vector', transport }), mismatch);
+  assert.throws(() => verifyDevicePairingCredential({ ...credential, transportProtocol: 'x25519' }, { deviceId: 'dev_vector', transport }), mismatch);
+  assert.throws(() => verifyDevicePairingCredential({ deviceId: 'dev_vector' }, { deviceId: 'dev_vector', transport }), mismatch);
+  assert.throws(() => verifyDevicePairingCredential(null, { deviceId: 'dev_vector', transport }), mismatch);
+  // The tampered transcript cannot open the credential.
+  const tampered = pairingMaterial(vector, vector.tampered.transportProtocol, vector.tampered.transportPublicKey);
+  assert.throws(() => xchacha20poly1305(tampered.wrapKey, fromB64(vector.credential.nonceBase64Url), tampered.transcript)
+    .decrypt(fromB64(vector.credential.ciphertextBase64Url)));
+});
+
+test('pairing v3: create-response transport fields are validated before use', () => {
+  const vector = fixture.pairingV3;
+  const x25519Key = b64(hex(fixture.protocols[0].server.publicKey));
+  const invalid = (error) => error instanceof DevicePairingTransportError && error.reason === 'invalid';
+  const parse = (transportProtocol, transportPublicKey, url = 'http://10.0.0.5:7345') =>
+    parseDevicePairingTransport({ transportProtocol, transportPublicKey }, url);
+
+  const ok = parse('x25519', x25519Key);
+  assert.equal(ok.protocol, 'x25519');
+  assert.equal(ok.publicKey, x25519Key);
+  assert.equal(toHex(ok.publicKeyRaw), fixture.protocols[0].server.publicKey);
+  assert.equal(parse('ml-kem-768', vector.transportPublicKey).publicKeyRaw.length, 1184);
+
+  assert.throws(() => parse(undefined, x25519Key), invalid);
+  assert.throws(() => parse('X25519', x25519Key), invalid);
+  assert.throws(() => parse('x25519', undefined), invalid);
+  assert.throws(() => parse('x25519', x25519Key.slice(0, -2)), invalid, 'short key');
+  assert.throws(() => parse('x25519', `${x25519Key}=`), invalid, 'padding');
+  assert.throws(() => parse('x25519', x25519Key.replace(/^./, '+')), invalid, 'standard alphabet');
+  assert.throws(() => parse('x25519', b64(new Uint8Array(32))), invalid, 'low-order point');
+  assert.throws(() => parse('x25519', b64(Uint8Array.of(1, ...new Uint8Array(31)))), invalid, 'low-order point 1');
+  assert.throws(() => parse('ml-kem-768', x25519Key), invalid, 'wrong length');
+  assert.throws(() => parse('ml-kem-768', b64(new Uint8Array(1184).fill(0xff))), invalid, 'coefficients out of range');
+  assert.throws(() => parse('x25519', vector.transportPublicKey), invalid, 'ml-kem key as x25519');
+
+  const required = (error) => error instanceof DevicePairingTransportError && error.reason === 'encryption_required';
+  assert.throws(() => parse('none', ''), required);
+  assert.throws(() => parse('none', '', 'http://user@127.0.0.1:7345'), required);
+  assert.throws(() => parse('none', '', 'not a url'), required);
+  for (const url of ['http://127.0.0.1:7345', 'http://localhost:7345/', 'ws://[::1]:7345', new URL('https://127.0.0.2')]) {
+    assert.deepEqual(parse('none', '', url), { protocol: 'none', publicKey: '', publicKeyRaw: new Uint8Array() });
+  }
+  assert.throws(() => parse('none', 'AAAA', 'http://127.0.0.1:7345'), invalid);
+  assert.throws(() => transportFingerprint('x25519', 'AA=='), TypeError);
+  assert.throws(() => transportFingerprint('x25519', ''), TypeError);
+});
+
+test('pairing links only carry the server address', () => {
+  assert.equal(parsePairingAddress('{"kind":"todex-pairing-link","version":2,"serverUrl":"http://10.0.0.5:7345"}'), 'http://10.0.0.5:7345');
+  // Version 1 links may still carry protocol fields; they are ignored.
+  assert.equal(parsePairingAddress(JSON.stringify({
+    kind: 'todex-pairing-link',
+    version: 1,
+    serverUrl: ' http://10.0.0.6:7345 ',
+    authToken: 'legacy',
+    preferredEncryption: 'x25519',
+    protocol: { id: 'x25519', publicKey: 'attacker-key' },
+  })), 'http://10.0.0.6:7345');
+  assert.equal(parsePairingAddress(' https://todex.example:7345/ '), 'https://todex.example:7345/');
+  for (const raw of [
+    '{"kind":"todex-pairing-link","version":3,"serverUrl":"http://a"}',
+    '{"kind":"todex-pairing-chunk","version":1,"checksum":"x","index":1,"total":2,"data":"e30"}',
+    '{"kind":"todex-pairing-link","version":2}',
+    '{"kind":"todex-pairing-link","version":2,"serverUrl":""}',
+    '{',
+    '[]',
+    'ftp://host',
+    'hello world',
+    '',
+  ]) {
+    assert.throws(() => parsePairingAddress(raw), Error, raw);
+  }
 });
 
 test('records reject wrong counters, wrong direction and wrong final flags', () => {
@@ -350,10 +495,11 @@ test('inner requests reject nesting and relative paths', () => {
 // ---------------------------------------------------------------------------
 
 const x25519Vector = fixture.protocols[0];
-const pinnedProfile = (serverUrl) => ({
+const pinnedProfile = (serverUrl, transportVerified = true) => ({
   serverUrl,
   encryptionProtocol: 'x25519',
   encryptionPublicKey: b64(hex(x25519Vector.server.publicKey)),
+  transportVerified,
 });
 
 /** In-memory backend that opens `/v2/sealed` per the spec. */
@@ -439,6 +585,42 @@ test('policy: pinned key uses the tunnel (even on loopback); remote without key 
   assert.deepEqual(JSON.parse(new TextDecoder().decode(response.body)), { plain: true, path: '/v2/providers', query: '?a=b' });
 });
 
+test('policy: a pin that device pairing did not verify is refused everywhere, never plaintext', async () => {
+  const repair = (error) => error instanceof TransportRepairRequiredError && error.required === null;
+  const unverified = [
+    pinnedProfile('http://127.0.0.1:7345', false),
+    pinnedProfile('http://10.0.0.5:7345', undefined),
+    { ...pinnedProfile('http://localhost:7345'), transportVerified: 'true' },
+    { serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'x25519', encryptionPublicKey: '' },
+    { serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'none', encryptionPublicKey: 'stale-key' },
+  ];
+  unverified[1].transportVerified = undefined;
+  for (const profile of unverified) {
+    const transport = createSecureTransport({ profile, fetchImpl: async () => { throw new Error('must not be called'); } });
+    assert.equal(transport.mode, 'refused', JSON.stringify(profile));
+    assert.ok(repair(secureTransportRefusal(profile)));
+    await assert.rejects(transport.fetch({ method: 'GET', path: '/v2/providers' }), repair);
+    assert.throws(() => transport.openSocket(), repair);
+    assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'x25519', transportVersion: 2 }), repair);
+    await assert.rejects(verifyTransportPolicy(profile, { fetchImpl: async () => { throw new Error('must not be called'); } }), repair);
+    assert.match(secureTransportRefusal(profile).message, /重新配对/);
+  }
+  // A verified but incomplete pin is unusable, not plaintext.
+  assert.ok(secureTransportRefusal({ serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'x25519', encryptionPublicKey: '', transportVerified: true }) instanceof InvalidPinnedKeyError);
+  // Loopback with no key stays plaintext, verified or not; remote stays refused.
+  assert.equal(secureTransportRefusal({ serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'none', encryptionPublicKey: '' }), null);
+  assert.equal(secureTransportRefusal({ serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'none', encryptionPublicKey: '', transportVerified: true }), null);
+  assert.ok(secureTransportRefusal({ serverUrl: 'http://10.0.0.5:7345', encryptionProtocol: 'none', encryptionPublicKey: '', transportVerified: true }) instanceof EncryptionRequiredError);
+  assert.equal(secureTransportRefusal(pinnedProfile('http://10.0.0.5:7345')), null);
+  // The verification flag is part of the cache key.
+  const device = generateDeviceIdentity();
+  const verified = cachedSecureTransport(pinnedProfile('http://10.0.0.11:7345'), device);
+  const stale = cachedSecureTransport(pinnedProfile('http://10.0.0.11:7345', false), device);
+  assert.notEqual(stale, verified);
+  assert.equal(stale.mode, 'refused');
+  assert.equal(verified.mode, 'v2');
+});
+
 test('REST bodies over the limit are refused before anything is sent', async () => {
   assert.equal(channel.MAX_REST_BODY_BYTES, 32 * 1024 * 1024);
   for (const profile of [pinnedProfile('http://10.0.0.5:7345'), { serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'none', encryptionPublicKey: '' }]) {
@@ -481,7 +663,7 @@ test('verifyTransportPolicy: refuses unpaired remotes offline, reads the policy 
 
   for (const encryptionPublicKey of ['AAAA', '!!', b64(new Uint8Array(32))]) {
     await assert.rejects(
-      verifyTransportPolicy({ serverUrl: 'http://10.0.0.5:7345', encryptionProtocol: 'x25519', encryptionPublicKey }, { fetchImpl: unpaired.fetchImpl }),
+      verifyTransportPolicy({ serverUrl: 'http://10.0.0.5:7345', encryptionProtocol: 'x25519', encryptionPublicKey, transportVerified: true }, { fetchImpl: unpaired.fetchImpl }),
       InvalidPinnedKeyError,
       encryptionPublicKey,
     );
@@ -605,6 +787,12 @@ test('V2ApiClient and the backend probe go through the tunnel when a key is pinn
   // Without a key a remote client never reaches the network.
   const refused = new V2ApiClient({ serverUrl: 'http://10.0.0.5:7345', fetchImpl: async () => { throw new Error('must not be called'); } });
   await assert.rejects(refused.listConversations(), EncryptionRequiredError);
+  const pin = { encryptionProtocol: 'x25519', encryptionPublicKey: pinnedProfile('').encryptionPublicKey };
+  const unverified = new V2ApiClient({ serverUrl: 'http://127.0.0.1:7345', ...pin, fetchImpl: async () => { throw new Error('must not be called'); } });
+  await assert.rejects(unverified.listConversations(), TransportRepairRequiredError);
+  const verified = new V2ApiClient({ serverUrl: 'http://127.0.0.1:7345', ...pin, transportVerified: true, fetchImpl: server.fetchImpl });
+  await verified.listConversations();
+  assert.equal(server.calls.at(-1).url.pathname, '/v2/sealed');
 });
 
 test('REST tunnel surfaces an unsealed 400 as a request failure, never as the inner response', async () => {

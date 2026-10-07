@@ -227,6 +227,8 @@ export function normalizeBackendConnectionProfile(
     encryptionPublicKey: typeof raw.encryptionPublicKey === 'string'
       ? raw.encryptionPublicKey
       : typeof raw.encryption_public_key === 'string' ? raw.encryption_public_key : '',
+    // Profiles from before pairing bound the transport key decode unverified.
+    transportVerified: (raw.transportVerified ?? raw.transport_verified) === true,
     createdAt,
     updatedAt,
   };
@@ -269,6 +271,7 @@ export function profileFromSettings(
     tenantId: settings.tenantId,
     encryptionProtocol: normalizeEncryptionProtocol(settings.encryptionProtocol),
     encryptionPublicKey: settings.encryptionPublicKey,
+    transportVerified: settings.transportVerified === true,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -290,6 +293,7 @@ export function settingsFromProfile(
     tenantId: normalized.tenantId,
     encryptionProtocol: normalized.encryptionProtocol,
     encryptionPublicKey: normalized.encryptionPublicKey,
+    transportVerified: normalized.transportVerified,
   };
 }
 

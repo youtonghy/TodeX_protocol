@@ -9,6 +9,8 @@ export type ConnectionSettings = {
   tenantId: string;
   encryptionProtocol: 'none' | 'x25519' | 'ml-kem-768';
   encryptionPublicKey: string;
+  /** True once device pairing verified the pinned protocol and key; see `SecureTransportProfile`. */
+  transportVerified: boolean;
   defaultWorkspacePath: string;
   defaultModel: string;
   defaultReasoningEffort?: string | null;
@@ -28,6 +30,8 @@ export type BackendConnectionProfile = {
   tenantId: string;
   encryptionProtocol: ConnectionSettings['encryptionProtocol'];
   encryptionPublicKey: string;
+  /** True once device pairing verified the pinned protocol and key; false for older profiles. */
+  transportVerified: boolean;
   createdAt: number;
   updatedAt: number;
 };

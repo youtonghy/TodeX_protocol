@@ -28,18 +28,27 @@ import { decodeBase64UrlBytes, type TransportEncryptionProtocol } from './transp
 
 // The one place business code talks to a backend. It applies the transport
 // v2 "Client rules":
-// - a pinned protocol + key  -> v2 everywhere (REST through POST /v2/sealed,
-//   WebSocket with tv=2), loopback included;
-// - no pinned key, remote    -> refuse (`EncryptionRequiredError`), never a
-//   plaintext fallback;
+// - a pinned protocol + key verified by device pairing (`transportVerified`)
+//   -> v2 everywhere (REST through POST /v2/sealed, WebSocket with tv=2),
+//   loopback included;
+// - a pinned protocol or key that pairing did not verify -> refuse
+//   (`TransportRepairRequiredError`) on every host, loopback included;
+// - no pinned key, remote    -> refuse (`EncryptionRequiredError`);
 // - no pinned key, loopback  -> plaintext.
-// Callers see plain requests, responses and JSON text messages.
+// A refusal never falls back to plaintext. Callers see plain requests,
+// responses and JSON text messages.
 
 export type SecureTransportProfile = {
   serverUrl: string;
   encryptionProtocol: TransportEncryptionProtocol;
   /** Pinned server static public key (base64url); empty when unpaired. */
   encryptionPublicKey: string;
+  /**
+   * True only when device pairing v3 verified the pinned protocol and key
+   * (`verifyDevicePairingCredential`). A pinned profile without it must be
+   * re-paired.
+   */
+  transportVerified?: boolean;
 };
 
 export type SecureTransportMode = 'v2' | 'plaintext' | 'refused';
@@ -138,7 +147,7 @@ export class EncryptionRequiredError extends ConnectionError {
   constructor(serverUrl: string) {
     super(
       ConnectionErrorType.ENCRYPTION_REQUIRED,
-      '远程后端必须使用加密连接，请重新扫码进行加密配对',
+      '远程后端必须使用加密连接，请重新配对',
       `no pinned transport key for non-loopback host ${serverUrl}`,
       false,
       'encryption_required',
@@ -147,13 +156,20 @@ export class EncryptionRequiredError extends ConnectionError {
   }
 }
 
-/** The server now requires a different protocol than the one pinned at pairing. */
+/**
+ * The pinned transport cannot be used until the device pairs again: the
+ * server now requires a different protocol than the one pinned at pairing,
+ * or (`required === null`) the pinned protocol/key was never verified by
+ * device pairing, e.g. a profile from before pairing bound the transport key.
+ */
 export class TransportRepairRequiredError extends ConnectionError {
-  constructor(readonly pinned: string, readonly required: string) {
+  constructor(readonly pinned: string, readonly required: string | null) {
     super(
       ConnectionErrorType.ENCRYPTION_REQUIRED,
-      '后端的加密方式已变更，请重新配对',
-      `pinned ${pinned}, server requires ${required}`,
+      required === null ? '加密公钥未经设备配对验证，请重新配对' : '后端的加密方式已变更，请重新配对',
+      required === null
+        ? `pinned ${pinned} transport was not verified by device pairing`
+        : `pinned ${pinned}, server requires ${required}`,
       false,
       'encryption_required',
     );
@@ -194,14 +210,38 @@ function pinnedProtocol(profile: SecureTransportProfile): SecureTransportProtoco
   return protocol && (profile.encryptionPublicKey ?? '').trim() ? protocol : null;
 }
 
+/** Any trace of a pin: a protocol other than `none`, or a non-empty key. */
+function hasPin(profile: SecureTransportProfile): boolean {
+  return (profile.encryptionProtocol ?? 'none') !== 'none' || Boolean((profile.encryptionPublicKey ?? '').trim());
+}
+
 /** `ws(s)://` server URLs are accepted for the HTTP origin they name. */
 function httpServerUrl(serverUrl: string): string {
   return (serverUrl ?? '').trim().replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://');
 }
 
 export function secureTransportMode(profile: SecureTransportProfile): SecureTransportMode {
-  if (pinnedProtocol(profile)) return 'v2';
-  return isLoopbackUrl(httpServerUrl(profile.serverUrl)) ? 'plaintext' : 'refused';
+  return secureTransportRefusal(profile)
+    ? 'refused'
+    : pinnedProtocol(profile) ? 'v2' : 'plaintext';
+}
+
+/**
+ * Why a profile is `refused`, or null when it may connect:
+ * `TransportRepairRequiredError` for an unverified pin,
+ * `InvalidPinnedKeyError` for a verified but incomplete pin (a protocol
+ * without a key or a key without a protocol), `EncryptionRequiredError` for
+ * an unpinned remote host.
+ */
+export function secureTransportRefusal(profile: SecureTransportProfile): ConnectionError | null {
+  if (hasPin(profile)) {
+    const protocol = pinnedProtocol(profile);
+    if (profile.transportVerified !== true) {
+      return new TransportRepairRequiredError(protocol ?? String(profile.encryptionProtocol ?? 'none'), null);
+    }
+    return protocol ? null : new InvalidPinnedKeyError(String(profile.encryptionProtocol ?? 'none'));
+  }
+  return isLoopbackUrl(httpServerUrl(profile.serverUrl)) ? null : new EncryptionRequiredError(profile.serverUrl);
 }
 
 /**
@@ -214,8 +254,8 @@ export function checkTransportPolicy(
   profile: SecureTransportProfile,
   policy: { requiredProtocol?: unknown; transportVersion?: unknown },
 ): void {
-  const mode = secureTransportMode(profile);
-  if (mode === 'refused') throw new EncryptionRequiredError(profile.serverUrl);
+  const refusal = secureTransportRefusal(profile);
+  if (refusal) throw refusal;
   const pinned = pinnedProtocol(profile);
   if (!pinned) return;
   const required = policy.requiredProtocol === 'none' ? 'none' : parseSecureTransportProtocol(policy.requiredProtocol);
@@ -241,8 +281,8 @@ const POLICY_TIMEOUT_MS = 10_000;
 const POLICY_MAX_BYTES = 2048;
 
 /**
- * Runs the connect-time policy check: refuses an unpaired remote profile
- * without touching the network, then reads `/v2/transport-policy` (direct
+ * Runs the connect-time policy check: refuses an unpaired remote or an
+ * unverified pinned profile without touching the network, then reads `/v2/transport-policy` (direct
  * and unsigned: it is on the plaintext allow-list and carries no secrets)
  * and applies `checkTransportPolicy`. Rejects with `EncryptionRequiredError`,
  * `InvalidPinnedKeyError`, `TransportRepairRequiredError`,
@@ -253,7 +293,8 @@ export async function verifyTransportPolicy(
   profile: SecureTransportProfile,
   options: { fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<void> {
-  if (secureTransportMode(profile) === 'refused') throw new EncryptionRequiredError(profile.serverUrl);
+  const refusal = secureTransportRefusal(profile);
+  if (refusal) throw refusal;
   assertPinnedKeyUsable(profile);
   const { signal } = options;
   const controller = new AbortController();
@@ -364,7 +405,8 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
     return typeof window !== 'undefined' ? fetch.bind(window) : fetch;
   };
   const requireAllowed = (): void => {
-    if (mode === 'refused') throw new EncryptionRequiredError(profile.serverUrl);
+    const refusal = mode === 'refused' ? secureTransportRefusal(profile) : null;
+    if (refusal) throw refusal;
   };
 
   const prepare = (request: SecureRequest) => {
@@ -584,8 +626,8 @@ const TRANSPORT_CACHE_LIMIT = 8;
 const transportCache = new Map<string, SecureTransport>();
 
 /**
- * One `SecureTransport` per backend profile (server URL, pinned protocol and
- * key, device). A changed profile yields a new instance; the previous one for
+ * One `SecureTransport` per backend profile (server URL, pinned protocol,
+ * key and verification flag, device). A changed profile yields a new instance; the previous one for
  * the same server is dropped. Instances hold no per-request state, so sharing
  * them across callers is safe.
  */
@@ -597,11 +639,13 @@ export function cachedSecureTransport(
     serverUrl: httpServerUrl(profile.serverUrl).replace(/\/+$/, ''),
     encryptionProtocol: profile.encryptionProtocol,
     encryptionPublicKey: (profile.encryptionPublicKey ?? '').trim(),
+    transportVerified: profile.transportVerified === true,
   };
   const key = JSON.stringify([
     normalized.serverUrl,
     normalized.encryptionProtocol,
     normalized.encryptionPublicKey,
+    normalized.transportVerified,
     device?.deviceId ?? '',
   ]);
   const cached = transportCache.get(key);

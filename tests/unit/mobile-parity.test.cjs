@@ -43,10 +43,23 @@ test('normalizes backend profiles and legacy field aliases', () => {
     tenantId: 'team',
     encryptionProtocol: 'ml-kem-768',
     encryptionPublicKey: 'pk',
+    transportVerified: false,
     createdAt: 1700000000000,
     updatedAt: 1700000000100,
   });
   assert.equal(parity.normalizeBackendConnectionProfile({ id: 'missing-url' }, { now: 42 }), null);
+  // Only a literal `true` marks the pin as verified by device pairing.
+  for (const [raw, expected] of [[{ transportVerified: true }, true], [{ transport_verified: true }, true], [{ transportVerified: 'true' }, false], [{ transportVerified: 1 }, false]]) {
+    assert.equal(parity.normalizeBackendConnectionProfile({ id: 'v', serverUrl: 'http://10.0.0.5:7345', ...raw }).transportVerified, expected);
+  }
+  const settings = () => ({
+    serverUrl: 'http://10.0.0.5:7345', deviceSecret: 'seed', tenantId: 'local', encryptionProtocol: 'x25519',
+    encryptionPublicKey: 'pk', transportVerified: false, defaultWorkspacePath: '', defaultModel: '', approvalPolicy: '', sandboxMode: '',
+  });
+  const verified = parity.profileFromSettings({ ...settings(), transportVerified: true });
+  assert.equal(verified.transportVerified, true);
+  assert.equal(parity.settingsFromProfile(verified, settings()).transportVerified, true);
+  assert.equal(parity.settingsFromProfile({ ...verified, transportVerified: undefined }, { ...settings(), transportVerified: true }).transportVerified, false);
   assert.equal(
     parity.normalizeBackendConnectionProfile({ id: 'ipv6', serverUrl: 'http://[::1]:7345' }, { now: 42 }).serverUrl,
     'http://127.0.0.1:7345',

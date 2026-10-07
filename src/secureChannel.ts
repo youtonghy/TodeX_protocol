@@ -5,8 +5,9 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 
+import { isLoopbackHostname } from './loopback';
 import { MAX_LEGACY_MESSAGE_BYTES } from './transport';
-import { decodeBase64UrlBytes, encodeBase64Url } from './transportCrypto';
+import { decodeBase64UrlBytes, encodeBase64Url, type TransportEncryptionProtocol } from './transportCrypto';
 
 // Transport v2 reference implementation (spec: transport-v2.md, "TodeX
 // transport v2"). Byte-for-byte shared with the backend (Rust) and TodexCore
@@ -1001,17 +1002,174 @@ export function devicePairingV3Commitment(clientPublic: Uint8Array, clientNonce:
   return sha256(concat(lengthPrefixed(encoder.encode(DEVICE_PAIRING_V3_COMMIT_LABEL)), clientPublic, clientNonce));
 }
 
+/**
+ * The server's transport key as `POST /v2/device-pairing/create` reported
+ * it, validated by `parseDevicePairingTransport`. The transcript binds it, so
+ * the verification code also authenticates the key that gets pinned.
+ */
+export type DevicePairingTransport = {
+  protocol: TransportEncryptionProtocol;
+  /** Canonical base64url without padding, exactly as the server sent it; '' for `none`. */
+  publicKey: string;
+  /** Raw key bytes (32 for x25519, 1184 for ml-kem-768, empty for `none`). */
+  publicKeyRaw: Uint8Array;
+};
+
+/** What a verified approval pins, written atomically with `transportVerified = true`. */
+export type DevicePairingPin = {
+  encryptionProtocol: TransportEncryptionProtocol;
+  encryptionPublicKey: string;
+};
+
+export type DevicePairingTransportFailure =
+  /** Unknown protocol, malformed or unusable key. */
+  | 'invalid'
+  /** `none` offered for a non-loopback server. */
+  | 'encryption_required'
+  /** The approved credential does not match this device or the create response. */
+  | 'mismatch';
+
+/** A pairing whose transport key cannot be trusted; nothing may be pinned. */
+export class DevicePairingTransportError extends Error {
+  readonly code = 'PAIRING_TRANSPORT_REJECTED';
+
+  constructor(readonly reason: DevicePairingTransportFailure, detail: string) {
+    super(`device pairing transport rejected (${reason}): ${detail}`);
+    this.name = 'DevicePairingTransportError';
+  }
+}
+
+function parsePairingTransportProtocol(value: unknown): TransportEncryptionProtocol | null {
+  return value === 'none' ? 'none' : parseSecureTransportProtocol(value);
+}
+
+function requirePairingTransportKey(protocol: TransportEncryptionProtocol, key: Uint8Array): void {
+  const expected = protocol === 'none' ? 0 : protocol === 'x25519' ? X25519_PUBLIC_KEY_LENGTH : ML_KEM_768_PUBLIC_KEY_LENGTH;
+  if (key.length !== expected) throw new TypeError(`pairing ${protocol} transport key must be ${expected} bytes`);
+}
+
+/** Canonical base64url without padding: re-encoding must give back `value`. */
+function decodeCanonicalBase64Url(value: string): Uint8Array {
+  const bytes = decodeStrictBase64Url(value);
+  if (encodeBase64Url(bytes) !== value) throw new TransportCryptoError('non-canonical base64url');
+  return bytes;
+}
+
+function isLoopbackServerUrl(serverUrl: string | URL): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(serverUrl).trim().replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://'));
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password) return false;
+  return isLoopbackHostname(parsed.hostname);
+}
+
+/**
+ * Validates `transportProtocol` / `transportPublicKey` of a create response
+ * before anything is derived from it: a known protocol, a canonical
+ * base64url key of the right length that a handshake accepts (an x25519
+ * low-order point or an ml-kem-768 key that does not parse is refused), and
+ * `none` (with an empty key) only for a loopback `serverUrl`.
+ */
+export function parseDevicePairingTransport(
+  response: { transportProtocol?: unknown; transportPublicKey?: unknown },
+  serverUrl: string | URL,
+): DevicePairingTransport {
+  const protocol = parsePairingTransportProtocol(response.transportProtocol);
+  const publicKey = response.transportPublicKey;
+  if (!protocol || typeof publicKey !== 'string') {
+    throw new DevicePairingTransportError('invalid', 'missing or unknown transport protocol');
+  }
+  if (protocol === 'none') {
+    if (publicKey !== '') throw new DevicePairingTransportError('invalid', 'none carries no key');
+    if (!isLoopbackServerUrl(serverUrl)) {
+      throw new DevicePairingTransportError('encryption_required', 'plaintext transport on a non-loopback host');
+    }
+    return { protocol, publicKey, publicKeyRaw: new Uint8Array() };
+  }
+  let publicKeyRaw: Uint8Array;
+  let shared: Uint8Array | undefined;
+  try {
+    publicKeyRaw = decodeCanonicalBase64Url(publicKey);
+    requirePairingTransportKey(protocol, publicKeyRaw);
+    // A throwaway handshake rejects low-order x25519 points (all-zero shared
+    // secret) and ml-kem-768 keys that are not valid encapsulation keys.
+    shared = clientHandshake(protocol, publicKeyRaw).shared;
+  } catch {
+    throw new DevicePairingTransportError('invalid', `unusable ${protocol} key`);
+  } finally {
+    shared?.fill(0);
+  }
+  return { protocol, publicKey, publicKeyRaw };
+}
+
+/**
+ * Checks the decrypted approval credential `{deviceId, transportProtocol,
+ * transportPublicKey}`: the device id must be this device's and the transport
+ * fields must equal the create response exactly. Returns what to pin; throws
+ * `DevicePairingTransportError('mismatch')` otherwise (pin nothing then).
+ * Fields other than these three are ignored.
+ */
+export function verifyDevicePairingCredential(
+  credential: unknown,
+  expected: { deviceId: string; transport: DevicePairingTransport },
+): DevicePairingPin {
+  const value = credential && typeof credential === 'object' && !Array.isArray(credential)
+    ? credential as Record<string, unknown>
+    : null;
+  if (!value || typeof value.deviceId !== 'string' || value.deviceId !== expected.deviceId) {
+    throw new DevicePairingTransportError('mismatch', 'device id');
+  }
+  if (value.transportProtocol !== expected.transport.protocol
+    || value.transportPublicKey !== expected.transport.publicKey) {
+    throw new DevicePairingTransportError('mismatch', 'transport key');
+  }
+  return { encryptionProtocol: expected.transport.protocol, encryptionPublicKey: expected.transport.publicKey };
+}
+
+/**
+ * `upper-hex(SHA256(raw key))[0..16]` as `XXXX-XXXX-XXXX-XXXX`, shown next to
+ * the verification code and in settings; `'none'` for the plaintext
+ * transport. Throws `TypeError` for a key that is not canonical base64url.
+ */
+export function transportFingerprint(protocol: TransportEncryptionProtocol, publicKey: string | Uint8Array): string {
+  if (protocol === 'none') return 'none';
+  let raw: Uint8Array;
+  try {
+    raw = typeof publicKey === 'string' ? decodeCanonicalBase64Url(publicKey.trim()) : publicKey;
+  } catch {
+    throw new TypeError('transport key is not canonical base64url');
+  }
+  if (!raw.length) throw new TypeError('transport key is empty');
+  const short = Array.from(sha256(raw).subarray(0, 8), (byte) => byte.toString(16).toUpperCase().padStart(2, '0')).join('');
+  return short.match(/.{4}/g)!.join('-');
+}
+
+/**
+ * `domain || request_id || 0 || client_public || server_public || 0 ||
+ * device_public || client_nonce || LP(transport_protocol) ||
+ * LP(transport_public_key)`; for `none` the key is empty (`LP("")`).
+ */
 export function devicePairingV3Transcript(input: {
   requestId: string;
   clientPublic: Uint8Array;
   serverPublic: Uint8Array;
   devicePublic: Uint8Array;
   clientNonce: Uint8Array;
+  transportProtocol: TransportEncryptionProtocol;
+  transportPublicKey: Uint8Array;
 }): Uint8Array {
   requirePairingLengths(input.clientPublic, input.clientNonce);
   if (input.serverPublic.length !== 32 || input.devicePublic.length !== 32) {
     throw new TypeError('pairing keys must be 32 bytes');
   }
+  if (!parsePairingTransportProtocol(input.transportProtocol)) {
+    throw new TypeError('pairing transport protocol is unknown');
+  }
+  requirePairingTransportKey(input.transportProtocol, input.transportPublicKey);
   return concat(
     encoder.encode(DEVICE_PAIRING_V3_TRANSCRIPT_DOMAIN),
     encoder.encode(input.requestId),
@@ -1021,6 +1179,8 @@ export function devicePairingV3Transcript(input: {
     Uint8Array.of(0),
     input.devicePublic,
     input.clientNonce,
+    lengthPrefixed(encoder.encode(input.transportProtocol)),
+    lengthPrefixed(input.transportPublicKey),
   );
 }
 
@@ -1038,7 +1198,9 @@ export type DevicePairingV3Material = {
  * Client view of the v3 pairing material: X25519 between the client's
  * ephemeral secret and the server's per-request public key, then
  * HKDF-SHA256(salt = SHA256(transcript)) with the three v3 labels (the v2
- * pattern from the backend's `device_pairing.rs`).
+ * pattern from the backend's `device_pairing.rs`). The transcript binds the
+ * server's transport key, so validate it with `parseDevicePairingTransport`
+ * first.
  */
 export function deriveDevicePairingV3Material(input: {
   requestId: string;
@@ -1046,6 +1208,9 @@ export function deriveDevicePairingV3Material(input: {
   serverPublic: Uint8Array;
   devicePublic: Uint8Array;
   clientNonce: Uint8Array;
+  /** Raw key from a validated `DevicePairingTransport` (empty for `none`). */
+  transportProtocol: TransportEncryptionProtocol;
+  transportPublicKey: Uint8Array;
 }): DevicePairingV3Material {
   const clientPublic = x25519.getPublicKey(input.clientSecretKey);
   let shared: Uint8Array;

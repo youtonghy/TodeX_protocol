@@ -710,6 +710,8 @@ export type V2ApiOptions = {
   transport?: SecureTransport;
   encryptionProtocol?: TransportEncryptionProtocol;
   encryptionPublicKey?: string;
+  /** Whether device pairing verified the pinned key; an unverified pin is refused. */
+  transportVerified?: boolean;
   /** Only used when no `transport` is given. */
   fetchImpl?: typeof fetch;
   timeout?: number;
@@ -862,6 +864,7 @@ export class V2ApiClient {
         serverUrl: options.serverUrl,
         encryptionProtocol: options.encryptionProtocol ?? 'none',
         encryptionPublicKey: options.encryptionPublicKey ?? '',
+        transportVerified: options.transportVerified === true,
       },
       fetchImpl: options.fetchImpl,
       signer: device ? deviceRequestSigner(device) : null,

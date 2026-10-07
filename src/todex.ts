@@ -983,7 +983,12 @@ export type KanbanTask = {
   description?: string;
   dueDate?: string;
   status: KanbanTaskStatus;
+  /** Attached conversations in display order. `conversationId` mirrors the
+   * first entry so older clients reading only that field keep working. */
   conversationId?: string;
+  conversationIds?: string[];
+  /** Manual order within the workspace status group; absent on legacy rows. */
+  sortOrder?: number;
   createdAt: number;
   updatedAt: number;
   /** Tombstone timestamp; deletions sync through it instead of disappearing. */
@@ -1014,7 +1019,16 @@ export function normalizeKanbanTask(value: unknown): KanbanTask | null {
   const deletedAt = numberField(value, ['deletedAt', 'deleted_at']);
   const description = stringField(value, ['description']).trim();
   const dueDate = stringField(value, ['dueDate', 'due_date']).trim();
+  const rawIds = (value as Record<string, unknown>).conversationIds ?? (value as Record<string, unknown>).conversation_ids;
+  const conversationIds = Array.isArray(rawIds)
+    ? [...new Set(rawIds.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean))]
+    : [];
   const conversationId = stringField(value, ['conversationId', 'conversation_id']).trim();
+  if (conversationId && !conversationIds.includes(conversationId)) {
+    conversationIds.push(conversationId);
+  }
+  const rawOrder = (value as Record<string, unknown>).sortOrder ?? (value as Record<string, unknown>).sort_order;
+  const sortOrder = typeof rawOrder === 'number' && Number.isFinite(rawOrder) ? rawOrder : undefined;
   return {
     id,
     workspaceId,
@@ -1023,7 +1037,8 @@ export function normalizeKanbanTask(value: unknown): KanbanTask | null {
     ...(description ? { description } : {}),
     ...(dueDate && KANBAN_DUE_DATE_PATTERN.test(dueDate) ? { dueDate } : {}),
     status: normalizeKanbanTaskStatus(stringField(value, ['status'])),
-    ...(conversationId ? { conversationId } : {}),
+    ...(conversationIds.length ? { conversationId: conversationIds[0], conversationIds } : {}),
+    ...(sortOrder !== undefined ? { sortOrder } : {}),
     createdAt,
     updatedAt,
     ...(deletedAt ? { deletedAt } : {}),

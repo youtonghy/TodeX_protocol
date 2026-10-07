@@ -247,26 +247,3 @@ export function isConflictError(error: unknown): boolean {
   return error instanceof ConnectionError
     && (error.httpStatus === 409 || error.backendCode === 'CONFLICT' || error.backendCode === '409');
 }
-
-export function connectionFailureLabel(code?: ConnectionFailureCode | ''): string {
-  switch (code) {
-    case 'backend_unreachable':
-      return 'Backend 未启动或端口错误';
-    case 'invalid_server_url':
-      return 'Backend 地址无效';
-    case 'authentication_failed':
-      return 'Token 缺失或无效';
-    case 'protocol_mismatch':
-      return '协议已废弃（/v1）';
-    case 'websocket_failed':
-      return 'WebSocket 握手失败';
-    case 'provider_unavailable':
-      return 'Agent 不可用';
-    case 'encryption_required':
-      return '需要加密配对';
-    case 'request_failed':
-      return '请求失败';
-    default:
-      return '';
-  }
-}

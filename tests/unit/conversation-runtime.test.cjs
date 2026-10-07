@@ -310,42 +310,6 @@ test('automatic compaction completion never ends the parent turn', () => {
   assert.equal(update.state.compaction.status, 'completed');
 });
 
-test('socket reconnect cannot acknowledge failed projection or later queued events', async () => {
-  const { V2ConversationSocket } = require(path.join(__dirname, '../../dist/unit/lib/v2.js'));
-  const sockets = [];
-  class FakeSocket {
-    static OPEN = 1;
-    readyState = 1;
-    sent = [];
-    constructor() { sockets.push(this); }
-    send(value) { this.sent.push(JSON.parse(value)); }
-    close() {}
-  }
-  const errors = [];
-  let fail = true;
-  const applied = [];
-  const client = new V2ConversationSocket({ serverUrl: 'http://127.0.0.1:7345', WebSocketImpl: FakeSocket,
-    onEvent: async (event) => { if (fail) throw new Error('projection failed'); applied.push(event.sequence); },
-    onError: (error) => errors.push(error.message),
-  });
-  const deliver = (socket, sequence) => socket.onmessage({ data: JSON.stringify({ type: 'conversation.event', payload: event(sequence, 'turn.started', { turnId: 't' }) }) });
-  try {
-    client.connect(); sockets[0].onopen(); client.subscribe('c', 0);
-    deliver(sockets[0], 1); deliver(sockets[0], 2);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(errors, ['projection failed']);
-    client.connect(); sockets[1].onopen();
-    assert.equal(sockets[1].sent[0].payload.afterSequence, 0);
-    fail = false;
-    deliver(sockets[1], 1); deliver(sockets[1], 2);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(applied, [1, 2]);
-    client.connect(); sockets[2].onopen();
-    assert.equal(sockets[2].sent[0].payload.afterSequence, 2);
-  } finally { client.close(); }
-});
-
-
 test('flat Claude turn usage includes separate cache input and replaces snapshots', () => {
   const update = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'usage.updated', { provider: 'claude-code', scope: 'turn', turnId: 't',

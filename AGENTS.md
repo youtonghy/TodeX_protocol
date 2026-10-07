@@ -1,7 +1,7 @@
 # Agent Instructions
 
 - `src/` is the shared `@todex/protocol` layer compiled directly by `TodeX_desktop` and `TodeX_web` through sibling-directory path aliases (`../TodeX_protocol/src`). There is no build artifact.
-- Keep `src/` platform-agnostic: no `react-native`, `expo-*`, DOM, or Electron imports. `@react-native-community/netinfo` may only appear behind the guarded dynamic import in `v2.ts` (declared in `src/netinfo.d.ts`, stubbed by consumers).
+- Keep `src/` platform-agnostic: no `react-native`, `expo-*`, DOM, or Electron imports. `@react-native-community/netinfo` may only appear behind a guarded dynamic import (declared in `src/netinfo.d.ts`, stubbed by consumers); no source uses it today.
 - `@noble/*` imports must use the same subpath style (`@noble/curves/ed25519.js`, etc.) already used in the sources; versions are supplied by the consumers.
 
 ## Git delivery

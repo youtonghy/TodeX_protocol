@@ -92,9 +92,12 @@ export type AgentBrowserProfiles = {
 
 /**
  * `{ type: 'agentBrowser.frame', payload }` after `agentBrowser.watch
- * { conversationId }` on `/v2/ws` (until `agentBrowser.unwatch`). Only the
- * latest frame is kept when the connection is slow; `closed` means the
- * conversation has no tab.
+ * { conversationId }` on `/v2/ws` (until `agentBrowser.unwatch`). The
+ * backend keeps one latest-frame slot per watch: a newer frame replaces an
+ * unsent one, so a slow connection skips frames instead of queueing them.
+ * Ordinary socket messages go first, but at least one frame is sent per 16
+ * of them so the view never starves. `closed` means the conversation has no
+ * tab; it is always delivered, never dropped or replaced.
  */
 export type AgentBrowserFrame =
   | { conversationId: string; seq: number; mimeType: 'image/jpeg'; data: string; width: number; height: number; closed?: never }

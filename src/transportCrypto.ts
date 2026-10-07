@@ -1,10 +1,10 @@
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
-import { x25519 } from '@noble/curves/ed25519.js';
-import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 
 import type { ConnectionSettings } from './todex';
+
+// Pairing QR parsing and the pinned transport key. The transport itself
+// (WebSocket frames and the REST tunnel) is transport v2 in
+// `secureChannel.ts` / `secureTransport.ts`; `todex.crypto.v1` is gone.
 
 export type TransportEncryptionProtocol = 'none' | 'x25519' | 'ml-kem-768';
 
@@ -68,16 +68,6 @@ export type PairingQrFrame =
       kind: 'chunk';
       chunk: PairingQrChunk;
     };
-
-export type TransportCryptoSession = {
-  protocol: Exclude<TransportEncryptionProtocol, 'none'>;
-  queryString: string;
-  encryptClientText: (plaintext: string) => string;
-  decryptServerText: (frame: string) => string;
-};
-
-const AAD = utf8('todex-ws-transport-crypto-v1');
-const MAX_U64 = (1n << 64n) - 1n;
 
 export async function resolvePairingPayload(raw: string): Promise<ParsedPairing> {
   const parsed = JSON.parse(raw) as Partial<PairingLinkPayload>;
@@ -204,134 +194,6 @@ export function applyPairingToSettings(
     encryptionProtocol: pairing.encryptionProtocol,
     encryptionPublicKey: pairing.encryptionPublicKey,
   };
-}
-
-export function createTransportCryptoSession(
-  settings: Pick<ConnectionSettings, 'encryptionProtocol' | 'encryptionPublicKey'> & Partial<ConnectionSettings>,
-): TransportCryptoSession | null {
-  if (settings.encryptionProtocol === 'none') {
-    return null;
-  }
-  const protocol = settings.encryptionProtocol;
-  const serverPublicKey = decodeBase64Url(settings.encryptionPublicKey.trim());
-  if (serverPublicKey.length === 0) {
-    throw new Error('当前连接未配置加密公钥，请扫描后端配对二维码。');
-  }
-
-  const handshake =
-    protocol === 'x25519'
-      ? createX25519Handshake(serverPublicKey)
-      : createMlKem768Handshake(serverPublicKey);
-  const key = hkdf(sha256, handshake.sharedSecret, handshake.salt, utf8(protocol), 32);
-  let sendCounter = 0;
-  // Mirrors the backend's `decrypt_text`: frames must arrive with exactly
-  // the next counter, and every nonce byte outside the direction and the
-  // little-endian counter must be zero.
-  let receiveCounter = 0n;
-
-  return {
-    protocol,
-    queryString: handshake.queryString,
-    encryptClientText: (plaintext: string) => {
-      const nonce = nonceFor(2, sendCounter++);
-      const ciphertext = xchacha20poly1305(key, nonce, AAD).encrypt(utf8(plaintext));
-      return JSON.stringify({
-        type: 'todex.crypto.v1',
-        protocol,
-        nonce: encodeBase64Url(nonce),
-        ciphertext: encodeBase64Url(ciphertext),
-      });
-    },
-    decryptServerText: (frame: string) => {
-      const wrapped = JSON.parse(frame) as {
-        type?: string;
-        protocol?: string;
-        nonce?: string;
-        ciphertext?: string;
-      };
-      if (wrapped.type !== 'todex.crypto.v1' || wrapped.protocol !== protocol) {
-        throw new Error('收到的加密帧格式不正确');
-      }
-      if (!wrapped.nonce || !wrapped.ciphertext) {
-        throw new Error('收到的加密帧缺少 nonce 或 ciphertext');
-      }
-      const nonce = decodeBase64UrlBytes(wrapped.nonce);
-      if (nonce.length !== 24 || nonce[0] !== 1) {
-        throw new Error('收到的加密帧方向不正确');
-      }
-      if (nonce.subarray(1, 8).some((byte) => byte !== 0) || nonce.subarray(16).some((byte) => byte !== 0)) {
-        throw new Error('收到的加密帧 nonce 格式不正确');
-      }
-      if (receiveCounter === MAX_U64) {
-        throw new Error('加密帧计数器已耗尽');
-      }
-      const counter = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getBigUint64(8, true);
-      if (counter !== receiveCounter) {
-        throw new Error('收到的加密帧计数器不连续');
-      }
-      const plaintext = xchacha20poly1305(key, nonce, AAD).decrypt(
-        decodeBase64UrlBytes(wrapped.ciphertext),
-      );
-      // Advance only after the frame authenticated.
-      receiveCounter += 1n;
-      return new TextDecoder().decode(plaintext);
-    },
-  };
-}
-
-function createX25519Handshake(serverPublicKey: Uint8Array): {
-  queryString: string;
-  sharedSecret: Uint8Array;
-  salt: Uint8Array;
-} {
-  if (serverPublicKey.length !== 32) {
-    throw new Error('X25519 服务端公钥长度不正确');
-  }
-  const keyPair = x25519.keygen();
-  const sharedSecret = x25519.getSharedSecret(keyPair.secretKey, serverPublicKey);
-  const salt = concatBytes(serverPublicKey, keyPair.publicKey);
-  const queryString = new URLSearchParams({
-    enc: 'x25519',
-    client_key: encodeBase64Url(keyPair.publicKey),
-  }).toString();
-  return { queryString, sharedSecret, salt };
-}
-
-function createMlKem768Handshake(serverPublicKey: Uint8Array): {
-  queryString: string;
-  sharedSecret: Uint8Array;
-  salt: Uint8Array;
-} {
-  const { cipherText, sharedSecret } = ml_kem768.encapsulate(serverPublicKey);
-  const salt = concatBytes(serverPublicKey, cipherText);
-  const queryString = new URLSearchParams({
-    enc: 'ml-kem-768',
-    ciphertext: encodeBase64Url(cipherText),
-  }).toString();
-  return { queryString, sharedSecret, salt };
-}
-
-function nonceFor(direction: number, counter: number): Uint8Array {
-  const nonce = new Uint8Array(24);
-  nonce[0] = direction;
-  const view = new DataView(nonce.buffer);
-  view.setBigUint64(8, BigInt(counter), true);
-  return nonce;
-}
-
-function utf8(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
-}
-
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  const length = arrays.reduce((sum, value) => sum + value.length, 0);
-  const output = new Uint8Array(length);
-  let offset = 0;
-  for (const value of arrays) {
-    output.set(value, offset);
-    offset += value.length;
-  }
-  return output;
 }
 
 export function encodeBase64Url(bytes: Uint8Array): string {

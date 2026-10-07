@@ -1,6 +1,6 @@
-import { buildHttpUrl, normalizeServerUrl } from './todex';
+import { normalizeServerUrl } from './todex';
 import { ConnectionError, type ConnectionFailureCode } from './connectionError';
-import { deviceAuthHeaders, type DeviceIdentity } from './deviceAuth';
+import type { SecureResponse, SecureTransport } from './secureTransport';
 import type { ProviderDescriptor } from './v2';
 
 export type ServerVersionInfo = {
@@ -65,19 +65,20 @@ export function credentialMatchesOrigin(credentialOrigin: string, serverUrl: str
   return tokenMatchesOrigin(credentialOrigin, serverUrl);
 }
 
-async function fetchText(
-  fetchImpl: typeof fetch,
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> {
+async function probeGet(transport: SecureTransport, path: string, timeoutMs: number): Promise<SecureResponse> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(url, { ...init, signal: controller.signal, cache: 'no-store' });
+    return await transport.fetch({
+      method: 'GET',
+      path,
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    });
   } catch (error) {
+    if (error instanceof ConnectionError) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
-      throw ConnectionError.timeout(`Request timeout after ${timeoutMs}ms for ${url}`);
+      throw ConnectionError.timeout(`Request timeout after ${timeoutMs}ms for ${path}`);
     }
     throw ConnectionError.unreachable(error instanceof Error ? error.message : String(error));
   } finally {
@@ -85,24 +86,30 @@ async function fetchText(
   }
 }
 
-function classifyHttp(response: Response, endpoint: string): ConnectionError {
-  if (response.status === 401 || response.status === 403) {
-    return ConnectionError.authenticationFailed(response.status);
+function classifyHttp(status: number, endpoint: string): ConnectionError {
+  if (status === 401 || status === 403) {
+    return ConnectionError.authenticationFailed(status);
   }
-  if (response.status === 404 && endpoint.includes('/v2/')) {
-    return ConnectionError.protocolMismatch(`${endpoint} returned ${response.status}`);
+  if (status === 404 && endpoint.includes('/v2/')) {
+    return ConnectionError.protocolMismatch(`${endpoint} returned ${status}`);
   }
-  if (response.status >= 500) {
-    return ConnectionError.serverError(response.status);
+  if (status >= 500) {
+    return ConnectionError.serverError(status);
   }
-  return ConnectionError.protocolError(response.status);
+  return ConnectionError.protocolError(status);
 }
 
+const isOk = (response: SecureResponse) => response.status >= 200 && response.status < 300;
+const json = (response: SecureResponse) => JSON.parse(new TextDecoder().decode(response.body)) as unknown;
+
+/**
+ * Reads `/v2/version`, `/health` and `/v2/providers` through `transport`
+ * (the profile's `SecureTransport`: signed, and tunnelled when a key is
+ * pinned), so a probe never bypasses the transport rules.
+ */
 export async function probeBackendConnection(options: {
   serverUrl: string;
-  authToken?: string;
-  device?: DeviceIdentity | null;
-  fetchImpl?: typeof fetch;
+  transport: SecureTransport;
   timeoutMs?: number;
 }): Promise<BackendProbeResult> {
   const inspected = inspectServerUrl(options.serverUrl);
@@ -119,36 +126,16 @@ export async function probeBackendConnection(options: {
     return empty;
   }
 
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const { transport } = options;
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
-  const headers = new Headers({ Accept: 'application/json' });
-  if (options.authToken) {
-    headers.set('Authorization', `Bearer ${options.authToken}`);
-  }
-  // Device credentials sign each request: the signature binds the path.
-  const device = options.device ?? null;
-  const headersFor = (path: string): Headers => {
-    const signed = new Headers(headers);
-    if (device) {
-      for (const [name, value] of Object.entries(deviceAuthHeaders(device, 'GET', path))) {
-        signed.set(name, value);
-      }
-    }
-    return signed;
-  };
 
   try {
-    const versionResponse = await fetchText(
-      fetchImpl,
-      buildHttpUrl(origin, '/v2/version'),
-      { headers: headersFor('/v2/version') },
-      timeoutMs,
-    );
-    if (!versionResponse.ok) {
-      const error = classifyHttp(versionResponse, '/v2/version');
+    const versionResponse = await probeGet(transport, '/v2/version', timeoutMs);
+    if (!isOk(versionResponse)) {
+      const error = classifyHttp(versionResponse.status, '/v2/version');
       return { ...empty, error, code: error.code };
     }
-    const versionJson = await versionResponse.json() as Record<string, unknown>;
+    const versionJson = json(versionResponse) as Record<string, unknown>;
     const version: ServerVersionInfo = {
       name: typeof versionJson.name === 'string' ? versionJson.name : '',
       version: typeof versionJson.version === 'string' ? versionJson.version : '',
@@ -161,28 +148,18 @@ export async function probeBackendConnection(options: {
       return { ...empty, version, error, code: error.code };
     }
 
-    const healthResponse = await fetchText(
-      fetchImpl,
-      buildHttpUrl(origin, '/health'),
-      { headers: headersFor('/health') },
-      timeoutMs,
-    );
-    if (!healthResponse.ok) {
-      const error = classifyHttp(healthResponse, '/health');
+    const healthResponse = await probeGet(transport, '/health', timeoutMs);
+    if (!isOk(healthResponse)) {
+      const error = classifyHttp(healthResponse.status, '/health');
       return { ...empty, version, error, code: error.code };
     }
 
-    const providersResponse = await fetchText(
-      fetchImpl,
-      buildHttpUrl(origin, '/v2/providers'),
-      { headers: headersFor('/v2/providers') },
-      timeoutMs,
-    );
-    if (!providersResponse.ok) {
-      const error = classifyHttp(providersResponse, '/v2/providers');
+    const providersResponse = await probeGet(transport, '/v2/providers', timeoutMs);
+    if (!isOk(providersResponse)) {
+      const error = classifyHttp(providersResponse.status, '/v2/providers');
       return { ...empty, version, error, code: error.code };
     }
-    const providersJson = await providersResponse.json() as { providers?: ProviderDescriptor[] };
+    const providersJson = json(providersResponse) as { providers?: ProviderDescriptor[] };
     const providers = Array.isArray(providersJson.providers) ? providersJson.providers : [];
 
     return {

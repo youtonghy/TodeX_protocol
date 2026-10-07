@@ -14,7 +14,10 @@ function recordingClient(responses = []) {
       url: new URL(url),
       method: init.method ?? 'GET',
       headers: new Headers(init.headers),
-      body: init.body instanceof Uint8Array ? init.body : init.body ? JSON.parse(init.body) : undefined,
+      // The transport sends every body as bytes; JSON ones are decoded here.
+      body: !init.body?.length ? undefined
+        : new Headers(init.headers).get('content-type') === 'application/json'
+          ? JSON.parse(new TextDecoder().decode(init.body)) : init.body,
     });
     const next = responses.shift() ?? { status: 200, body: {} };
     return new Response(JSON.stringify(next.body), { status: next.status, headers: { 'Content-Type': 'application/json' } });

@@ -1,17 +1,5 @@
-import type { TransportCryptoSession } from './transportCrypto';
-
-/** The part of a WebSocket (browser or Node) the verifier uses. */
-export interface VerifiableSocket {
-  send(data: string): void;
-  // `any`: browser and Node WebSocket listener signatures differ.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  addEventListener(type: 'message' | 'close' | 'error', listener: (event: any) => void): void;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  removeEventListener(type: 'message' | 'close' | 'error', listener: (event: any) => void): void;
-}
-
 /** `retryable`: the socket dropped mid-handshake. Otherwise the reply was
- * wrong or undecryptable, i.e. the imported server key does not match. */
+ * wrong, i.e. the server answered but not as a TodeX backend would. */
 export class SocketVerificationError extends Error {
   readonly retryable: boolean;
 
@@ -22,54 +10,84 @@ export class SocketVerificationError extends Error {
   }
 }
 
+export type SocketVerification = {
+  /** Settles once the pong arrived, the socket failed, the timeout fired or `signal` aborted. */
+  readonly done: Promise<void>;
+  readonly settled: boolean;
+  /**
+   * Feed every opened (plaintext) message received before `done` settles.
+   * Messages other than the pong are ignored; the caller drops them.
+   */
+  handleMessage: (text: string) => void;
+  /** The socket closed or errored before the pong. */
+  fail: () => void;
+};
+
 /**
- * Consume an encrypted `server.ping` reply before the normal message
- * dispatcher starts. This verifies actual possession of the imported server
- * key, rather than treating the WebSocket upgrade as a successful encrypted
- * session. Rejects with an `AbortError` when `signal` aborts.
+ * Round-trips a `server.ping` right after a transport v2 socket opened,
+ * before the normal message dispatcher starts. The ping is the first sealed
+ * frame, so the pong proves the server opened it with the pinned key (a
+ * wrong key closes the socket with `4400` instead). `send` is the secure
+ * socket's sender; incoming messages are fed through `handleMessage`.
+ * `done` rejects with `SocketVerificationError` or an `AbortError`.
  */
-export function verifyEncryptedSocket(
-  socket: VerifiableSocket,
-  session: TransportCryptoSession,
+export function startSocketVerification(
+  send: (text: string) => void,
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
-): Promise<void> {
+): SocketVerification {
   const { signal, timeoutMs = 10_000 } = options;
-  return new Promise((resolve, reject) => {
-    const id = `transport-verification-${globalThis.crypto.randomUUID()}`;
-    let finished = false;
-    const cleanup = () => {
-      clearTimeout(timer);
-      socket.removeEventListener('message', onMessage);
-      socket.removeEventListener('close', onTransportFailure);
-      socket.removeEventListener('error', onTransportFailure);
-      signal?.removeEventListener('abort', onAbort);
-    };
-    const finish = (error?: Error) => {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      if (error) reject(error); else resolve();
-    };
-    const onTransportFailure = () => finish(new SocketVerificationError(true));
-    const onProtocolFailure = () => finish(new SocketVerificationError(false));
-    const onAbort = () => finish(new DOMException('Aborted', 'AbortError'));
-    const onMessage = (event: { data: unknown }) => {
-      try {
-        const value = JSON.parse(session.decryptServerText(String(event.data))) as Record<string, unknown>;
-        if (value.id !== id) return;
-        const payload = value.payload as { pong?: unknown } | undefined;
-        if (value.type !== 'server.result' || payload?.pong !== true) { onProtocolFailure(); return; }
-        finish();
-      } catch { onProtocolFailure(); }
-    };
-    const timer = setTimeout(onTransportFailure, timeoutMs);
-    socket.addEventListener('message', onMessage);
-    socket.addEventListener('close', onTransportFailure);
-    socket.addEventListener('error', onTransportFailure);
-    signal?.addEventListener('abort', onAbort, { once: true });
-    if (signal?.aborted) { onAbort(); return; }
-    try {
-      socket.send(session.encryptClientText(JSON.stringify({ id, type: 'server.ping', payload: {} })));
-    } catch { onTransportFailure(); }
+  const id = `transport-verification-${globalThis.crypto.randomUUID()}`;
+  let settled = false;
+  let resolveDone!: () => void;
+  let rejectDone!: (error: Error) => void;
+  const done = new Promise<void>((resolve, reject) => {
+    resolveDone = resolve;
+    rejectDone = reject;
   });
+  const finish = (error?: Error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+    if (error) rejectDone(error); else resolveDone();
+  };
+  const onAbort = () => finish(new DOMException('Aborted', 'AbortError'));
+  const timer = setTimeout(() => finish(new SocketVerificationError(true)), timeoutMs);
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  const verification: SocketVerification = {
+    done,
+    get settled() {
+      return settled;
+    },
+    handleMessage: (text: string) => {
+      if (settled) return;
+      let value: Record<string, unknown>;
+      try {
+        value = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        finish(new SocketVerificationError(false));
+        return;
+      }
+      if (value?.id !== id) return;
+      const payload = value.payload as { pong?: unknown } | undefined;
+      if (value.type !== 'server.result' || payload?.pong !== true) {
+        finish(new SocketVerificationError(false));
+        return;
+      }
+      finish();
+    },
+    fail: () => finish(new SocketVerificationError(true)),
+  };
+
+  if (signal?.aborted) {
+    onAbort();
+    return verification;
+  }
+  try {
+    send(JSON.stringify({ id, type: 'server.ping', payload: {} }));
+  } catch {
+    finish(new SocketVerificationError(true));
+  }
+  return verification;
 }

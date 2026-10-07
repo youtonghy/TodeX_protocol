@@ -32,12 +32,16 @@ const {
 } = channel;
 const {
   EncryptionRequiredError,
+  InvalidPinnedKeyError,
+  TransportPolicyError,
   TransportRepairRequiredError,
+  cachedSecureTransport,
   checkTransportPolicy,
   createSecureTransport,
   deviceRequestSigner,
+  toFetchResponse,
+  verifyTransportPolicy,
 } = require(path.join(compiledDir, 'secureTransport.js'));
-const { createTransportCryptoSession } = require(path.join(compiledDir, 'transportCrypto.js'));
 const { generateDeviceIdentity } = require(path.join(compiledDir, 'deviceAuth.js'));
 
 const fixture = JSON.parse(
@@ -341,29 +345,6 @@ test('inner requests reject nesting and relative paths', () => {
   }
 });
 
-test('v1 transport session enforces strict counters and zero nonce padding', () => {
-  const serverSecret = new Uint8Array(32).fill(5);
-  const serverPublic = x25519.getPublicKey(serverSecret);
-  const session = createTransportCryptoSession({ encryptionProtocol: 'x25519', encryptionPublicKey: b64(serverPublic) });
-  const clientPublic = fromB64(new URLSearchParams(session.queryString).get('client_key'));
-  const salt = new Uint8Array([...serverPublic, ...clientPublic]);
-  const key = hkdf(sha256, x25519.getSharedSecret(serverSecret, clientPublic), salt, utf8('x25519'), 32);
-  const frame = (counter, mutate) => {
-    const nonce = new Uint8Array(24);
-    nonce[0] = 1;
-    new DataView(nonce.buffer).setBigUint64(8, BigInt(counter), true);
-    mutate?.(nonce);
-    const ciphertext = xchacha20poly1305(key, nonce, utf8('todex-ws-transport-crypto-v1')).encrypt(utf8(`m${counter}`));
-    return JSON.stringify({ type: 'todex.crypto.v1', protocol: 'x25519', nonce: b64(nonce), ciphertext: b64(ciphertext) });
-  };
-  assert.throws(() => session.decryptServerText(frame(1)), /计数器/);
-  assert.throws(() => session.decryptServerText(frame(0, (nonce) => { nonce[3] = 1; })), /nonce/);
-  assert.throws(() => session.decryptServerText(frame(0, (nonce) => { nonce[20] = 1; })), /nonce/);
-  assert.equal(session.decryptServerText(frame(0)), 'm0');
-  assert.throws(() => session.decryptServerText(frame(0)), /计数器/, 'replay');
-  assert.equal(session.decryptServerText(frame(1)), 'm1');
-});
-
 // ---------------------------------------------------------------------------
 // SecureTransport
 // ---------------------------------------------------------------------------
@@ -458,9 +439,79 @@ test('policy: pinned key uses the tunnel (even on loopback); remote without key 
 
 test('policy check: a different required protocol asks for re-pairing; a plaintext answer never downgrades', () => {
   const profile = pinnedProfile('http://10.0.0.5:7345');
-  assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'ml-kem-768' }), TransportRepairRequiredError);
+  assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'ml-kem-768', transportVersion: 2 }), TransportRepairRequiredError);
   checkTransportPolicy(profile, { requiredProtocol: 'x25519', transportVersion: 2 });
-  checkTransportPolicy(profile, { requiredProtocol: 'none' });
+  // `none` has no static key to run v2 against: re-pair, never plaintext.
+  assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'none', transportVersion: 2 }), TransportRepairRequiredError);
+  // A backend without transport v2 cannot serve a pinned profile.
+  assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'x25519' }),
+    (error) => error instanceof TransportPolicyError && error.reason === 'outdated' && !error.retryable);
+  // Loopback without a key stays plaintext whatever the policy says.
+  checkTransportPolicy({ serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'none', encryptionPublicKey: '' }, { requiredProtocol: 'x25519' });
+});
+
+test('verifyTransportPolicy: refuses unpaired remotes offline, reads the policy directly, classifies failures', async () => {
+  const policyFetch = (respond) => {
+    const calls = [];
+    return { calls, fetchImpl: async (url, init) => { calls.push({ url: new URL(url), init }); return respond(); } };
+  };
+  const unpaired = policyFetch(() => { throw new Error('must not be called'); });
+  await assert.rejects(
+    verifyTransportPolicy({ serverUrl: 'http://192.168.1.20:7345', encryptionProtocol: 'none', encryptionPublicKey: '' }, { fetchImpl: unpaired.fetchImpl }),
+    EncryptionRequiredError,
+  );
+  assert.equal(unpaired.calls.length, 0);
+
+  for (const encryptionPublicKey of ['AAAA', '!!', b64(new Uint8Array(32))]) {
+    await assert.rejects(
+      verifyTransportPolicy({ serverUrl: 'http://10.0.0.5:7345', encryptionProtocol: 'x25519', encryptionPublicKey }, { fetchImpl: unpaired.fetchImpl }),
+      InvalidPinnedKeyError,
+      encryptionPublicKey,
+    );
+  }
+  assert.equal(unpaired.calls.length, 0);
+
+  const ok = policyFetch(() => Response.json({ requiredProtocol: 'x25519', transportVersion: 2 }));
+  await verifyTransportPolicy(pinnedProfile('http://10.0.0.5:7345/'), { fetchImpl: ok.fetchImpl });
+  assert.equal(ok.calls[0].url.href, 'http://10.0.0.5:7345/v2/transport-policy');
+  assert.equal(ok.calls[0].init.credentials, 'omit');
+  assert.equal(ok.calls[0].init.headers['x-todex-device-id'], undefined, 'unsigned');
+
+  const cases = [
+    [() => Response.json({ requiredProtocol: 'ml-kem-768', transportVersion: 2 }), (error) => error instanceof TransportRepairRequiredError],
+    [() => new Response('nope', { status: 404 }), (error) => error.reason === 'outdated' && !error.retryable],
+    [() => new Response('', { status: 503 }), (error) => error.reason === 'http' && error.retryable && error.status === 503],
+    [() => new Response('{', { status: 200 }), (error) => error.reason === 'invalid' && !error.retryable],
+    [() => Response.json({ requiredProtocol: 'rot13' }), (error) => error.reason === 'invalid'],
+    [() => { throw new TypeError('Failed to fetch'); }, (error) => error.reason === 'unreachable' && error.retryable],
+  ];
+  for (const [respond, check] of cases) {
+    await assert.rejects(verifyTransportPolicy(pinnedProfile('http://10.0.0.5:7345'), { fetchImpl: policyFetch(respond).fetchImpl }), check);
+  }
+  const hanging = (_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+  await assert.rejects(verifyTransportPolicy(pinnedProfile('http://10.0.0.5:7345'), { fetchImpl: hanging, timeoutMs: 5 }),
+    (error) => error.reason === 'timeout' && error.retryable);
+  const controller = new AbortController();
+  const pending = verifyTransportPolicy(pinnedProfile('http://10.0.0.5:7345'), { fetchImpl: hanging, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+});
+
+test('toFetchResponse and cachedSecureTransport', async () => {
+  const response = toFetchResponse({ status: 409, headers: { 'content-type': 'application/json' }, body: utf8('{"code":"CONFLICT"}') });
+  assert.equal(response.ok, false);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { code: 'CONFLICT' });
+  assert.equal(toFetchResponse({ status: 204, headers: {}, body: new Uint8Array() }).status, 204);
+
+  const device = generateDeviceIdentity();
+  const first = cachedSecureTransport(pinnedProfile('http://10.0.0.9:7345'), device);
+  assert.equal(cachedSecureTransport(pinnedProfile('http://10.0.0.9:7345/'), device), first, 'same profile, same instance');
+  assert.equal(first.mode, 'v2');
+  const unpaired = cachedSecureTransport({ serverUrl: 'http://10.0.0.9:7345', encryptionProtocol: 'none', encryptionPublicKey: '' }, device);
+  assert.notEqual(unpaired, first, 'a changed profile rebuilds');
+  assert.equal(unpaired.mode, 'refused');
+  assert.notEqual(cachedSecureTransport(pinnedProfile('http://10.0.0.9:7345'), device), first, 'the replaced profile was dropped');
 });
 
 test('REST tunnel end to end: signed inner request, streamed sealed response', async () => {
@@ -508,6 +559,34 @@ test('REST tunnel end to end: signed inner request, streamed sealed response', a
   assert.equal(streamed.status, 202);
   assert.ok(chunks > 1, 'body arrives in more than one chunk');
   assert.ok(length > 70000);
+});
+
+test('V2ApiClient and the backend probe go through the tunnel when a key is pinned', async () => {
+  const { V2ApiClient } = require(path.join(compiledDir, 'v2.js'));
+  const { probeBackendConnection } = require(path.join(compiledDir, 'connectionProbe.js'));
+  const server = fakeSealedServer();
+  const transport = createSecureTransport({ profile: pinnedProfile('http://127.0.0.1:7345'), fetchImpl: server.fetchImpl });
+  const api = new V2ApiClient({ serverUrl: 'http://127.0.0.1:7345', transport });
+  const result = await api.prompt('c 1', 'hello');
+  assert.equal(result.echo, '/v2/conversations/c%201/prompt');
+  const call = server.calls[0];
+  assert.equal(call.url.pathname, '/v2/sealed');
+  assert.equal(call.inner.method, 'POST');
+  assert.equal(call.inner.headers['content-type'], 'application/json');
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(call.inner.body)), { text: 'hello' });
+
+  await api.listConversations();
+  assert.equal(server.calls[1].inner.path, '/v2/conversations');
+
+  const probe = await probeBackendConnection({ serverUrl: 'http://127.0.0.1:7345', transport });
+  assert.equal(probe.ok, true);
+  assert.deepEqual(server.calls.slice(2).map((item) => [item.url.pathname, item.inner.path]), [
+    ['/v2/sealed', '/v2/version'], ['/v2/sealed', '/health'], ['/v2/sealed', '/v2/providers'],
+  ]);
+
+  // Without a key a remote client never reaches the network.
+  const refused = new V2ApiClient({ serverUrl: 'http://10.0.0.5:7345', fetchImpl: async () => { throw new Error('must not be called'); } });
+  await assert.rejects(refused.listConversations(), EncryptionRequiredError);
 });
 
 test('REST tunnel surfaces an unsealed 400 as a request failure, never as the inner response', async () => {
@@ -605,6 +684,7 @@ test('WebSocket v2: signed tv=2 upgrade, hello, then binary frames both ways', (
   assert.deepEqual(ws.closed, { code: 4400, reason: 'transport crypto failure' });
   assert.ok(events.some((event) => event instanceof TransportCryptoError));
   assert.equal(socket.ready, false);
+  assert.equal(socket.closed, true);
 });
 
 test('WebSocket v2: binary before the hello or text after it closes with 4400', () => {

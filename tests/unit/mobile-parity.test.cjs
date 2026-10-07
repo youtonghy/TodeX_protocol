@@ -506,7 +506,7 @@ test('includes reasoning effort in v2 HTTP prompt payloads', async () => {
     },
   });
   await client.prompt('c1', 'hello', 'gpt-5.5', undefined, ' high ');
-  assert.deepEqual(JSON.parse(requests[0].init.body), {
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(requests[0].init.body)), {
     text: 'hello', model: 'gpt-5.5', reasoningEffort: 'high',
   });
 });

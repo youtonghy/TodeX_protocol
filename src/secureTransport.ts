@@ -6,8 +6,10 @@ import {
   TRANSPORT_V2_SEALED_PATH,
   TRANSPORT_V2_WS_CLOSE_CODE,
   TRANSPORT_V2_WS_CLOSE_REASON,
+  TRANSPORT_V2_VERSION,
   TransportCryptoError,
   assertWsPlaintextFits,
+  clientHandshake,
   createWsChannel,
   iterateByteSource,
   openRestResponse,
@@ -20,7 +22,7 @@ import {
   type WsChannelSession,
 } from './secureChannel';
 import { MAX_LEGACY_MESSAGE_BYTES } from './transport';
-import type { TransportEncryptionProtocol } from './transportCrypto';
+import { decodeBase64UrlBytes, type TransportEncryptionProtocol } from './transportCrypto';
 
 // The one place business code talks to a backend. It applies the transport
 // v2 "Client rules":
@@ -112,6 +114,8 @@ export type SecureSocket = {
   readonly encrypted: boolean;
   /** True once `onOpen` fired and until the socket closes. */
   readonly ready: boolean;
+  /** True once the socket closed, failed or `close()` was called. */
+  readonly closed: boolean;
   /** Sends one JSON text message; throws `TransportPayloadTooLargeError` before sealing when too large. */
   send: (text: string) => void;
   close: (code?: number, reason?: string) => void;
@@ -140,7 +144,7 @@ export class EncryptionRequiredError extends ConnectionError {
 
 /** The server now requires a different protocol than the one pinned at pairing. */
 export class TransportRepairRequiredError extends ConnectionError {
-  constructor(pinned: string, required: string) {
+  constructor(readonly pinned: string, readonly required: string) {
     super(
       ConnectionErrorType.ENCRYPTION_REQUIRED,
       '后端的加密方式已变更，请重新配对',
@@ -152,20 +156,54 @@ export class TransportRepairRequiredError extends ConnectionError {
   }
 }
 
+/** The pinned key cannot be used (malformed, wrong length or a low-order point). */
+export class InvalidPinnedKeyError extends ConnectionError {
+  constructor(readonly protocol: string) {
+    super(
+      ConnectionErrorType.ENCRYPTION_REQUIRED,
+      '已保存的加密公钥无效，请重新配对',
+      `pinned ${protocol} key is unusable`,
+      false,
+      'encryption_required',
+    );
+    this.name = 'InvalidPinnedKeyError';
+  }
+}
+
+/** Runs one throwaway key agreement against the pinned key; throws `InvalidPinnedKeyError`. */
+export function assertPinnedKeyUsable(profile: SecureTransportProfile): void {
+  const protocol = pinnedProtocol(profile);
+  if (!protocol) return;
+  let shared: Uint8Array | undefined;
+  try {
+    shared = clientHandshake(protocol, decodeBase64UrlBytes(profile.encryptionPublicKey.trim())).shared;
+  } catch {
+    throw new InvalidPinnedKeyError(protocol);
+  } finally {
+    shared?.fill(0);
+  }
+}
+
 function pinnedProtocol(profile: SecureTransportProfile): SecureTransportProtocol | null {
   const protocol = parseSecureTransportProtocol(profile.encryptionProtocol);
-  return protocol && profile.encryptionPublicKey.trim() ? protocol : null;
+  return protocol && (profile.encryptionPublicKey ?? '').trim() ? protocol : null;
+}
+
+/** `ws(s)://` server URLs are accepted for the HTTP origin they name. */
+function httpServerUrl(serverUrl: string): string {
+  return (serverUrl ?? '').trim().replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://');
 }
 
 export function secureTransportMode(profile: SecureTransportProfile): SecureTransportMode {
   if (pinnedProtocol(profile)) return 'v2';
-  return isLoopbackUrl(profile.serverUrl) ? 'plaintext' : 'refused';
+  return isLoopbackUrl(httpServerUrl(profile.serverUrl)) ? 'plaintext' : 'refused';
 }
 
 /**
- * Checks a `/v2/transport-policy` answer against the profile. Only a
- * conflicting concrete protocol is an error; the answer never downgrades a
- * pinned profile to plaintext.
+ * Checks a `/v2/transport-policy` answer against the profile. The answer
+ * never downgrades a pinned profile to plaintext: a pinned profile whose
+ * server now requires another protocol (including `none`, which has no
+ * static key to run v2 against) must be re-paired.
  */
 export function checkTransportPolicy(
   profile: SecureTransportProfile,
@@ -173,11 +211,94 @@ export function checkTransportPolicy(
 ): void {
   const mode = secureTransportMode(profile);
   if (mode === 'refused') throw new EncryptionRequiredError(profile.serverUrl);
-  const required = parseSecureTransportProtocol(policy.requiredProtocol);
   const pinned = pinnedProtocol(profile);
-  if (pinned && required && required !== pinned) {
+  if (!pinned) return;
+  const required = policy.requiredProtocol === 'none' ? 'none' : parseSecureTransportProtocol(policy.requiredProtocol);
+  if (required && required !== pinned) {
     throw new TransportRepairRequiredError(pinned, required);
   }
+  if (policy.transportVersion !== TRANSPORT_V2_VERSION) {
+    throw new TransportPolicyError('outdated', false);
+  }
+}
+
+/** Why `/v2/transport-policy` could not confirm the profile. */
+export type TransportPolicyFailure = 'unreachable' | 'timeout' | 'http' | 'invalid' | 'outdated';
+
+export class TransportPolicyError extends Error {
+  constructor(readonly reason: TransportPolicyFailure, readonly retryable: boolean, readonly status?: number) {
+    super(`transport policy check failed: ${reason}${status ? ` (HTTP ${status})` : ''}`);
+    this.name = 'TransportPolicyError';
+  }
+}
+
+const POLICY_TIMEOUT_MS = 10_000;
+const POLICY_MAX_BYTES = 2048;
+
+/**
+ * Runs the connect-time policy check: refuses an unpaired remote profile
+ * without touching the network, then reads `/v2/transport-policy` (direct
+ * and unsigned: it is on the plaintext allow-list and carries no secrets)
+ * and applies `checkTransportPolicy`. Rejects with `EncryptionRequiredError`,
+ * `InvalidPinnedKeyError`, `TransportRepairRequiredError`,
+ * `TransportPolicyError`, or an `AbortError`
+ * when `signal` aborts.
+ */
+export async function verifyTransportPolicy(
+  profile: SecureTransportProfile,
+  options: { fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<void> {
+  if (secureTransportMode(profile) === 'refused') throw new EncryptionRequiredError(profile.serverUrl);
+  assertPinnedKeyUsable(profile);
+  const { signal } = options;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) controller.abort();
+  const timer = setTimeout(abort, options.timeoutMs ?? POLICY_TIMEOUT_MS);
+  const fetchImpl = options.fetchImpl ?? (typeof window !== 'undefined' ? fetch.bind(window) : fetch);
+  let value: unknown;
+  try {
+    let response: Response;
+    try {
+      response = await fetchImpl(originUrl(httpServerUrl(profile.serverUrl), '/v2/transport-policy'), {
+        signal: controller.signal,
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'error',
+        headers: { Accept: 'application/json' },
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new TransportPolicyError(controller.signal.aborted ? 'timeout' : 'unreachable', true);
+    }
+    // A backend without the policy route predates transport v2.
+    if (response.status === 404) throw new TransportPolicyError('outdated', false, 404);
+    if (!response.ok) throw new TransportPolicyError('http', response.status >= 500, response.status);
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new TransportPolicyError(controller.signal.aborted ? 'timeout' : 'unreachable', true);
+    }
+    if (text.length > POLICY_MAX_BYTES) throw new TransportPolicyError('invalid', false);
+    try {
+      value = JSON.parse(text);
+    } catch {
+      throw new TransportPolicyError('invalid', false);
+    }
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  const policy = value && typeof value === 'object' ? value as Record<string, unknown> : null;
+  const required = policy?.requiredProtocol;
+  if (required !== 'none' && !parseSecureTransportProtocol(required)) {
+    throw new TransportPolicyError('invalid', false);
+  }
+  checkTransportPolicy(profile, policy as { requiredProtocol?: unknown; transportVersion?: unknown });
 }
 
 const encoder = new TextEncoder();
@@ -227,7 +348,7 @@ function frameBytes(data: unknown): Uint8Array | null {
 }
 
 export function createSecureTransport(options: SecureTransportOptions): SecureTransport {
-  const { profile } = options;
+  const profile = { ...options.profile, serverUrl: httpServerUrl(options.profile.serverUrl) };
   const mode = secureTransportMode(profile);
   const signer = options.signer ?? null;
   const maxFrameBytes = options.maxFrameBytes ?? MAX_LEGACY_MESSAGE_BYTES;
@@ -407,6 +528,9 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
       get ready() {
         return ready;
       },
+      get closed() {
+        return closed;
+      },
       send: (text: string) => {
         if (!ready) throw new Error('secure socket is not open');
         if (session) {
@@ -429,4 +553,56 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
     fetchStream: (request) => send(request, true) as Promise<SecureStreamResponse>,
     openSocket,
   };
+}
+
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+/**
+ * Wraps an opened response as a standard `Response`, so callers written
+ * against `fetch` keep using `ok`, `status`, `json()` and `text()`.
+ */
+export function toFetchResponse(response: SecureResponse): Response {
+  const body = NULL_BODY_STATUSES.has(response.status) ? null : response.body as Uint8Array<ArrayBuffer>;
+  return new Response(body, { status: response.status, headers: response.headers });
+}
+
+const TRANSPORT_CACHE_LIMIT = 8;
+const transportCache = new Map<string, SecureTransport>();
+
+/**
+ * One `SecureTransport` per backend profile (server URL, pinned protocol and
+ * key, device). A changed profile yields a new instance; the previous one for
+ * the same server is dropped. Instances hold no per-request state, so sharing
+ * them across callers is safe.
+ */
+export function cachedSecureTransport(
+  profile: SecureTransportProfile,
+  device: DeviceIdentity | null,
+): SecureTransport {
+  const normalized: SecureTransportProfile = {
+    serverUrl: httpServerUrl(profile.serverUrl).replace(/\/+$/, ''),
+    encryptionProtocol: profile.encryptionProtocol,
+    encryptionPublicKey: (profile.encryptionPublicKey ?? '').trim(),
+  };
+  const key = JSON.stringify([
+    normalized.serverUrl,
+    normalized.encryptionProtocol,
+    normalized.encryptionPublicKey,
+    device?.deviceId ?? '',
+  ]);
+  const cached = transportCache.get(key);
+  if (cached) return cached;
+  for (const existing of transportCache.keys()) {
+    if ((JSON.parse(existing) as string[])[0] === normalized.serverUrl) transportCache.delete(existing);
+  }
+  if (transportCache.size >= TRANSPORT_CACHE_LIMIT) {
+    const oldest = transportCache.keys().next().value;
+    if (oldest !== undefined) transportCache.delete(oldest);
+  }
+  const transport = createSecureTransport({
+    profile: normalized,
+    signer: device ? deviceRequestSigner(device) : null,
+  });
+  transportCache.set(key, transport);
+  return transport;
 }

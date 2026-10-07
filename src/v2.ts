@@ -1,8 +1,10 @@
 import { controlFrame } from './conversationCommands';
-import { buildHttpUrl, utf8ByteLength } from './todex';
+import { utf8ByteLength } from './todex';
 import { ConnectionError } from './connectionError';
 import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
-import { deviceAuthHeaders, deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
+import { deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
+import { createSecureTransport, deviceRequestSigner, type SecureTransport } from './secureTransport';
+import type { TransportEncryptionProtocol } from './transportCrypto';
 import type {
   FtpSite,
   FtpSiteInput,
@@ -698,6 +700,16 @@ export type V2ApiOptions = {
   authToken?: string;
   /** Paired device identity; every request is signed `todex.device-auth.v1`. */
   device?: DeviceIdentity | null;
+  /**
+   * Transport every request goes through (desktop/web pass the cached
+   * per-profile instance). Without it one is built from `serverUrl`,
+   * `device` and the pinned key below: a pinned key tunnels through
+   * `/v2/sealed`, no key is plaintext on loopback and refused elsewhere.
+   */
+  transport?: SecureTransport;
+  encryptionProtocol?: TransportEncryptionProtocol;
+  encryptionPublicKey?: string;
+  /** Only used when no `transport` is given. */
   fetchImpl?: typeof fetch;
   timeout?: number;
   /** Declare `historyEncryption=1` on history reads: this client decrypts
@@ -785,13 +797,13 @@ export function buildV2WebSocketUrl(serverUrl: string): string {
  * (TodeX_backend docs/history-encryption.md §5.4). */
 export const HISTORY_ENCRYPTION_CAPABILITY = 1;
 
+/** Plaintext (loopback-only) WebSocket URL; transport v2 sockets are opened
+ * by `SecureTransport.openSocket`. */
 export type V2WebSocketUrlOptions = {
-  /** Raw pairing-crypto query string (e.g. `enc=x25519&client_key=...`). */
-  cryptoQueryString?: string;
   /** Bearer token; browsers cannot set WebSocket headers, so it rides as `access_token`. */
   authToken?: string;
   /** Paired device identity; browsers cannot set WebSocket headers, so the
-   * credential rides as a signed query covering the crypto parameters. */
+   * credential rides as a signed query. */
   device?: DeviceIdentity | null;
   /** Declare end-to-end history support in the handshake (§5.4). */
   historyEncryption?: boolean;
@@ -802,12 +814,6 @@ export function buildV2WebSocketUrlWithOptions(
   options: V2WebSocketUrlOptions = {},
 ): string {
   const url = new URL(buildV2WebSocketUrl(serverUrl));
-  if (options.cryptoQueryString) {
-    const query = options.cryptoQueryString.replace(/^\?/, '');
-    for (const [key, value] of new URLSearchParams(query)) {
-      url.searchParams.set(key, value);
-    }
-  }
   if (options.historyEncryption) {
     url.searchParams.set('historyEncryption', String(HISTORY_ENCRYPTION_CAPABILITY));
   }
@@ -832,20 +838,33 @@ export function buildV2WebSocketUrlWithToken(serverUrl: string, authToken?: stri
   return buildV2WebSocketUrlWithOptions(serverUrl, { authToken });
 }
 
+function parseErrorBody(body: Uint8Array): { code?: unknown; message?: unknown } | null {
+  try {
+    const value = JSON.parse(new TextDecoder().decode(body)) as unknown;
+    return value && typeof value === 'object' ? value as { code?: unknown; message?: unknown } : null;
+  } catch {
+    return null;
+  }
+}
+
 export class V2ApiClient {
-  private readonly serverUrl: string;
   private readonly authToken: string;
-  private readonly device: DeviceIdentity | null;
-  private readonly fetchImpl: typeof fetch;
+  private readonly transport: SecureTransport;
   private readonly timeout: number;
   private readonly historyEncryption: boolean;
 
   constructor(options: V2ApiOptions) {
-    this.serverUrl = options.serverUrl;
     this.authToken = options.authToken ?? '';
-    this.device = options.device ?? null;
-    // Browser fetch requires its Window receiver when called outside `window`.
-    this.fetchImpl = options.fetchImpl ?? (typeof window !== 'undefined' ? fetch.bind(window) : fetch);
+    const device = options.device ?? null;
+    this.transport = options.transport ?? createSecureTransport({
+      profile: {
+        serverUrl: options.serverUrl,
+        encryptionProtocol: options.encryptionProtocol ?? 'none',
+        encryptionPublicKey: options.encryptionPublicKey ?? '',
+      },
+      fetchImpl: options.fetchImpl,
+      signer: device ? deviceRequestSigner(device) : null,
+    });
     this.timeout = options.timeout ?? 30000;
     this.historyEncryption = options.historyEncryption === true;
   }
@@ -1307,8 +1326,8 @@ export class V2ApiClient {
   }
 
   private async request<T>(
-    pathname: string,
-    init: RequestInit = {},
+    pathAndQuery: string,
+    init: { method?: string; body?: string | Uint8Array<ArrayBuffer> } = {},
     timeoutMs = this.timeout,
     responseType: 'json' | 'bytes' = 'json',
   ): Promise<T> {
@@ -1316,33 +1335,31 @@ export class V2ApiClient {
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const headers = new Headers(init.headers);
-      // Raw byte bodies (remote uploads) are signed as-is; everything else
-      // is JSON text.
+      const queryAt = pathAndQuery.indexOf('?');
+      const path = queryAt < 0 ? pathAndQuery : pathAndQuery.slice(0, queryAt);
+      const query = queryAt < 0 ? '' : pathAndQuery.slice(queryAt + 1);
+      // Raw byte bodies (remote uploads) are sent as-is; everything else is
+      // JSON text. The transport signs the exact bytes.
       const rawBody = init.body instanceof Uint8Array ? init.body : undefined;
-      headers.set('Accept', responseType === 'bytes' ? 'application/octet-stream' : 'application/json');
-      if (init.body) headers.set('Content-Type', rawBody ? 'application/octet-stream' : 'application/json');
-      if (this.authToken) headers.set('Authorization', `Bearer ${this.authToken}`);
-      if (this.device) {
-        const body = rawBody ?? (typeof init.body === 'string' ? new TextEncoder().encode(init.body) : new Uint8Array());
-        for (const [name, value] of Object.entries(
-          deviceAuthHeaders(this.device, init.method ?? 'GET', pathname, body),
-        )) {
-          headers.set(name, value);
-        }
-      }
+      const headers: Record<string, string> = {
+        accept: responseType === 'bytes' ? 'application/octet-stream' : 'application/json',
+      };
+      if (init.body) headers['content-type'] = rawBody ? 'application/octet-stream' : 'application/json';
+      if (this.authToken) headers.authorization = `Bearer ${this.authToken}`;
 
-      const response = await this.fetchImpl(buildHttpUrl(this.serverUrl, pathname), {
-        ...init,
+      // The whole body is read (and, through the tunnel, opened) before this
+      // resolves, so the timeout also covers a stalled download.
+      const response = await this.transport.fetch({
+        method: init.method ?? 'GET',
+        path,
+        query,
         headers,
-        signal: controller.signal
+        body: init.body,
+        signal: controller.signal,
       });
 
-      if (!response.ok) {
-        const backendError = await response.json().catch(() => null) as {
-          code?: unknown;
-          message?: unknown;
-        } | null;
+      if (response.status < 200 || response.status >= 300) {
+        const backendError = parseErrorBody(response.body);
         const backendCode = typeof backendError?.code === 'string' ? backendError.code : undefined;
         const backendMessage = typeof backendError?.message === 'string' ? backendError.message : undefined;
         // `REMOTE_*` codes are SFTP/FTP login failures on the far side, not a
@@ -1358,8 +1375,8 @@ export class V2ApiClient {
         );
       }
 
-      if (responseType === 'bytes') return new Uint8Array(await response.arrayBuffer()) as T;
-      return await response.json() as T;
+      if (responseType === 'bytes') return response.body as T;
+      return JSON.parse(new TextDecoder().decode(response.body)) as T;
     } catch (error: unknown) {
       if (error instanceof ConnectionError) {
         throw error;
@@ -1378,7 +1395,6 @@ export class V2ApiClient {
 
       throw error;
     } finally {
-      // Armed until the body is read: a stalled download must time out too.
       clearTimeout(timeoutId);
     }
   }

@@ -1,4 +1,5 @@
 import { normalizeServerUrl } from './todex';
+import { jitteredBackoffMs } from './backoff';
 import { ConnectionError, type ConnectionFailureCode } from './connectionError';
 import type { SecureResponse, SecureTransport } from './secureTransport';
 import type { ProviderDescriptor } from './v2';
@@ -178,7 +179,9 @@ export async function probeBackendConnection(options: {
   }
 }
 
-export function nextReconnectDelayMs(attempt: number): number {
-  const clamped = Math.max(0, Math.min(attempt, 8));
-  return Math.min(2000 * (2 ** clamped), 30_000);
+/** Delay before reconnect attempt `attempt` (0-based): 2 s doubling up to
+ * 30 s, with equal jitter so clients that dropped together (a daemon
+ * restart, a network blip) do not reconnect in lockstep. */
+export function nextReconnectDelayMs(attempt: number, random: () => number = Math.random): number {
+  return jitteredBackoffMs(attempt, { baseMs: 2000, capMs: 30_000, random });
 }

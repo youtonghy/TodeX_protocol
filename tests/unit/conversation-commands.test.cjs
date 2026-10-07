@@ -80,3 +80,17 @@ test('follow-up queue frames name the backend queue command and require item ids
   assert.throws(() => followUpQueueFrame('remove', 'c', { itemId: ' ' }), /消息 ID/);
   assert.throws(() => followUpQueueFrame('list', ' '), /会话 ID/);
 });
+
+test('cancel names the turn it means and passes a stale-turn answer through', async () => {
+  const { V2ApiClient } = require('../../dist/unit/lib/v2.js');
+  const bodies = [];
+  const answers = [{ conversationId: 'c 1', cancelled: false, activeTurnId: 'turn-2' }, { conversationId: 'c 1', accepted: true }];
+  const client = new V2ApiClient({ serverUrl: 'http://127.0.0.1:7345', fetchImpl: async (url, init) => {
+    assert.equal(new URL(url).pathname, '/v2/conversations/c%201/cancel');
+    bodies.push(JSON.parse(new TextDecoder().decode(init.body)));
+    return new Response(JSON.stringify(answers.shift()), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  } });
+  assert.deepEqual(await client.cancel('c 1', 'turn-1'), { conversationId: 'c 1', cancelled: false, activeTurnId: 'turn-2' });
+  await client.cancel('c 1');
+  assert.deepEqual(bodies, [{ turnId: 'turn-1' }, {}]);
+});

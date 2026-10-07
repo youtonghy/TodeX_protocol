@@ -679,6 +679,16 @@ export function toAgentEventEnvelope(event: ConversationEvent, provider?: Provid
   };
 }
 
+/** Result of `POST /v2/conversations/{id}/cancel` and `conversation.cancel`. */
+export type ConversationCancelResult = {
+  conversationId: string;
+  accepted: boolean;
+  /** False when the named `turnId` was not the active turn; nothing stopped. */
+  cancelled?: boolean;
+  /** The turn actually running when `cancelled` is false, or null when idle. */
+  activeTurnId?: string | null;
+};
+
 export type ConversationReplay = {
   conversationId: string;
   fromSequence: number;
@@ -1110,8 +1120,11 @@ export class V2ApiClient {
     });
   }
 
-  async cancel(id: string): Promise<{ conversationId: string; accepted: boolean }> {
-    return this.control(id, 'cancel');
+  /** Cancels the running turn. With `turnId`, only that turn: when it is no
+   * longer the active one the backend answers `{ cancelled: false,
+   * activeTurnId }`, which callers treat as a no-op. */
+  async cancel(id: string, turnId?: string): Promise<ConversationCancelResult> {
+    return this.control(id, 'cancel', turnId ? { turnId } : {});
   }
 
   async control(id: string, action: ConversationControlAction, payload: Record<string, unknown> = {}): Promise<{ conversationId: string; accepted: boolean }> {

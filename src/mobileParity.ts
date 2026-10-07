@@ -18,6 +18,7 @@ import type {
   ProviderKind,
 } from './v2';
 import { canonicalConversationEventType, normalizeConversationEvent, toAgentEventEnvelope } from './v2';
+import { isLoopbackHostname } from './loopback';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1576,30 +1577,7 @@ export function workspaceLinkTarget(
   return { kind: 'file', filePath: candidate };
 }
 
-function normalizedHostname(value: string): string {
-  return value.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
-}
-
-export function isLoopbackHostname(hostname: string | null | undefined): boolean {
-  if (typeof hostname !== 'string') return false;
-  const host = normalizedHostname(hostname);
-  if (host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
-  const ipv4 = host.split('.');
-  if (ipv4.length === 4 && ipv4[0] === '127') {
-    return ipv4.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
-  }
-  // URL.hostname can expose an IPv4-mapped IPv6 loopback address.
-  const mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  if (mapped) return isLoopbackHostname(mapped[1]);
-  const mappedHex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
-  if (mappedHex) {
-    const high = Number.parseInt(mappedHex[1], 16);
-    const low = Number.parseInt(mappedHex[2], 16);
-    const mappedIpv4 = `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
-    return isLoopbackHostname(mappedIpv4);
-  }
-  return false;
-}
+export { isLoopbackHostname };
 
 export function isLoopbackUrl(value: string | URL): boolean {
   let parsed: URL;

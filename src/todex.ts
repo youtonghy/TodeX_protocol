@@ -431,11 +431,6 @@ export function utf8ByteLength(value: string): number {
   return bytes;
 }
 
-function isLoopbackHostname(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0:0:0:0:0:0:0:1';
-}
-
 export function normalizeServerUrl(raw: string): string {
   const value = raw.trim();
   if (!value) {
@@ -455,7 +450,9 @@ export function normalizeServerUrl(raw: string): string {
   try {
     const parsed = new URL(candidate);
     let hostname = parsed.hostname;
-    if (isLoopbackHostname(hostname)) {
+    // Loopback names become 127.0.0.1 (as in mobileParity's normalizer);
+    // other addresses, including the rest of 127/8, stay as written.
+    if (['localhost', '[::1]', '[0:0:0:0:0:0:0:1]'].includes(hostname.toLowerCase())) {
       hostname = '127.0.0.1';
     }
     const protocol = parsed.protocol === 'https:' ? 'https:' : 'http:';

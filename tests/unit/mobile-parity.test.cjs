@@ -483,6 +483,21 @@ test('routes workspace links and validates loopback browser targets', () => {
   assert.equal(parity.validateLoopbackUrl('file:///tmp/test').ok, false);
 });
 
+test('loopback hostnames accept canonical dotted decimal only', () => {
+  for (const host of ['localhost', 'LOCALHOST.', '127.0.0.1', '127.255.0.10', '127.0.0.0', '::1', '[::1]',
+    '0:0:0:0:0:0:0:1', '::ffff:127.0.0.1', '[::ffff:7f00:1]']) {
+    assert.equal(parity.isLoopbackHostname(host), true, host);
+    assert.equal(todex.isLoopbackHostname(host), true, `barrel ${host}`);
+  }
+  for (const host of ['127.0.0.08', '127.0.0.010', '0127.0.0.1', '127.1', '127.0.1', '127.0.0.256', '127.00.0.1',
+    '::ffff:127.0.0.08', '::ffff:7f00:01x', '128.0.0.1', '::ffff:8000:1', 'localhost.evil.test', '', null, undefined]) {
+    assert.equal(parity.isLoopbackHostname(host), false, String(host));
+  }
+  // The URL parser canonicalizes before classification.
+  assert.equal(parity.isLoopbackUrl('http://127.1:7345'), true);
+  assert.equal(parity.isLoopbackUrl('http://0127.0.0.1:7345'), false);
+});
+
 test('returns stable provider icon metadata for known and unknown agents', () => {
   assert.equal(parity.providerIconMetadata('claude-code').id, 'claude-code');
   assert.deepEqual(

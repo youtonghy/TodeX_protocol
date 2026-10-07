@@ -97,3 +97,87 @@ test('workspace tombstones suppress matching stale remote records only', () => {
   assert.equal(todex.normalizeWorkspaceTombstone({ path: '/x' }), null);
   assert.equal(todex.normalizeWorkspaceTombstone('nope'), null);
 });
+
+test('normalizeWorkspaceRecord keeps trimmed group fields', () => {
+  const record = todex.normalizeWorkspaceRecord(workspace({ group_id: ' wsg_1 ', groupName: ` ${'x'.repeat(80)} ` }));
+  assert.equal(record.groupId, 'wsg_1');
+  assert.equal(record.groupName.length, todex.WORKSPACE_GROUP_FIELD_MAX);
+  assert.equal(todex.normalizeWorkspaceRecord(workspace({ groupId: '  ' })).groupId, undefined);
+});
+
+test('mergeWorkspaceRecords lets a newer record clear its group', () => {
+  const local = [workspace({ groupId: 'wsg_1', groupName: 'App', updatedAt: 20 })];
+  const remote = [workspace({ updatedAt: 30 })];
+  const [merged] = todex.mergeWorkspaceRecords(local, remote);
+  assert.equal(merged.groupId, undefined);
+  assert.equal(merged.groupName, undefined);
+  const [kept] = todex.mergeWorkspaceRecords([workspace({ groupId: 'wsg_1', updatedAt: 40 })], remote);
+  assert.equal(kept.groupId, 'wsg_1');
+});
+
+function layout(entries) {
+  return entries.map((entry) => (entry.kind === 'workspace'
+    ? entry.workspace.id
+    : `${entry.name}[${entry.workspaces.map((item) => item.id).join(',')}]`));
+}
+
+function sample() {
+  return todex.groupWorkspaceEntries([
+    workspace({ id: 'a', name: 'TJXY', path: '/a' }),
+    workspace({ id: 'b', name: 'Todex', path: '/b', groupId: 'g1', groupName: 'Old', updatedAt: 10 }),
+    workspace({ id: 'c', name: 'Other', path: '/c' }),
+    workspace({ id: 'd', name: 'Todex_test', path: '/d', groupId: 'g1', groupName: 'Todex', updatedAt: 50 }),
+    workspace({ id: 'e', name: 'TJXY_app', path: '/e', groupId: 'lonely' }),
+  ]);
+}
+
+test('groupWorkspaceEntries places a group at its first member and dissolves singletons', () => {
+  assert.deepEqual(layout(sample()), ['a', 'Todex[b,d]', 'c', 'e']);
+});
+
+test('moveWorkspaceEntry merges, joins, reorders, and leaves groups', () => {
+  const fresh = { id: 'g2', fallbackName: 'New group' };
+  const merged = todex.moveWorkspaceEntry(sample(), { kind: 'workspace', id: 'e' }, { kind: 'workspace', id: 'a', position: 'merge' }, fresh);
+  assert.deepEqual(layout(merged), ['TJXY[a,e]', 'Todex[b,d]', 'c']);
+  const unnamed = todex.moveWorkspaceEntry(sample(), { kind: 'workspace', id: 'c' }, { kind: 'workspace', id: 'a', position: 'merge' }, fresh);
+  assert.equal(unnamed[0].name, 'New group');
+  const joined = todex.moveWorkspaceEntry(sample(), { kind: 'workspace', id: 'c' }, { kind: 'group', id: 'g1', position: 'into' }, fresh);
+  assert.deepEqual(layout(joined), ['a', 'Todex[b,d,c]', 'e']);
+  const inside = todex.moveWorkspaceEntry(sample(), { kind: 'workspace', id: 'a' }, { kind: 'workspace', id: 'b', position: 'before' }, fresh);
+  assert.deepEqual(layout(inside), ['Todex[a,b,d]', 'c', 'e']);
+  const out = todex.moveWorkspaceEntry(sample(), { kind: 'workspace', id: 'd' }, { kind: 'workspace', id: 'e', position: 'after' }, fresh);
+  assert.deepEqual(layout(out), ['a', 'b', 'c', 'e', 'd']);
+  const groupMoved = todex.moveWorkspaceEntry(sample(), { kind: 'group', id: 'g1' }, { kind: 'workspace', id: 'e', position: 'after' }, fresh);
+  assert.deepEqual(layout(groupMoved), ['a', 'c', 'e', 'Todex[b,d]']);
+  const nested = todex.moveWorkspaceEntry(sample(), { kind: 'group', id: 'g1' }, { kind: 'workspace', id: 'a', position: 'merge' }, fresh);
+  assert.deepEqual(layout(nested), layout(sample()));
+});
+
+test('group menu operations and layout patches', () => {
+  assert.deepEqual(layout(todex.removeWorkspaceFromGroup(sample(), 'b')), ['a', 'd', 'b', 'c', 'e']);
+  assert.deepEqual(layout(todex.ungroupWorkspaceGroup(sample(), 'g1')), ['a', 'b', 'd', 'c', 'e']);
+  assert.deepEqual(layout(todex.moveWorkspaceToGroup(sample(), 'a', 'g1')), ['Todex[b,d,a]', 'c', 'e']);
+  assert.deepEqual(layout(todex.groupWorkspacesTogether(sample(), 'c', 'a', { id: 'g2', fallbackName: 'N' })), ['Todex[b,d]', 'N[c,a]', 'e']);
+  assert.equal(todex.renameWorkspaceGroup(sample(), 'g1', '  ')[1].name, 'Todex');
+
+  const patches = todex.workspaceLayoutPatches(todex.renameWorkspaceGroup(sample(), 'g1', 'Core'));
+  assert.deepEqual(patches.map((item) => [item.id, item.patch.sortOrder, item.patch.groupId, item.patch.groupName]), [
+    ['a', 0, undefined, undefined],
+    ['b', 1, 'g1', 'Core'],
+    ['d', 2, 'g1', 'Core'],
+    ['c', 3, undefined, undefined],
+    ['e', 4, undefined, undefined],
+  ]);
+  const settled = todex.groupWorkspaceEntries([
+    workspace({ id: 'a', path: '/a', sortOrder: 0 }),
+    workspace({ id: 'b', path: '/b', sortOrder: 1 }),
+  ]);
+  assert.deepEqual(todex.workspaceLayoutPatches(settled), []);
+});
+
+test('suggestWorkspaceGroupName uses the shared prefix', () => {
+  assert.equal(todex.suggestWorkspaceGroupName('TJXY', 'TJXY_app', 'N'), 'TJXY');
+  assert.equal(todex.suggestWorkspaceGroupName('todex-web', 'Todex-desktop', 'N'), 'todex');
+  assert.equal(todex.suggestWorkspaceGroupName('blog', 'notes', 'N'), 'N');
+  assert.match(todex.newWorkspaceGroupId(), /^wsg_[0-9a-f-]{36}$/);
+});

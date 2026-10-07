@@ -155,6 +155,10 @@ export type WorkspaceRecord = {
   createdAt: number;
   updatedAt: number;
   sortOrder?: number;
+  /** Sidebar group membership; workspaces sharing an id form one group. */
+  groupId?: string;
+  /** Display name of the group, copied onto every member. */
+  groupName?: string;
 };
 
 /** A workspace record the backend refused to sync (for example because its
@@ -847,6 +851,8 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     createdAt,
     updatedAt,
     sortOrder: Number.isFinite(sortOrder) ? sortOrder : undefined,
+    groupId: normalizeWorkspaceGroupField(stringField(value, ['groupId', 'group_id'])),
+    groupName: normalizeWorkspaceGroupField(stringField(value, ['groupName', 'group_name'])),
   };
 }
 
@@ -929,6 +935,10 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
         iconColor: normalized.iconColor ?? existing.iconColor,
         ringStyle: normalized.ringStyle ?? existing.ringStyle,
         sortOrder: normalized.sortOrder ?? existing.sortOrder,
+        // Group fields come from the winning record without fallback so that
+        // leaving a group (fields cleared) survives the merge.
+        groupId: base.groupId,
+        groupName: base.groupName,
       };
     }
   };
@@ -1095,6 +1105,233 @@ export function nextWorkspaceSortOrder(workspaces: WorkspaceRecord[]): number {
     (max, workspace) => Math.max(max, (workspace.sortOrder ?? -1) + 1),
     0,
   );
+}
+
+/** Max length kept for workspace `groupId` / `groupName`. */
+export const WORKSPACE_GROUP_FIELD_MAX = 64;
+
+/** A top-level sidebar row: a lone workspace or a group of two or more. */
+export type WorkspaceSidebarEntry =
+  | { kind: 'workspace'; workspace: WorkspaceRecord }
+  | { kind: 'group'; id: string; name: string; workspaces: WorkspaceRecord[] };
+
+export type WorkspaceDragSource = { kind: 'workspace' | 'group'; id: string };
+
+/** `merge` drops a workspace onto another workspace; `into` onto a group header. */
+export type WorkspaceDropTarget =
+  | { kind: 'workspace'; id: string; position: 'before' | 'after' | 'merge' }
+  | { kind: 'group'; id: string; position: 'before' | 'after' | 'into' };
+
+export type WorkspaceLayoutPatch = {
+  id: string;
+  patch: { sortOrder: number; groupId: string | undefined; groupName: string | undefined };
+};
+
+/** Trims and caps a group field to `WORKSPACE_GROUP_FIELD_MAX` code points
+ * (the backend applies the same rule); empty means ungrouped. */
+function normalizeWorkspaceGroupField(value: string): string | undefined {
+  return Array.from(value.trim()).slice(0, WORKSPACE_GROUP_FIELD_MAX).join('') || undefined;
+}
+
+export function newWorkspaceGroupId(): string {
+  return `wsg_${globalThis.crypto.randomUUID()}`;
+}
+
+/** Group name for two workspaces dropped together: their shared name prefix
+ * (trailing separators trimmed, at least two characters) or `fallback`. */
+export function suggestWorkspaceGroupName(left: string, right: string, fallback: string): string {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  let length = 0;
+  while (length < a.length && length < b.length && a[length].toLowerCase() === b[length].toLowerCase()) {
+    length += 1;
+  }
+  const prefix = a.slice(0, length).join('').replace(/[\s_\-.]+$/, '');
+  return Array.from(prefix).length >= 2 ? prefix : fallback;
+}
+
+/** Folds an already ordered workspace list into sidebar entries. A group takes
+ * the position of its first member; groups left with a single member render
+ * as plain workspaces. The group name comes from the most recently updated
+ * member that carries one. */
+export function groupWorkspaceEntries(ordered: WorkspaceRecord[]): WorkspaceSidebarEntry[] {
+  const members = new Map<string, WorkspaceRecord[]>();
+  for (const workspace of ordered) {
+    if (!workspace.groupId) continue;
+    const list = members.get(workspace.groupId);
+    if (list) list.push(workspace);
+    else members.set(workspace.groupId, [workspace]);
+  }
+  const entries: WorkspaceSidebarEntry[] = [];
+  const emitted = new Set<string>();
+  for (const workspace of ordered) {
+    const groupId = workspace.groupId;
+    const group = groupId ? members.get(groupId) : undefined;
+    if (!groupId || !group || group.length < 2) {
+      entries.push({ kind: 'workspace', workspace });
+      continue;
+    }
+    if (emitted.has(groupId)) continue;
+    emitted.add(groupId);
+    const named = group
+      .filter((member) => member.groupName)
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+    entries.push({ kind: 'group', id: groupId, name: named?.groupName ?? '', workspaces: group });
+  }
+  return entries;
+}
+
+type WorkspaceGroupEntry = Extract<WorkspaceSidebarEntry, { kind: 'group' }>;
+
+function workspaceGroupOrSingles(group: WorkspaceGroupEntry, workspaces: WorkspaceRecord[]): WorkspaceSidebarEntry[] {
+  return workspaces.length < 2
+    ? workspaces.map((workspace) => ({ kind: 'workspace' as const, workspace }))
+    : [{ ...group, workspaces }];
+}
+
+function withoutWorkspace(entries: WorkspaceSidebarEntry[], workspaceId: string): WorkspaceSidebarEntry[] {
+  return entries.flatMap((entry): WorkspaceSidebarEntry[] => {
+    if (entry.kind === 'workspace') return entry.workspace.id === workspaceId ? [] : [entry];
+    const workspaces = entry.workspaces.filter((workspace) => workspace.id !== workspaceId);
+    return workspaces.length === entry.workspaces.length ? [entry] : workspaceGroupOrSingles(entry, workspaces);
+  });
+}
+
+function findWorkspace(entries: WorkspaceSidebarEntry[], workspaceId: string): WorkspaceRecord | undefined {
+  for (const entry of entries) {
+    if (entry.kind === 'workspace' && entry.workspace.id === workspaceId) return entry.workspace;
+    if (entry.kind === 'group') {
+      const found = entry.workspaces.find((workspace) => workspace.id === workspaceId);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/** Applies a sidebar drag-and-drop. Returns `entries` unchanged for no-op or
+ * invalid drops (groups never nest, a row never drops onto itself). */
+export function moveWorkspaceEntry(
+  entries: WorkspaceSidebarEntry[],
+  source: WorkspaceDragSource,
+  target: WorkspaceDropTarget,
+  newGroup: { id: string; fallbackName: string },
+): WorkspaceSidebarEntry[] {
+  if (source.kind === target.kind && source.id === target.id) return entries;
+
+  if (source.kind === 'group') {
+    const index = entries.findIndex((entry) => entry.kind === 'group' && entry.id === source.id);
+    if (index < 0 || target.position === 'merge' || target.position === 'into') return entries;
+    const rest = entries.filter((_, i) => i !== index);
+    const to = rest.findIndex((entry) => (target.kind === 'group'
+      ? entry.kind === 'group' && entry.id === target.id
+      : entry.kind === 'workspace' && entry.workspace.id === target.id));
+    if (to < 0) return entries;
+    rest.splice(to + (target.position === 'after' ? 1 : 0), 0, entries[index]);
+    return rest;
+  }
+
+  const moving = findWorkspace(entries, source.id);
+  if (!moving) return entries;
+  const rest = withoutWorkspace(entries, source.id);
+
+  if (target.kind === 'group') {
+    const index = rest.findIndex((entry) => entry.kind === 'group' && entry.id === target.id);
+    if (index < 0) return entries;
+    const group = rest[index] as WorkspaceGroupEntry;
+    if (target.position === 'into') {
+      rest[index] = { ...group, workspaces: [...group.workspaces, moving] };
+    } else {
+      rest.splice(index + (target.position === 'after' ? 1 : 0), 0, { kind: 'workspace', workspace: moving });
+    }
+    return rest;
+  }
+
+  for (let index = 0; index < rest.length; index += 1) {
+    const entry = rest[index];
+    if (entry.kind === 'workspace' && entry.workspace.id === target.id) {
+      if (target.position === 'merge') {
+        rest[index] = {
+          kind: 'group',
+          id: newGroup.id,
+          name: suggestWorkspaceGroupName(entry.workspace.name, moving.name, newGroup.fallbackName),
+          workspaces: [entry.workspace, moving],
+        };
+      } else {
+        rest.splice(index + (target.position === 'after' ? 1 : 0), 0, { kind: 'workspace', workspace: moving });
+      }
+      return rest;
+    }
+    if (entry.kind === 'group') {
+      const at = entry.workspaces.findIndex((workspace) => workspace.id === target.id);
+      if (at < 0) continue;
+      const workspaces = [...entry.workspaces];
+      workspaces.splice(at + (target.position === 'before' ? 0 : 1), 0, moving);
+      rest[index] = { ...entry, workspaces };
+      return rest;
+    }
+  }
+  return entries;
+}
+
+/** Moves a workspace to the end of an existing group. */
+export function moveWorkspaceToGroup(entries: WorkspaceSidebarEntry[], workspaceId: string, groupId: string): WorkspaceSidebarEntry[] {
+  return moveWorkspaceEntry(entries, { kind: 'workspace', id: workspaceId }, { kind: 'group', id: groupId, position: 'into' }, { id: groupId, fallbackName: '' });
+}
+
+/** Groups two top-level workspaces, `targetId` first, as a drop would. */
+export function groupWorkspacesTogether(
+  entries: WorkspaceSidebarEntry[],
+  targetId: string,
+  workspaceId: string,
+  newGroup: { id: string; fallbackName: string },
+): WorkspaceSidebarEntry[] {
+  return moveWorkspaceEntry(entries, { kind: 'workspace', id: workspaceId }, { kind: 'workspace', id: targetId, position: 'merge' }, newGroup);
+}
+
+/** Takes a workspace out of its group and places it right after the group. */
+export function removeWorkspaceFromGroup(entries: WorkspaceSidebarEntry[], workspaceId: string): WorkspaceSidebarEntry[] {
+  const index = entries.findIndex((entry) => entry.kind === 'group' && entry.workspaces.some((workspace) => workspace.id === workspaceId));
+  if (index < 0) return entries;
+  const group = entries[index] as WorkspaceGroupEntry;
+  const moving = group.workspaces.find((workspace) => workspace.id === workspaceId)!;
+  const remaining = group.workspaces.filter((workspace) => workspace.id !== workspaceId);
+  return [
+    ...entries.slice(0, index),
+    ...workspaceGroupOrSingles(group, remaining),
+    { kind: 'workspace', workspace: moving },
+    ...entries.slice(index + 1),
+  ];
+}
+
+/** Dissolves a group, keeping its members in place. */
+export function ungroupWorkspaceGroup(entries: WorkspaceSidebarEntry[], groupId: string): WorkspaceSidebarEntry[] {
+  return entries.flatMap((entry): WorkspaceSidebarEntry[] => (entry.kind === 'group' && entry.id === groupId
+    ? entry.workspaces.map((workspace) => ({ kind: 'workspace' as const, workspace }))
+    : [entry]));
+}
+
+export function renameWorkspaceGroup(entries: WorkspaceSidebarEntry[], groupId: string, name: string): WorkspaceSidebarEntry[] {
+  const trimmed = normalizeWorkspaceGroupField(name);
+  if (!trimmed) return entries;
+  return entries.map((entry) => (entry.kind === 'group' && entry.id === groupId ? { ...entry, name: trimmed } : entry));
+}
+
+/** Flattens `entries` back into per-workspace `sortOrder`/`groupId`/`groupName`
+ * and returns patches only for workspaces whose stored layout differs. */
+export function workspaceLayoutPatches(entries: WorkspaceSidebarEntry[]): WorkspaceLayoutPatch[] {
+  const patches: WorkspaceLayoutPatch[] = [];
+  let sortOrder = 0;
+  const visit = (workspace: WorkspaceRecord, groupId: string | undefined, groupName: string | undefined) => {
+    const patch = { sortOrder: sortOrder++, groupId, groupName };
+    if (workspace.sortOrder !== patch.sortOrder || workspace.groupId !== groupId || workspace.groupName !== groupName) {
+      patches.push({ id: workspace.id, patch });
+    }
+  };
+  for (const entry of entries) {
+    if (entry.kind === 'workspace') visit(entry.workspace, undefined, undefined);
+    else entry.workspaces.forEach((workspace) => visit(workspace, entry.id, entry.name || undefined));
+  }
+  return patches;
 }
 
 export function remapWorkspaceScopedRecords<T extends { workspaceId?: string }>(

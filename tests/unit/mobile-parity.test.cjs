@@ -90,6 +90,13 @@ test('normalizes conversation records and manifests into the shared shape', () =
   assert.equal(manifest.v2ConversationId, 'm1');
   assert.equal(manifest.sessionId, 'v2_m1');
   assert.equal(manifest.workspaceId, 'workspace-1');
+  assert.equal('legacyPlaintext' in manifest, false);
+
+  const legacy = parity.conversationFromManifest({
+    schemaVersion: 2, id: 'm2', provider: 'codex', ownerId: 'owner', workspace: '/w', status: 'idle',
+    lastSequence: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', legacyPlaintext: true,
+  }, 'workspace-1');
+  assert.equal(legacy.legacyPlaintext, true);
 });
 
 test('extracts token usage from protocol and provider completion events', () => {

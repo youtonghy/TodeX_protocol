@@ -301,6 +301,8 @@ export type ConversationRecord = {
   preview?: string;
   nativeStatus?: string;
   archived?: boolean;
+  /** Pre-encryption history: read-only (see ConversationManifest). */
+  legacyPlaintext?: boolean;
   sessionId: string;
   threadId: string;
   localAdapterState?: LocalAdapterState;
@@ -395,6 +397,7 @@ export function normalizeConversationRecord(
     preview: readString(raw, ['preview', 'summary', 'firstMessage', 'first_message']),
     nativeStatus: readString(raw, ['nativeStatus', 'native_status', 'status']) || undefined,
     archived: readBoolean(raw, ['archived', 'isArchived', 'is_archived'], false),
+    ...(raw.legacyPlaintext === true ? { legacyPlaintext: true } : {}),
     sessionId: readString(raw, ['sessionId', 'session_id']) || (v2ConversationId ? `v2_${v2ConversationId}` : `conversation_${id}`),
     threadId: readString(raw, ['threadId', 'thread_id']),
     localAdapterState: normalizeLocalAdapterState(readString(raw, ['localAdapterState', 'local_adapter_state'])) || 'idle',
@@ -442,6 +445,7 @@ export function conversationFromManifest(
     preview: '',
     nativeStatus: manifest.status,
     archived: false,
+    ...(manifest.legacyPlaintext ? { legacyPlaintext: true } : {}),
     sessionId: `v2_${manifest.id}`,
     threadId: '',
     localAdapterState: 'idle',

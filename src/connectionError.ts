@@ -180,6 +180,12 @@ export class ConnectionError extends Error {
       case 'WORKSPACE_PATH_OUTSIDE_ROOT':
         userMessage = '工作区目录不在 Backend 允许的根目录内';
         break;
+      case 'HISTORY_READ_ONLY':
+        userMessage = '这是旧版未加密的历史对话，只能查看、归档、导出或删除';
+        break;
+      case 'HISTORY_KEY_REQUIRED':
+        userMessage = '本设备尚未登记历史密钥，请稍后重试';
+        break;
       case 'PROVIDER_UNAVAILABLE':
         error = ConnectionError.providerUnavailable(backendMessage?.trim() || '该 Agent 当前不可用');
         break;

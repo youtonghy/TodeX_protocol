@@ -526,6 +526,10 @@ export type ConversationManifest = {
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
+  /** Stored before history became end-to-end encrypted: readable, archivable
+   * and deletable, but every write fails with HISTORY_READ_ONLY. Omitted
+   * when false. */
+  legacyPlaintext?: boolean;
 };
 
 export type ExtensionScope = 'session' | 'turn';

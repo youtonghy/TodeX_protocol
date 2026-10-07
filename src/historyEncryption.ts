@@ -27,11 +27,19 @@ export const HISTORY_STORAGE_LOW = 'STORAGE_LOW';
 /** This device was revoked: every `history.*` command except
  * `history.encryption.get` fails with it until another device restores it. */
 export const HISTORY_ACCESS_REVOKED = 'HISTORY_ACCESS_REVOKED';
+/** Write to a conversation stored before history became end-to-end
+ * encrypted (`legacyPlaintext`): such conversations are read-only. HTTP 409. */
+export const HISTORY_READ_ONLY = 'HISTORY_READ_ONLY';
+/** Write while the backend has no history recipient to encrypt for: this
+ * device has to register its history key first. HTTP 409. */
+export const HISTORY_KEY_REQUIRED = 'HISTORY_KEY_REQUIRED';
 /** Global server frame pushed when the encryption state changes. */
 export const HISTORY_ENCRYPTION_UPDATED = 'history.encryption.updated';
 /** `history.keys.*` / `history.grant.fulfill` batch ceiling. */
 export const HISTORY_BATCH_LIMIT = 500;
 
+/** History is always end-to-end encrypted; `'off'` only comes from backends
+ * that predate forced encryption. */
 export type HistoryEncryptionMode = 'off' | 'e2e';
 export type HistoryDetail = 'summary' | 'full';
 
@@ -86,7 +94,7 @@ export type HistoryGrant = {
 export type HistoryAccess = 'active' | 'unregistered' | 'revoked';
 export type HistoryRevokedDevice = { deviceId: string; revokedAt: string };
 
-/** Response of `history.encryption.get|enable|disable`, `recipient.revoke`
+/** Response of `history.encryption.get`, `recipient.revoke`
  * and `device.restore`. */
 export type HistoryEncryptionState = {
   mode: HistoryEncryptionMode;
@@ -104,7 +112,7 @@ export type HistoryKeysPage = { items: HistoryKeyRef[]; nextCursor?: string };
 export type HistoryGrantWrap = { conversationId: string; kid: string; wrapped: HistoryWrappedKeyJson };
 
 export type HistoryCommandType =
-  | 'history.encryption.get' | 'history.encryption.enable' | 'history.encryption.disable'
+  | 'history.encryption.get'
   | 'history.recipient.register' | 'history.recipient.revoke' | 'history.recovery.set'
   | 'history.grant.request' | 'history.grant.list' | 'history.grant.dismiss' | 'history.grant.fulfill'
   | 'history.keys.list' | 'history.keys.wraps' | 'history.device.restore';
@@ -118,8 +126,6 @@ export type HistoryCommandSender = (frame: HistoryCommandFrame) => Promise<Recor
 
 export const historyCommands = {
   get: (): HistoryCommandFrame => ({ type: 'history.encryption.get', payload: {} }),
-  enable: (): HistoryCommandFrame => ({ type: 'history.encryption.enable', payload: {} }),
-  disable: (): HistoryCommandFrame => ({ type: 'history.encryption.disable', payload: {} }),
   register: (publicKey: Uint8Array): HistoryCommandFrame => ({
     type: 'history.recipient.register', payload: { publicKey: encodeBase64Url(publicKey) },
   }),

@@ -36,6 +36,16 @@ test('apiRequestFailed keeps backend-specific mappings', () => {
   assert.equal(provider.backendCode, 'PROVIDER_UNAVAILABLE');
 });
 
+test('apiRequestFailed explains the forced history encryption conflicts', () => {
+  const readOnly = ConnectionError.apiRequestFailed(409, 'HISTORY_READ_ONLY', 'legacy');
+  assert.match(readOnly.userMessage, /旧版未加密/);
+  assert.equal(readOnly.backendCode, 'HISTORY_READ_ONLY');
+  assert.equal(readOnly.retryable, false);
+  const keyRequired = ConnectionError.apiRequestFailed(409, 'HISTORY_KEY_REQUIRED', 'no recipient');
+  assert.match(keyRequired.userMessage, /历史密钥/);
+  assert.equal(keyRequired.backendCode, 'HISTORY_KEY_REQUIRED');
+});
+
 test('authenticationFailed records the HTTP status', () => {
   const error = ConnectionError.authenticationFailed(401);
   assert.equal(error.httpStatus, 401);

@@ -293,6 +293,9 @@ test('state carries this device access and the revoked devices; restore names a 
   assert.deepEqual(old.revokedDevices, []);
   assert.deepEqual(historyCommands.restoreDevice('dev_2'), { type: 'history.device.restore', payload: { deviceId: 'dev_2' } });
   assert.throws(() => historyCommands.restoreDevice(' '), /缺少设备 ID/);
+  // History is always encrypted: there is no command to switch it.
+  assert.equal('enable' in historyCommands, false);
+  assert.equal('disable' in historyCommands, false);
 });
 
 test('pushed updates unlock only when wraps arrived for this device', () => {

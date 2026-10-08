@@ -112,6 +112,11 @@ export type ConversationRuntime = {
   /** The daemon-held follow-up queue; separate from a provider's native queue. */
   followUps: FollowUpQueueState;
   lastProgressAt: string | null;
+  /** Provider background tasks (e.g. a CI watcher) that keep the turn open
+   * after the model has stopped answering. Set by `background_tasks_pending`,
+   * shrunk by `task_notification`, emptied once the model resumes or the turn
+   * ends — so a non-empty list means the conversation is only waiting. */
+  backgroundTaskIds: string[];
 };
 export function createConversationRuntime(conversationId: string, workspaceId: string, appliedSequence = 0): ConversationRuntime {
   return {
@@ -121,6 +126,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false, followUps: EMPTY_FOLLOW_UP_QUEUE,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
+    backgroundTaskIds: [],
   };
 }
 
@@ -188,6 +194,20 @@ function usageProjection(state: ConversationRuntime, event: ConversationEvent, t
     record = { ...record, id: `${state.conversationId}:usage:${turnId}`, scope: 'turn' };
   }
   state.usageRecords = upsertUsageRecord(state.usageRecords, record);
+}
+
+const MODEL_ACTIVITY_EVENT = /^(?:message|assistant|reasoning|tool|permission|turn)\./;
+function projectBackgroundTasks(state: ConversationRuntime, type: string, payload: RecordValue): void {
+  if (type === 'provider.event') {
+    const metadata = object(payload.metadata);
+    if (payload.providerMethod === 'background_tasks_pending') {
+      state.backgroundTaskIds = Array.isArray(metadata.taskIds) ? metadata.taskIds.filter((id): id is string => typeof id === 'string') : [];
+    } else if (payload.providerMethod === 'task_notification' && state.backgroundTaskIds.length > 0) {
+      state.backgroundTaskIds = state.backgroundTaskIds.filter(id => id !== metadata.taskId);
+    }
+  } else if (state.backgroundTaskIds.length > 0 && MODEL_ACTIVITY_EVENT.test(type)) {
+    state.backgroundTaskIds = [];
+  }
 }
 
 function permissionScope(payload: RecordValue): ExtensionScope {
@@ -603,6 +623,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
       state.status = type === 'turn.failed' || (type === 'turn.completed' && payload.stopReason === 'error') ? 'failed' : type === 'turn.cancelled' ? 'cancelled' : type === 'turn.interrupted' ? 'interrupted' : 'completed';
     }
   }
+  projectBackgroundTasks(state, type, payload);
   usageProjection(state, event, turnId);
   if (type.startsWith('compaction.')) {
     const phase = type.slice('compaction.'.length);

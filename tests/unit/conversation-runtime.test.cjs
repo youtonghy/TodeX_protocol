@@ -901,3 +901,26 @@ function lazyProjectionFrom(state, events, floor, pageSize) {
   }
   return state;
 }
+
+test('background tasks keep the turn open until the model resumes or the turn ends', () => {
+  const pending = (sequence, taskIds) => event(sequence, 'provider.event',
+    { provider: 'claude-code', providerMethod: 'background_tasks_pending', metadata: { taskIds } });
+  const notified = (sequence, taskId) => event(sequence, 'provider.event',
+    { provider: 'claude-code', providerMethod: 'task_notification', metadata: { taskId } });
+  const waiting = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.delta', { text: 'CI is running.', turnId: 't' }), pending(3, ['a', 'b'])).state;
+  assert.deepEqual(waiting.backgroundTaskIds, ['a', 'b']);
+  assert.equal(waiting.activeTurnId, 't');
+
+  // Each notification removes only its own task; usage frames are not model activity.
+  const partly = apply(waiting, event(4, 'usage.updated', { turnId: 't' }), notified(5, 'a')).state;
+  assert.deepEqual(partly.backgroundTaskIds, ['b']);
+
+  // A follow-up turn of the model ends the wait; a later result re-announces it.
+  const resumed = apply(partly, event(6, 'message.delta', { text: 'CI passed.', turnId: 't' })).state;
+  assert.deepEqual(resumed.backgroundTaskIds, []);
+  assert.deepEqual(apply(resumed, pending(7, ['b'])).state.backgroundTaskIds, ['b']);
+
+  const done = apply(waiting, event(4, 'turn.completed', { turnId: 't' })).state;
+  assert.deepEqual(done.backgroundTaskIds, []);
+});

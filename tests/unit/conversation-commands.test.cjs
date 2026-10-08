@@ -73,7 +73,10 @@ test('follow-up queue frames name the backend queue command and require item ids
     payload: { itemId: 'q1', text: 'next', front: true, content: [{ type: 'text', text: 'x' }], conversationId: 'c' },
   });
   assert.deepEqual(followUpQueueFrame('remove', 'c', { itemId: 'q1', text: 'ignored' }), { type: 'conversation.queue.remove', payload: { itemId: 'q1', conversationId: 'c' } });
-  for (const operation of ['clear', 'resume', 'list']) {
+  assert.deepEqual(followUpQueueFrame('take', 'c', { itemId: ' q1 ' }), { type: 'conversation.queue.take', payload: { itemId: 'q1', conversationId: 'c' } });
+  assert.deepEqual(followUpQueueFrame('add', 'c', { itemId: 'q1', text: 'x', paused: true }).payload.paused, true);
+  assert.throws(() => followUpQueueFrame('take', 'c', {}), /消息 ID/);
+  for (const operation of ['clear', 'resume', 'list', 'pause']) {
     assert.deepEqual(followUpQueueFrame(operation, 'c', { itemId: 'q1' }), { type: `conversation.queue.${operation}`, payload: { conversationId: 'c' } });
   }
   assert.throws(() => followUpQueueFrame('add', 'c', { text: 'next' }), /消息 ID/);

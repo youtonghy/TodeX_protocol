@@ -81,6 +81,8 @@ export type ProviderCapabilities = {
   followUpQueue?: boolean;
   /** The daemon holds follow-ups for this provider (`conversation.queue.*`). */
   backendQueue?: boolean;
+  /** `conversation.queue.pause` / `.take` and `add` with `paused` (user-held pause). */
+  backendQueueControl?: boolean;
   /** Session-owned Pi surfaces require explicit support from the connected backend. */
   runtimeStop?: boolean;
   sessionCommands?: boolean;
@@ -245,6 +247,7 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     steering: capabilities.steering ?? false,
     followUpQueue: capabilities.followUpQueue ?? false,
     backendQueue: capabilities.backendQueue === true,
+    backendQueueControl: capabilities.backendQueueControl === true,
     runtimeStop: capabilities.runtimeStop === true,
     sessionCommands: capabilities.sessionCommands === true,
     extensionUi: capabilities.extensionUi ?? [],

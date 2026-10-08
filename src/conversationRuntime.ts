@@ -41,6 +41,16 @@ export function parseFollowUpQueue(value: unknown): FollowUpQueueState {
   return { items, paused, pauseReason: paused ? string(snapshot.pauseReason) : '', pauseMessage: paused ? string(snapshot.pauseMessage) : '',
     resumeAt: paused ? string(snapshot.resumeAt) : '' };
 }
+/** A queued prompt removed by `conversation.queue.take`, to be edited in the composer. `content` keeps the daemon's prompt content refs. */
+export type TakenFollowUp = { id: string; text: string; content: Record<string, unknown>[]; skills: { resourceId: string; name: string }[] };
+/** Reads the `item` of a `conversation.queue.take` result. */
+export function parseTakenFollowUp(value: unknown): TakenFollowUp | undefined {
+  const item = object(value); const id = string(item.id);
+  if (!id) return undefined;
+  return { id, text: string(item.text),
+    content: Array.isArray(item.content) ? item.content.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object' && !Array.isArray(entry)) : [],
+    skills: Array.isArray(item.skills) ? item.skills.flatMap((entry) => { const skill = object(entry); const resourceId = string(skill.resourceId); return resourceId ? [{ resourceId, name: string(skill.name) || resourceId }] : []; }) : [] };
+}
 type ExtensionEventIdentity = { runtimeId: string; eventId: string; sequence: number };
 export type ExtensionStatus = ExtensionEventIdentity & { key: string; text: string };
 export type ExtensionWidget = ExtensionEventIdentity & { key: string; lines: string[]; placement: 'aboveEditor' | 'belowEditor' };

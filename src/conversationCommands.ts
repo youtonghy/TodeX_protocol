@@ -58,13 +58,14 @@ export function promptContentFromAttachments(attachments: readonly { kind: strin
   });
 }
 
-export type FollowUpQueueOperation = 'add' | 'remove' | 'clear' | 'resume' | 'list';
+export type FollowUpQueueOperation = 'add' | 'remove' | 'clear' | 'resume' | 'list' | 'pause' | 'take';
 
 /** `conversation.queue.*` frames for the daemon-held follow-up queue. `add`
- * takes the `conversation.prompt` fields plus `itemId` (and `front`). */
+ * takes the `conversation.prompt` fields plus `itemId` (and `front`, `paused`).
+ * `pause` and `take` need `backendQueueControl`. */
 export function followUpQueueFrame(operation: FollowUpQueueOperation, conversationId: string, payload: Record<string, unknown> = {}): Omit<CommandFrame, 'id'> {
   if (!conversationId.trim()) throw new Error('队列操作需要会话 ID。');
-  if (operation === 'add' || operation === 'remove') {
+  if (operation === 'add' || operation === 'remove' || operation === 'take') {
     const itemId = typeof payload.itemId === 'string' ? payload.itemId.trim() : '';
     if (!itemId) throw new Error('队列操作需要消息 ID。');
     return { type: `conversation.queue.${operation}`, payload: operation === 'add'

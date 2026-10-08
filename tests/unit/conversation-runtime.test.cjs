@@ -407,6 +407,9 @@ test('backend follow-up queue snapshots replace the queue without touching the n
   state = apply(state, event(6, 'followups.updated', { items: [], paused: true, pauseReason: 'stale' })).state;
   assert.deepEqual(state.followUps, runtime.EMPTY_FOLLOW_UP_QUEUE);
   assert.deepEqual(runtime.parseFollowUpQueue(null), runtime.EMPTY_FOLLOW_UP_QUEUE);
+  assert.deepEqual(runtime.parseTakenFollowUp({ id: 'q1', text: 'hi', content: [{ type: 'text', text: 'x' }, 3], skills: [{ resourceId: 'r', name: '' }, {}] }),
+    { id: 'q1', text: 'hi', content: [{ type: 'text', text: 'x' }], skills: [{ resourceId: 'r', name: 'r' }] });
+  assert.equal(runtime.parseTakenFollowUp({}), undefined);
 });
 
 test('summary stubs keep folded entries and hydrate fills content by id', () => {

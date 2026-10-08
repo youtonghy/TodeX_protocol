@@ -661,7 +661,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
     }
   }
   if (type.startsWith('ssh.exec.')) projectSshExec(state, type.slice('ssh.exec.'.length), payload, event.time);
-  if (type === 'desktop.browser.action' || type === 'desktop.browser.grant') projectDesktopBrowser(state, type, payload, event.time);
+  if (type === 'desktop.browser.action' || type === 'desktop.browser.grant' || type === 'desktop.browser.tab') projectDesktopBrowser(state, type, payload, event.time);
   if (type === 'desktop.computer.action' || type === 'desktop.computer.session' || type === 'desktop.computer.grant') projectDesktopComputer(state, type, payload, event.time);
   if (type === 'memory.updated' || type === 'memory.created') {
     const id = string(payload.memoryId ?? payload.id);
@@ -869,6 +869,8 @@ export type DesktopBrowserState = {
   granted: boolean;
   /** The conversation has a tab open (the last successful open/close says so). */
   tabOpen?: boolean;
+  /** `actionId` of the call that started the current tab lifetime; cleared when the tab goes. */
+  tabSince?: string;
   /** The computer the browser runs on. */
   deviceName?: string;
   actions: Array<DesktopBrowserActionEvent & { time: string }>;
@@ -884,20 +886,32 @@ function projectDesktopBrowser(state: ConversationRuntime, type: string, payload
       ...state.desktopBrowser,
       granted,
       tabOpen: granted ? state.desktopBrowser.tabOpen : false,
+      tabSince: granted ? state.desktopBrowser.tabSince : undefined,
       deviceName: granted ? string(payload.deviceName) || undefined : undefined,
     };
+    return;
+  }
+  if (type === 'desktop.browser.tab') {
+    if (payload.status === 'closed') state.desktopBrowser = { ...state.desktopBrowser, tabOpen: false, tabSince: undefined };
     return;
   }
   const actionId = string(payload.actionId);
   if (!actionId || state.desktopBrowser.actions.some(action => action.actionId === actionId)) return;
   const action = { ...(payload as unknown as DesktopBrowserActionEvent), actionId, time };
+  const previous = state.desktopBrowser.tabOpen;
+  const tabOpen = action.ok
+    ? action.tool !== 'browser_close'
+    : action.error?.code === 'NO_TAB' ? false : previous ?? action.tool !== 'browser_open';
+  // A new lifetime starts when a successful call finds the tab not yet open:
+  // `browser_open` unless one was known open, any other call only after a
+  // known close (an unknown state may be a tab that was already there).
+  const startsTab = action.ok && tabOpen && (action.tool === 'browser_open' ? previous !== true : previous === false);
   state.desktopBrowser = {
     ...state.desktopBrowser,
     // Acting implies a grant even when the grant event lies below the window.
     granted: true,
-    tabOpen: action.ok
-      ? action.tool !== 'browser_close'
-      : action.error?.code === 'NO_TAB' ? false : state.desktopBrowser.tabOpen ?? action.tool !== 'browser_open',
+    tabOpen,
+    tabSince: !tabOpen ? undefined : startsTab ? actionId : state.desktopBrowser.tabSince,
     deviceName: string(payload.deviceName) || state.desktopBrowser.deviceName,
     actions: [...state.desktopBrowser.actions, action].slice(-DESKTOP_BROWSER_ACTION_LIMIT),
   };

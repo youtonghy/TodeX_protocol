@@ -15,6 +15,14 @@ test('agent browser tool names are MCP- and model-API-safe', () => {
   assert.equal(desktop.isAgentBrowserTool(undefined), false);
 });
 
+test('agent browser watch request ids are recognised by their prefix', () => {
+  assert.equal(desktop.isAgentBrowserWatchRequestId(`${desktop.AGENT_BROWSER_WATCH_ID_PREFIX}-lx3k-abc123`), true);
+  assert.equal(desktop.isAgentBrowserWatchRequestId(`${desktop.AGENT_BROWSER_UNWATCH_ID_PREFIX}-lx3k-abc123`), true);
+  assert.equal(desktop.isAgentBrowserWatchRequestId('abwx-1'), false);
+  assert.equal(desktop.isAgentBrowserWatchRequestId('conversation-send-1'), false);
+  assert.equal(desktop.isAgentBrowserWatchRequestId(undefined), false);
+});
+
 test('device-restricted permissions are answerable only on the named devices', () => {
   const { permissionDeviceGate } = require(path.join(compiledDir, 'todex.js'));
   const request = (data) => ({ requestId: 'p', requestType: 'permission', title: 't', event: {}, data });

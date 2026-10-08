@@ -804,6 +804,35 @@ test('desktop browser grants and actions collect without touching the timeline',
   assert.equal(many.desktopBrowser.actions[0].actionId, 'x5');
 });
 
+test('desktop browser tab lifetimes: closed events end them and only a fresh start sets tabSince', () => {
+  const action = (sequence, actionId, extra = {}) => event(sequence, 'desktop.browser.action', {
+    actionId, tool: 'browser_snapshot', ok: true, summary: 's', deviceId: 'dev_desk', deviceName: 'Desk', ...extra,
+  });
+  const open = (sequence, actionId) => action(sequence, actionId, { tool: 'browser_open' });
+  const opened = apply(empty(), open(1, 'a')).state;
+  assert.equal(opened.desktopBrowser.tabOpen, true);
+  assert.equal(opened.desktopBrowser.tabSince, 'a');
+  // Repeating open, acting, and failing keep the lifetime.
+  const same = apply(opened, open(2, 'b'), action(3, 'c'), action(4, 'd', { ok: false, error: { code: 'REF_NOT_FOUND', message: 'x' } })).state;
+  assert.equal(same.desktopBrowser.tabSince, 'a');
+  const closed = apply(same, event(5, 'desktop.browser.tab', { status: 'closed', reason: 'idle' })).state;
+  assert.equal(closed.desktopBrowser.tabOpen, false);
+  assert.equal(closed.desktopBrowser.tabSince, undefined);
+  assert.equal(closed.desktopBrowser.granted, true);
+  // Acting after a closed event starts a new lifetime; so does open.
+  assert.equal(apply(closed, action(6, 'e')).state.desktopBrowser.tabSince, 'e');
+  assert.equal(apply(closed, open(6, 'f')).state.desktopBrowser.tabSince, 'f');
+  // A failed action never starts one, and an unknown state is not a start.
+  assert.equal(apply(closed, action(6, 'g', { ok: false, error: { code: 'REF_NOT_FOUND', message: 'x' } })).state.desktopBrowser.tabSince, undefined);
+  assert.equal(apply(empty(), action(1, 'h')).state.desktopBrowser.tabSince, undefined);
+  assert.equal(apply(closed, event(6, 'desktop.browser.tab', { status: 'closed', reason: 'crash' })).state.desktopBrowser.tabOpen, false);
+  // Unknown statuses are ignored; closing and revoking clear the lifetime.
+  assert.equal(apply(opened, event(2, 'desktop.browser.tab', { status: 'weird' })).state.desktopBrowser.tabSince, 'a');
+  assert.equal(apply(opened, action(2, 'x', { tool: 'browser_close' })).state.desktopBrowser.tabSince, undefined);
+  assert.equal(apply(opened, event(2, 'desktop.browser.grant', { status: 'revoked' })).state.desktopBrowser.tabSince, undefined);
+  assert.equal(apply(opened, event(2, 'desktop.browser.grant', { status: 'granted', deviceName: 'Desk' })).state.desktopBrowser.tabSince, 'a');
+});
+
 test('computer use sessions and actions collect without touching the timeline', () => {
   const action = (sequence, actionId, extra = {}) => event(sequence, 'desktop.computer.action', {
     actionId, tool: 'computer_act', ok: true, summary: 'click e3', deviceId: 'dev_mac', deviceName: 'Mac', ...extra,

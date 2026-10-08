@@ -103,6 +103,17 @@ export type AgentBrowserFrame =
   | { conversationId: string; seq: number; mimeType: 'image/jpeg'; data: string; width: number; height: number; closed?: never }
   | { conversationId: string; closed: true };
 
+/** Request-id prefix of `agentBrowser.watch`; its failures are not user-facing. */
+export const AGENT_BROWSER_WATCH_ID_PREFIX = 'abw';
+/** Request-id prefix of `agentBrowser.unwatch`. */
+export const AGENT_BROWSER_UNWATCH_ID_PREFIX = 'abu';
+
+/** Whether a `server.error` id belongs to a live-view watch or unwatch request. */
+export function isAgentBrowserWatchRequestId(id: unknown): boolean {
+  return typeof id === 'string'
+    && (id.startsWith(`${AGENT_BROWSER_WATCH_ID_PREFIX}-`) || id.startsWith(`${AGENT_BROWSER_UNWATCH_ID_PREFIX}-`));
+}
+
 /** A failed tool call as journaled in `desktop.*.action` events. */
 export type ExecutorFailure = {
   code: ExecutorErrorCode | string;
@@ -295,6 +306,17 @@ export type DesktopBrowserGrantEvent = {
   deviceId?: string;
   deviceName?: string;
   reason?: string;
+};
+
+/**
+ * `desktop.browser.tab`: the conversation's tab is gone without a
+ * `browser_close` call. `idle` (unused too long), `crash` (the page or the
+ * browser died), `user` (closed from the UI), `revoked` (the grant was
+ * withdrawn), `restart` (the browser was restarted).
+ */
+export type DesktopBrowserTabEvent = {
+  status: 'closed';
+  reason: 'idle' | 'crash' | 'user' | 'revoked' | 'restart';
 };
 
 /** `permission.requested.kind` of the per-conversation first grant. */

@@ -84,6 +84,13 @@ export type AgentDesktopSettings = {
   browser?: AgentBrowserStatus;
 };
 
+/** An app on the daemon's host. `id` is what `computer_act open_app` takes
+ * (macOS bundle id, Windows exe name, Linux desktop id) and has no spaces. */
+export type HostApp = { id: string; name: string; running: boolean };
+
+/** `GET /v2/agent-desktop/computer/apps`: running apps first, then installed ones. */
+export type HostApps = { apps: HostApp[] };
+
 export type AgentBrowserProfile = { id: string; name: string; createdAt: number };
 
 /** `GET /v2/agent-browser/profiles` (and the result of every profile change). */

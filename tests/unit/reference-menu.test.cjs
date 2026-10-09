@@ -18,7 +18,7 @@ test('parses the menu stage from the text after @', () => {
 test('lists types in a fixed order, narrowed by prefix', () => {
   const describe = (type) => `d-${type}`;
   assert.deepEqual(menu.buildReferenceTypeSuggestions('', describe).map((item) => item.label),
-    ['@file:', '@folder:', '@chat:', '@skill:', '@mcp:', '@ssh:']);
+    ['@file:', '@folder:', '@chat:', '@skill:', '@mcp:', '@ssh:', '@app:']);
   assert.deepEqual(menu.buildReferenceTypeSuggestions('F', describe).map((item) => item.action.text), ['@file:', '@folder:']);
   assert.deepEqual(menu.buildReferenceTypeSuggestions('src/', describe), []);
   assert.equal(menu.buildReferenceTypeSuggestions('sk', describe)[0].description, 'd-skill');
@@ -72,4 +72,19 @@ test('capability suggestions keep one kind', () => {
   ];
   assert.deepEqual(menu.buildCapabilityReferenceSuggestions(items, 'mcp').map((item) => [item.label, item.action.item.id]), [['github', 'mcp:1']]);
   assert.deepEqual(menu.buildCapabilityReferenceSuggestions(items, 'skill').map((item) => item.label), ['review']);
+});
+
+test('app suggestions match name or id and insert an @app: id mention', () => {
+  const apps = [
+    { id: 'com.google.Chrome', name: 'Google Chrome', running: true },
+    { id: 'com.apple.TextEdit', name: 'TextEdit', running: false },
+  ];
+  assert.deepEqual(menu.buildAppReferenceSuggestions('googlech', apps).map((item) => [item.label, item.description, item.action.text]), [
+    ['Google Chrome', 'com.google.Chrome', '@app:com.google.Chrome '],
+  ]);
+  assert.deepEqual(menu.buildAppReferenceSuggestions('APPLE', apps).map((item) => item.id), ['app:com.apple.TextEdit']);
+  assert.deepEqual(menu.buildAppReferenceSuggestions('', apps, (app) => (app.running ? 'on' : 'off')).map((item) => item.description), ['on', 'off']);
+  assert.equal(menu.referenceMenuState('app:text').type, 'app');
+  const many = Array.from({ length: 20 }, (_, index) => ({ id: `a${index}`, name: `A${index}`, running: false }));
+  assert.equal(menu.buildAppReferenceSuggestions('', many).length, menu.REFERENCE_SUGGESTION_LIMIT);
 });

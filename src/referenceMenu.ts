@@ -1,3 +1,4 @@
+import type { HostApp } from './agentDesktop';
 import type { CapabilitySuggestion } from './capabilityCatalog';
 import { sshHostEndpoint, type SshHost } from './ssh';
 
@@ -7,7 +8,7 @@ import { sshHostEndpoint, type SshHost } from './ssh';
  * inserts the same text or chip as before (`@path`, a skill chip, `#mcp`, a
  * conversation export), so prompts sent to agents keep their format.
  */
-export const REFERENCE_TYPES = ['file', 'folder', 'chat', 'skill', 'mcp', 'ssh'] as const;
+export const REFERENCE_TYPES = ['file', 'folder', 'chat', 'skill', 'mcp', 'ssh', 'app'] as const;
 export type ReferenceType = (typeof REFERENCE_TYPES)[number];
 
 export const REFERENCE_SUGGESTION_LIMIT = 8;
@@ -130,6 +131,26 @@ export function buildSshReferenceSuggestions(query: string, hosts: readonly SshH
       label: host.alias,
       description: sshHostEndpoint(host),
       action: { kind: 'insert' as const, text: `@ssh:${host.alias} ` },
+    }));
+}
+
+/** `@app:` lists apps on the backend host (`GET /v2/agent-desktop/computer/apps`),
+ * matched on name or id. Picking one inserts `@app:<id>`; the agent passes the
+ * id to Computer Use (`open_app`), whose per-app approval still applies. */
+export function buildAppReferenceSuggestions(
+  query: string,
+  apps: readonly HostApp[],
+  describe: (app: HostApp) => string = (app) => app.id,
+): ReferenceSuggestion[] {
+  const needle = query.toLowerCase();
+  return apps
+    .filter((app) => !needle || app.name.toLowerCase().replace(/\s+/g, '').includes(needle) || app.id.toLowerCase().includes(needle))
+    .slice(0, REFERENCE_SUGGESTION_LIMIT)
+    .map((app) => ({
+      id: `app:${app.id}`,
+      label: app.name || app.id,
+      description: describe(app),
+      action: { kind: 'insert' as const, text: `@app:${app.id} ` },
     }));
 }
 

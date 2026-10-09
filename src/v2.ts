@@ -19,7 +19,7 @@ import type {
   SshKeysResponse,
   SshTestResult,
 } from './ssh';
-import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame } from './agentDesktop';
+import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -1200,6 +1200,14 @@ export class V2ApiClient {
       method: 'POST',
       ...(permission ? { body: JSON.stringify({ permission }) } : {}),
     });
+  }
+
+  /**
+   * Apps on the daemon's host for `@app:` mentions; 409 while Computer Use is off, 404 from
+   * daemons that predate the list (`ConnectionError.httpStatus`).
+   */
+  async listComputerApps(): Promise<HostApps> {
+    return this.request('/v2/agent-desktop/computer/apps');
   }
 
   /** The host's screen now; 404 (`ConnectionError.httpStatus`) unless the conversation controls it. */

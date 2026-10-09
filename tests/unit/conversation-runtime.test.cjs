@@ -912,18 +912,36 @@ test('background tasks keep the turn open until the model resumes or the turn en
     { provider: 'claude-code', providerMethod: 'task_notification', metadata: { taskId } });
   const waiting = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'message.delta', { text: 'CI is running.', turnId: 't' }), pending(3, ['a', 'b'])).state;
-  assert.deepEqual(waiting.backgroundTaskIds, ['a', 'b']);
+  assert.deepEqual(waiting.backgroundTasks, [{ taskId: 'a' }, { taskId: 'b' }]);
   assert.equal(waiting.activeTurnId, 't');
 
   // Each notification removes only its own task; usage frames are not model activity.
   const partly = apply(waiting, event(4, 'usage.updated', { turnId: 't' }), notified(5, 'a')).state;
-  assert.deepEqual(partly.backgroundTaskIds, ['b']);
+  assert.deepEqual(partly.backgroundTasks, [{ taskId: 'b' }]);
 
   // A follow-up turn of the model ends the wait; a later result re-announces it.
   const resumed = apply(partly, event(6, 'message.delta', { text: 'CI passed.', turnId: 't' })).state;
-  assert.deepEqual(resumed.backgroundTaskIds, []);
-  assert.deepEqual(apply(resumed, pending(7, ['b'])).state.backgroundTaskIds, ['b']);
+  assert.deepEqual(resumed.backgroundTasks, []);
+  assert.deepEqual(apply(resumed, pending(7, ['b'])).state.backgroundTasks, [{ taskId: 'b' }]);
 
   const done = apply(waiting, event(4, 'turn.completed', { turnId: 't' })).state;
-  assert.deepEqual(done.backgroundTaskIds, []);
+  assert.deepEqual(done.backgroundTasks, []);
+});
+
+test('background task details come from the pending snapshot and progress frames', () => {
+  const pending = event(1, 'provider.event', {
+    provider: 'claude-code', providerMethod: 'background_tasks_pending',
+    metadata: {
+      taskIds: ['sh'],
+      tasks: [{ taskId: 'sh', description: 'Watch CI', taskType: 'local_bash', toolUseId: 'toolu_1', startedAt: '2026-10-09T00:00:00Z', extra: 1 }, { description: 'no id' }],
+    },
+  });
+  const waiting = apply(empty(), event(0, 'turn.started', { turnId: 't' }), pending).state;
+  assert.deepEqual(waiting.backgroundTasks, [{ taskId: 'sh', description: 'Watch CI', taskType: 'local_bash', toolUseId: 'toolu_1', startedAt: '2026-10-09T00:00:00Z' }]);
+
+  const progressed = apply(waiting, event(2, 'provider.event', {
+    provider: 'claude-code', providerMethod: 'task_progress', metadata: { taskId: 'sh', description: 'CI build step 3' },
+  })).state;
+  assert.equal(progressed.backgroundTasks[0].description, 'CI build step 3');
+  assert.equal(progressed.backgroundTasks[0].toolUseId, 'toolu_1');
 });

@@ -124,9 +124,21 @@ export type ConversationRuntime = {
   lastProgressAt: string | null;
   /** Provider background tasks (e.g. a CI watcher) that keep the turn open
    * after the model has stopped answering. Set by `background_tasks_pending`,
-   * shrunk by `task_notification`, emptied once the model resumes or the turn
-   * ends — so a non-empty list means the conversation is only waiting. */
-  backgroundTaskIds: string[];
+   * refreshed by `task_progress`, shrunk by `task_notification`, emptied once
+   * the model resumes or the turn ends — so a non-empty list means the
+   * conversation is only waiting. */
+  backgroundTasks: BackgroundTask[];
+};
+/** One background task as the provider described it; every field but the id
+ * is optional because older backends only announced ids. `toolUseId` names the
+ * tool call that launched it, `taskType` the provider's kind (Claude:
+ * `local_bash`, `local_agent`, `remote_agent`). */
+export type BackgroundTask = {
+  taskId: string;
+  description?: string;
+  taskType?: string;
+  toolUseId?: string;
+  startedAt?: string;
 };
 export function createConversationRuntime(conversationId: string, workspaceId: string, appliedSequence = 0): ConversationRuntime {
   return {
@@ -136,7 +148,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false, followUps: EMPTY_FOLLOW_UP_QUEUE,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
-    backgroundTaskIds: [],
+    backgroundTasks: [],
   };
 }
 
@@ -211,13 +223,34 @@ function projectBackgroundTasks(state: ConversationRuntime, type: string, payloa
   if (type === 'provider.event') {
     const metadata = object(payload.metadata);
     if (payload.providerMethod === 'background_tasks_pending') {
-      state.backgroundTaskIds = Array.isArray(metadata.taskIds) ? metadata.taskIds.filter((id): id is string => typeof id === 'string') : [];
-    } else if (payload.providerMethod === 'task_notification' && state.backgroundTaskIds.length > 0) {
-      state.backgroundTaskIds = state.backgroundTaskIds.filter(id => id !== metadata.taskId);
+      state.backgroundTasks = pendingBackgroundTasks(metadata);
+    } else if (payload.providerMethod === 'task_progress' && state.backgroundTasks.length > 0) {
+      const description = string(metadata.description);
+      if (description) {
+        state.backgroundTasks = state.backgroundTasks.map(task => task.taskId === metadata.taskId ? { ...task, description } : task);
+      }
+    } else if (payload.providerMethod === 'task_notification' && state.backgroundTasks.length > 0) {
+      state.backgroundTasks = state.backgroundTasks.filter(task => task.taskId !== metadata.taskId);
     }
-  } else if (state.backgroundTaskIds.length > 0 && MODEL_ACTIVITY_EVENT.test(type)) {
-    state.backgroundTaskIds = [];
+  } else if (state.backgroundTasks.length > 0 && MODEL_ACTIVITY_EVENT.test(type)) {
+    state.backgroundTasks = [];
   }
+}
+function pendingBackgroundTasks(metadata: RecordValue): BackgroundTask[] {
+  // Backends that predate `tasks` only send `taskIds`.
+  const source: unknown[] = Array.isArray(metadata.tasks) ? metadata.tasks
+    : Array.isArray(metadata.taskIds) ? metadata.taskIds.map(taskId => ({ taskId })) : [];
+  return source.flatMap((value): BackgroundTask[] => {
+    const item = object(value);
+    const taskId = string(item.taskId);
+    if (!taskId) return [];
+    const task: BackgroundTask = { taskId };
+    for (const key of ['description', 'taskType', 'toolUseId', 'startedAt'] as const) {
+      const field = string(item[key]);
+      if (field) task[key] = field;
+    }
+    return [task];
+  });
 }
 
 function permissionScope(payload: RecordValue): ExtensionScope {

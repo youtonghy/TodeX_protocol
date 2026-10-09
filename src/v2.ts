@@ -903,6 +903,11 @@ export class V2ApiClient {
     return this.request(`/v2/providers/${encodeURIComponent(provider)}/install`, { method: 'POST' });
   }
 
+  /** Removes TodeX's approval hook and MCP entries from the Antigravity global config; the next Antigravity turn installs them again. */
+  async removeAntigravityIntegration(): Promise<{ removed: boolean }> {
+    return this.request('/v2/providers/antigravity/integration', { method: 'DELETE' });
+  }
+
   async getCliUpgrade(operationId: string): Promise<CliUpgradeOperation> {
     return this.request(`/v2/providers/upgrades/${encodeURIComponent(operationId)}`);
   }

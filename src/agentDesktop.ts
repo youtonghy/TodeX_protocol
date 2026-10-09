@@ -48,6 +48,9 @@ export type ComputerHostStatus = {
   permissions: { screen: boolean; accessibility: boolean };
 };
 
+/** One OS permission of {@link AgentComputerStatus.permissions}. */
+export type AgentComputerPermission = 'screen' | 'accessibility';
+
 /** The daemon's pinned Chromium (Chrome for Testing). */
 export type AgentBrowserInstall = {
   version: string;

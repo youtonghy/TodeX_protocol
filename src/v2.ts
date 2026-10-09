@@ -19,7 +19,7 @@ import type {
   SshKeysResponse,
   SshTestResult,
 } from './ssh';
-import type { AgentBrowserProfile, AgentBrowserProfiles, AgentDesktopSettings, AgentShot, ComputerFrame } from './agentDesktop';
+import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame } from './agentDesktop';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -1184,9 +1184,16 @@ export class V2ApiClient {
     return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ computerEnabled }) });
   }
 
-  /** Shows the OS permission prompts (Screen Recording, Accessibility) on the daemon's host. */
-  async requestComputerPermissions(): Promise<AgentDesktopSettings> {
-    return this.request('/v2/agent-desktop/computer/permissions', { method: 'POST' });
+  /**
+   * Shows the OS prompt for one permission (Screen Recording or Accessibility) on the daemon's
+   * host; without `permission`, for each missing one. macOS asks only once, so a permission still
+   * missing afterwards also opens its System Settings pane.
+   */
+  async requestComputerPermissions(permission?: AgentComputerPermission): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop/computer/permissions', {
+      method: 'POST',
+      ...(permission ? { body: JSON.stringify({ permission }) } : {}),
+    });
   }
 
   /** The host's screen now; 404 (`ConnectionError.httpStatus`) unless the conversation controls it. */

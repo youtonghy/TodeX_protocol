@@ -525,6 +525,10 @@ test('returns stable provider icon metadata for known and unknown agents', () =>
     parity.PROVIDER_ICON_METADATA['grok-build'],
   );
   assert.equal(parity.providerIconMetadata('my-codex-wrapper').label, 'Codex CLI');
+  assert.deepEqual(
+    parity.providerIconMetadata('agy'),
+    parity.PROVIDER_ICON_METADATA.antigravity,
+  );
   const unknown = parity.providerIconMetadata('custom-agent');
   assert.equal(unknown.id, 'custom-agent');
   assert.equal(unknown.icon, 'cube-outline');

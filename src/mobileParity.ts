@@ -353,6 +353,7 @@ function providerLabel(provider: string): string {
   if (id === 'grok-build' || id === 'grok') return 'Grok Build';
   if (id === 'devin' || id === 'devin-cli' || id === 'devin_cli') return 'Devin';
   if (id === 'opencode' || id === 'open-code' || id === 'open_code') return 'OpenCode';
+  if (id === 'antigravity' || id === 'agy' || id === 'antigravity-cli') return 'Antigravity';
   return provider.trim() || 'Agent';
 }
 
@@ -1717,6 +1718,15 @@ export const PROVIDER_ICON_METADATA: Readonly<Record<string, ProviderIconMetadat
     backgroundColor: '#ece7f6',
     accessibilityLabel: 'OpenCode',
   },
+  antigravity: {
+    id: 'antigravity',
+    label: 'Antigravity',
+    icon: 'planet-outline',
+    iconName: 'planet-outline',
+    color: '#3b6fd8',
+    backgroundColor: '#e6eefc',
+    accessibilityLabel: 'Antigravity',
+  },
 });
 
 function canonicalProviderId(value: string): string {
@@ -1728,6 +1738,7 @@ function canonicalProviderId(value: string): string {
   if (id === 'grok-build' || id === 'grok' || id === 'grok_build') return 'grok-build';
   if (id === 'devin' || id === 'devin-cli' || id === 'devin_cli') return 'devin';
   if (id === 'opencode' || id === 'open-code' || id === 'open_code') return 'opencode';
+  if (id === 'antigravity' || id === 'agy' || id === 'antigravity-cli') return 'antigravity';
   return id;
 }
 

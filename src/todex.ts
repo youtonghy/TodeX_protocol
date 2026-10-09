@@ -1000,11 +1000,91 @@ export type KanbanTask = {
   conversationIds?: string[];
   /** Manual order within the workspace status group; absent on legacy rows. */
   sortOrder?: number;
+  /** Timed start/send the backend runs; cancelled through its status, never
+   * dropped, so the backend can tell it from a client that predates it. */
+  schedule?: KanbanTaskSchedule;
   createdAt: number;
   updatedAt: number;
   /** Tombstone timestamp; deletions sync through it instead of disappearing. */
   deletedAt?: number;
 };
+
+/** `start` opens a new conversation for the task; `send` posts to one of
+ * its conversations (queued behind a running turn). */
+export type KanbanScheduleAction = 'start' | 'send';
+/** `running`, `done` and `failed` are written by the backend only. */
+export type KanbanScheduleStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+
+export type KanbanTaskSchedule = {
+  /** Client-chosen id; also keys the prompt so a run never sends twice. */
+  id: string;
+  /** Wall-clock time in the backend's time zone, `YYYY-MM-DDTHH:MM`. */
+  at: string;
+  action: KanbanScheduleAction;
+  /** Backend conversation id the `send` action targets. */
+  conversationId?: string;
+  text: string;
+  provider?: string;
+  providerProfile?: string;
+  model?: string;
+  reasoningEffort?: string;
+  permissionMode?: string;
+  workMode?: string;
+  status: KanbanScheduleStatus;
+  firedAt?: number;
+  resultConversationId?: string;
+  /** Absent on a finished `send` that was queued behind a running turn. */
+  turnId?: string;
+  error?: string;
+};
+
+/** The backend's local time zone, which schedule times are written in. */
+export type KanbanTimeZone = { name?: string; offsetMinutes: number };
+
+export const KANBAN_SCHEDULE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const KANBAN_SCHEDULE_STATUSES: readonly KanbanScheduleStatus[] = ['pending', 'running', 'done', 'failed', 'cancelled'];
+const KANBAN_SCHEDULE_OPTIONAL_FIELDS = [
+  'conversationId', 'provider', 'providerProfile', 'model', 'reasoningEffort', 'permissionMode', 'workMode',
+  'resultConversationId', 'turnId', 'error',
+] as const;
+
+export function normalizeKanbanTaskSchedule(value: unknown): KanbanTaskSchedule | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+  const id = stringField(value, ['id']).trim();
+  const at = stringField(value, ['at']).trim();
+  const action = stringField(value, ['action']);
+  const status = stringField(value, ['status']);
+  const text = stringField(value, ['text']).trim();
+  if (
+    !id || !text || !KANBAN_SCHEDULE_TIME_PATTERN.test(at)
+    || (action !== 'start' && action !== 'send')
+    || !(KANBAN_SCHEDULE_STATUSES as readonly string[]).includes(status)
+  ) {
+    return undefined;
+  }
+  const schedule: KanbanTaskSchedule = { id, at, action, text, status: status as KanbanScheduleStatus };
+  for (const field of KANBAN_SCHEDULE_OPTIONAL_FIELDS) {
+    const fieldValue = stringField(value, [field]).trim();
+    if (fieldValue) schedule[field] = fieldValue;
+  }
+  const firedAt = numberField(value, ['firedAt']);
+  if (firedAt) schedule.firedAt = firedAt;
+  if (action === 'send' && !schedule.conversationId) {
+    return undefined;
+  }
+  return schedule;
+}
+
+export function parseKanbanTimeZone(value: unknown): KanbanTimeZone | null {
+  const zone = isObject(value) ? value.timeZone : undefined;
+  if (!isObject(zone) || typeof zone.offsetMinutes !== 'number' || !Number.isFinite(zone.offsetMinutes)) {
+    return null;
+  }
+  const name = typeof zone.name === 'string' && zone.name.trim() ? zone.name.trim() : undefined;
+  return { ...(name ? { name } : {}), offsetMinutes: zone.offsetMinutes };
+}
 
 const KANBAN_DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -1040,6 +1120,7 @@ export function normalizeKanbanTask(value: unknown): KanbanTask | null {
   }
   const rawOrder = (value as Record<string, unknown>).sortOrder ?? (value as Record<string, unknown>).sort_order;
   const sortOrder = typeof rawOrder === 'number' && Number.isFinite(rawOrder) ? rawOrder : undefined;
+  const schedule = normalizeKanbanTaskSchedule((value as Record<string, unknown>).schedule);
   return {
     id,
     workspaceId,
@@ -1050,6 +1131,7 @@ export function normalizeKanbanTask(value: unknown): KanbanTask | null {
     status: normalizeKanbanTaskStatus(stringField(value, ['status'])),
     ...(conversationIds.length ? { conversationId: conversationIds[0], conversationIds } : {}),
     ...(sortOrder !== undefined ? { sortOrder } : {}),
+    ...(schedule ? { schedule } : {}),
     createdAt,
     updatedAt,
     ...(deletedAt ? { deletedAt } : {}),
@@ -1071,7 +1153,9 @@ export function prepareKanbanSyncPayload(tasks: KanbanTask[]): KanbanTask[] {
   return tasks
     .map(normalizeKanbanTask)
     .filter((task): task is KanbanTask => Boolean(task))
-    .map((task) => ({ ...task, backendConnectionId: undefined }))
+    // An explicit (possibly empty) list: the backend keeps the stored one
+    // when the field is absent, as older clients omit it.
+    .map((task) => ({ ...task, backendConnectionId: undefined, conversationIds: task.conversationIds ?? [] }))
     .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
 }
 

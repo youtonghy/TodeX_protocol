@@ -26,12 +26,13 @@ function pagedReplay(pageSize) {
   return { replay, calls };
 }
 
-test('fetches every page and keeps only user and assistant messages', async () => {
+test('fetches every page and keeps the messages and the steps between them', async () => {
   const { replay, calls } = pagedReplay(2);
   const entries = await exporter.fetchConversationTranscript(replay, 'c', 'w');
   assert.deepEqual(calls.map(call => call.after), [0, 2, 4]);
   assert.deepEqual(entries.map(entry => [entry.kind, entry.subtitle]),
-    [['outgoing', 'Fix the **build**'], ['incoming', 'Looking'], ['incoming', 'Done.']]);
+    [['outgoing', 'Fix the **build**'], ['incoming', 'Looking'],
+      ['system', '{"turnId":"t","toolCallId":"x","toolName":"ls"}'], ['incoming', 'Done.']]);
 });
 
 test('reports a journal that stops advancing instead of looping', async () => {
@@ -39,10 +40,48 @@ test('reports a journal that stops advancing instead of looping', async () => {
   await assert.rejects(exporter.fetchConversationTranscript(replay, 'c', 'w'), /gap/);
 });
 
-test('renders messages under role headings', async () => {
+test('renders one heading per role run with the steps quoted inside it', async () => {
   const entries = await exporter.fetchConversationTranscript(pagedReplay(10).replay, 'c', 'w');
   assert.equal(exporter.conversationTranscriptMarkdown(entries, { title: 'Build fix' }),
-    '# Build fix\n\n## User\n\nFix the **build**\n\n## Assistant\n\nLooking\n\n## Assistant\n\nDone.\n');
+    '# Build fix\n\n## User\n\nFix the **build**\n\n## Assistant\n\nLooking\n\n> **Tool call: ls** (unknown)\n\nDone.\n');
+});
+
+test('quotes tool calls with their arguments, results and errors in code blocks', async () => {
+  const journal = [
+    event(1, 'message.created', { role: 'user', content: 'Check' }),
+    event(2, 'turn.started', { turnId: 't' }),
+    event(3, 'thought.delta', { turnId: 't', text: 'Read the file\nthen answer' }),
+    event(4, 'tool.started', { turnId: 't', toolCallId: 'a', toolName: 'read', arguments: { path: 'README.md' } }),
+    event(5, 'tool.completed', { turnId: 't', toolCallId: 'a', toolName: 'read', arguments: { path: 'README.md' },
+      result: 'Run:\n```sh\nmake\n```' }),
+    event(6, 'tool.completed', { turnId: 't', toolCallId: 'b', toolName: 'bash', arguments: { command: 'make' },
+      isError: true, error: 'exit 2' }),
+    event(7, 'message.delta', { turnId: 't', text: 'It fails.' }),
+    event(8, 'turn.completed', { turnId: 't' }),
+  ];
+  const entries = await exporter.fetchConversationTranscript(forwardReplay(journal), 'c', 'w');
+  assert.equal(exporter.conversationTranscriptMarkdown(entries, { title: 'T' }), [
+    '# T', '', '## User', '', 'Check', '', '## Assistant', '',
+    '> **Reasoning**', '>', '> Read the file', '> then answer', '',
+    '> **Tool call: read** (completed) — README.md', '>', '> Arguments:', '>',
+    '> ```json', '> {', '>   "path": "README.md"', '> }', '> ```', '>', '> Result:', '>',
+    '> ````', '> Run:', '> ```sh', '> make', '> ```', '> ````', '',
+    '> **Tool call: bash** (failed) — make', '>', '> Arguments:', '>',
+    '> ```json', '> {', '>   "command": "make"', '> }', '> ```', '>', '> Error:', '>', '> ```', '> exit 2', '> ```', '',
+    'It fails.', '',
+  ].join('\n'));
+});
+
+test('marks steps whose details were not loaded or cannot be decrypted', () => {
+  const base = { raw: '', at: 0, title: '', subtitle: '' };
+  const entries = exporter.transcriptEntries([
+    { ...base, id: 'u', kind: 'outgoing', subtitle: 'Hi', sequence: 1 },
+    { ...base, id: 's', kind: 'system', title: '工具调用', category: 'tool', detailStub: true, sequence: 2 },
+    { ...base, id: 'l', kind: 'system', title: '历史已加密', subtitle: 'locked', detailLocked: true, sequence: 3 },
+    { ...base, id: 'n', kind: 'system', title: 'Copied last response', subtitle: 'copied', sequence: 4 },
+  ]);
+  assert.equal(exporter.conversationTranscriptMarkdown(entries, { title: 'T' }),
+    '# T\n\n## User\n\nHi\n\n## Assistant\n\n> **Tool call** (details not loaded)\n\n> **Encrypted step** — locked\n');
 });
 
 test('drops the oldest messages to fit the byte budget', () => {
@@ -115,13 +154,18 @@ test('tail-first export renders exactly what the full replay renders when the bu
         expected, `page ${pageSize}, budget ${maxBytes}`);
     }
   }
-  assert.deepEqual(fullEntries.map(entry => entry.subtitle), ['First question', 'Alpha beta gamma.', 'After the tool.',
+  assert.deepEqual(fullEntries.map(entry => entry.subtitle), ['First question', 'Alpha beta gamma.',
+    '{"turnId":"t1","toolCallId":"x","toolName":"ls"}', 'After the tool.',
     'Second **question**', 'One two three.', 'Third', 'Final answer.']);
 });
 
 test('tail-first export stops reading once the newest messages fill the budget', async () => {
   const fullEntries = await exporter.fetchConversationTranscript(forwardReplay(longJournal), 'c', 'w');
-  const fullSections = fullEntries.map(entry => `## ${entry.kind === 'outgoing' ? 'User' : 'Assistant'}\n\n${entry.subtitle}\n`);
+  // Every suffix of the transcript as rendered on its own: the oldest kept
+  // entry opens with its role heading even inside an assistant run.
+  const body = (entries) => exporter.conversationTranscriptMarkdown(entries, { title: 'Long' }).slice('# Long\n\n'.length);
+  const wholeTails = fullEntries.map((_, index) => body(fullEntries.slice(index)));
+  const newest = body(fullEntries.slice(-1));
   let stoppedEarly = 0;
   for (let maxBytes = 40; maxBytes <= 260; maxBytes += 5) {
     const expected = exporter.conversationTranscriptMarkdown(fullEntries, { title: 'Long', maxBytes });
@@ -137,12 +181,11 @@ test('tail-first export stops reading once the newest messages fill the budget',
       stoppedEarly++;
       assert.ok(calls.at(-1) > 1, 'older pages stay unread');
       assert.match(markdown, /^# Long\n\n> Earlier messages omitted\.\n/);
-      // Only whole messages, the newest ones, in journal order — or the
+      // Only whole entries, the newest ones, in journal order — or the
       // beginning of the newest one when it alone exceeds the budget.
-      const body = markdown.slice('# Long\n\n> Earlier messages omitted.\n\n'.length);
-      const wholeTails = fullSections.map((_, index) => fullSections.slice(index).join('\n'));
-      assert.ok(wholeTails.includes(body) || fullSections.at(-1).startsWith(body.replace(/\n$/, '')),
-        `page ${pageSize}, budget ${maxBytes}: ${JSON.stringify(body)}`);
+      const kept = markdown.slice('# Long\n\n> Earlier messages omitted.\n\n'.length);
+      assert.ok(wholeTails.includes(kept) || newest.startsWith(kept.replace(/\n$/, '')),
+        `page ${pageSize}, budget ${maxBytes}: ${JSON.stringify(kept)}`);
     }
   }
   assert.ok(stoppedEarly > 0);

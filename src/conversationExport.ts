@@ -1,5 +1,6 @@
 import { applyConversationRuntimeEvents, createConversationRuntime, prependConversationRuntimeEvents, type ConversationRuntime } from './conversationRuntime';
-import type { TimelineEntry } from './mobileParity';
+import { isVisibleConversationEntry, type TimelineEntry } from './mobileParity';
+import { describeToolCall } from './toolPresentation';
 import type { ConversationReplay } from './v2';
 
 type Replay = (conversationId: string, afterSequence: number, limit: number) => Promise<ConversationReplay>;
@@ -20,14 +21,14 @@ export type ConversationTranscriptOptions = {
   olderUnread?: boolean;
 };
 
-/** User and assistant messages read from the journal tail. `olderUnread`
- * means earlier messages exist but were not fetched because the newer ones
+/** Transcript entries read from the journal tail. `olderUnread` means
+ * earlier entries exist but were not fetched because the newer ones
  * already fill the byte budget. */
 export type ConversationTranscript = { entries: TimelineEntry[]; olderUnread: boolean };
 
-/** Replays the whole journal and returns the user and assistant messages in
- * order. Process steps (tools, reasoning, approvals) are not part of a
- * transcript. Prefer `fetchConversationTranscriptTail` when the output has a
+/** Replays the whole journal and returns the transcript entries (see
+ * `transcriptEntries`) in order. Replay with full detail: summary pages leave
+ * process steps as empty placeholders. Prefer `fetchConversationTranscriptTail` when the output has a
  * byte budget: it only reads the history the budget can show. */
 export async function fetchConversationTranscript(replay: Replay, conversationId: string, workspaceId: string): Promise<TimelineEntry[]> {
   let state = createConversationRuntime(conversationId, workspaceId);
@@ -45,8 +46,8 @@ export async function fetchConversationTranscript(replay: Replay, conversationId
   throw new Error('Conversation history is too long to export');
 }
 
-/** Pages the journal backwards from its tail and returns the user and
- * assistant messages in order, like `fetchConversationTranscript`. With
+/** Pages the journal backwards from its tail and returns the transcript
+ * entries in order, like `fetchConversationTranscript`. With
  * `maxBytes` it stops once the messages read so far already overflow the
  * budget `conversationTranscriptMarkdown` applies, so a long conversation
  * reads (and decrypts) only its newest pages. Pages merge through the same
@@ -93,56 +94,143 @@ export async function fetchConversationTranscriptTail(
   throw new Error('Conversation history is too long to export');
 }
 
+/** Process steps a transcript keeps besides the messages, by category.
+ * Events without a block category are recognized by their projected title,
+ * like `isStepProgressEntry` does. Usage rows and client-local notices carry
+ * nothing worth debugging a run with. */
+const STEP_TITLES: Record<string, string> = {
+  '工具调用': 'tool', '思考中': 'reasoning', '请求权限批准': 'approval', '运行异常': 'error',
+  '执行步骤': 'status', '步骤完成': 'status',
+};
+const STEP_CATEGORIES: ReadonlySet<string> = new Set(['assistant_progress', ...Object.values(STEP_TITLES)]);
+const stepCategory = (entry: TimelineEntry) => entry.category ?? STEP_TITLES[entry.title] ?? '';
+
+function isTranscriptEntry(entry: TimelineEntry): boolean {
+  if (entry.kind === 'outgoing' || entry.kind === 'incoming') return Boolean(entry.subtitle.trim());
+  if (entry.detailLocked) return true;
+  if (entry.category !== 'assistant_progress' && !isVisibleConversationEntry(entry)) return false;
+  return STEP_CATEGORIES.has(stepCategory(entry)) && Boolean(entry.subtitle.trim() || entry.detailStub);
+}
+
+/** User and assistant messages plus the process steps between them (tool
+ * calls, reasoning, approvals, errors), in journal order. */
 export function transcriptEntries(timeline: readonly TimelineEntry[]): TimelineEntry[] {
   return timeline
-    .filter((entry) => (entry.kind === 'outgoing' || entry.kind === 'incoming') && entry.subtitle.trim())
+    .filter(isTranscriptEntry)
     .sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0) || left.at - right.at);
 }
 
 const encoder = new TextEncoder();
 const byteSize = (text: string) => encoder.encode(text).length;
 const transcriptHeader = (options: ConversationTranscriptOptions) => `# ${options.title.trim() || 'Conversation'}\n`;
-const transcriptSection = (entry: TimelineEntry) =>
-  `## ${entry.kind === 'outgoing' ? 'User' : 'Assistant'}\n\n${entry.subtitle.trim()}\n`;
 const omittedNote = (count: number, olderUnread?: boolean) =>
   olderUnread ? '> Earlier messages omitted.\n' : `> ${count} earlier message(s) omitted.\n`;
+const roleOf = (entry: TimelineEntry) => entry.kind === 'outgoing' ? 'User' : 'Assistant';
+
+/** A fenced code block whose fence outruns any backtick run in `text`. */
+function fenced(text: string, language = ''): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${fence}${language}\n${text.replace(/\n$/, '')}\n${fence}`;
+}
+
+const isJson = (text: string) => {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const STEP_LABELS: Record<string, string> = {
+  assistant_progress: 'Progress', reasoning: 'Reasoning', tool: 'Tool call',
+  approval: 'Approval request', error: 'Error', status: 'Status',
+};
+
+/** A tool call with its arguments, result and error in code blocks. */
+function toolStep(subtitle: string): string {
+  const tool = describeToolCall(subtitle);
+  const summary = tool.summary ? ` — ${tool.summary.replace(/\s+/g, ' ')}` : '';
+  const parts = [`**Tool call: ${tool.name || tool.kind}** (${tool.status})${summary}`];
+  if (tool.argsText) parts.push(`Arguments:\n\n${fenced(tool.argsText, isJson(tool.argsText) ? 'json' : '')}`);
+  if (tool.outputText) parts.push(`Result:\n\n${fenced(tool.outputText, isJson(tool.outputText) ? 'json' : '')}`);
+  if (tool.errorText) parts.push(`Error:\n\n${fenced(tool.errorText)}`);
+  return parts.join('\n\n');
+}
+
+/** A process step as a quote, so it stays apart from the assistant's words. */
+function stepMarkdown(entry: TimelineEntry): string {
+  const text = entry.subtitle.trim();
+  const category = stepCategory(entry);
+  const label = STEP_LABELS[category] ?? entry.title;
+  const body = entry.detailLocked ? `**Encrypted step** — ${text}`
+    : entry.detailStub ? `**${label}** (details not loaded)`
+    : category === 'tool' ? toolStep(text)
+    : category === 'error' || category === 'approval' ? `**${label}**\n\n${fenced(text)}`
+    : category === 'status' ? `**${label}:** ${text}`
+    : `**${label}**\n\n${text}`;
+  return `${body.split('\n').map((line) => line ? `> ${line}` : '>').join('\n')}\n`;
+}
+
+/** An entry without its role heading. Messages are already Markdown and are
+ * embedded verbatim; process steps are quoted. */
+const entryBody = (entry: TimelineEntry) =>
+  entry.kind === 'system' ? stepMarkdown(entry) : `${entry.subtitle.trim()}\n`;
+
+/** Each entry rendered with its role heading (`headed`) and as it appears
+ * after the previous entry (`inline`), where a run of the same role shares
+ * one heading. */
+function transcriptSections(entries: readonly TimelineEntry[]): { headed: string[]; inline: string[] } {
+  const headed = entries.map((entry) => `## ${roleOf(entry)}\n\n${entryBody(entry)}`);
+  const inline = entries.map((entry, index) =>
+    index > 0 && roleOf(entries[index - 1]) === roleOf(entry) ? entryBody(entry) : headed[index]);
+  return { headed, inline };
+}
 
 /** Index of the oldest section kept when the newest ones fill `maxBytes`,
- * and the bytes left after them. Reserves room for the omission note. */
-function keptSections(sections: readonly string[], options: ConversationTranscriptOptions & { maxBytes: number }): { first: number; budget: number } {
-  let budget = options.maxBytes - byteSize(transcriptHeader(options)) - byteSize(omittedNote(sections.length, options.olderUnread)) - 2;
-  let first = sections.length;
+ * and the bytes left after them. The oldest kept section always carries its
+ * role heading. Reserves room for the omission note. */
+function keptSections(
+  sections: { headed: readonly string[]; inline: readonly string[] },
+  options: ConversationTranscriptOptions & { maxBytes: number },
+): { first: number; budget: number } {
+  const { headed, inline } = sections;
+  const budget = options.maxBytes - byteSize(transcriptHeader(options)) - byteSize(omittedNote(headed.length, options.olderUnread)) - 2;
+  let first = headed.length;
+  let used = 0;
   while (first > 0) {
-    const cost = byteSize(sections[first - 1]) + 1;
+    const below = first < headed.length ? used - byteSize(headed[first]) + byteSize(inline[first]) : 0;
+    const cost = below + byteSize(headed[first - 1]) + 1;
     if (cost > budget) break;
-    budget -= cost;
+    used = cost;
     first--;
   }
-  return { first, budget };
+  return { first, budget: budget - used };
 }
 
 /** Whether the budget already drops at least one of `entries`. */
 function overflowsBudget(entries: readonly TimelineEntry[], options: ConversationTranscriptOptions): boolean {
   return Boolean(options.maxBytes) && entries.length > 0
-    && keptSections(entries.map(transcriptSection), { ...options, maxBytes: options.maxBytes! }).first > 0;
+    && keptSections(transcriptSections(entries), { ...options, maxBytes: options.maxBytes! }).first > 0;
 }
 
-/** Renders a transcript as Markdown. Message bodies are already Markdown, so
- * they are embedded verbatim under a role heading. */
+/** Renders a transcript as Markdown: messages under role headings, process
+ * steps quoted between them with tool arguments and results in code blocks. */
 export function conversationTranscriptMarkdown(entries: readonly TimelineEntry[], options: ConversationTranscriptOptions): string {
   const header = transcriptHeader(options);
-  const sections = entries.map(transcriptSection);
+  const sections = transcriptSections(entries);
   const maxBytes = options.maxBytes;
-  if (!maxBytes) return [header, ...(options.olderUnread ? [omittedNote(0, true)] : []), ...sections].join('\n');
-  // Keep the newest messages that fit, reserving room for the omission note.
+  if (!maxBytes) return [header, ...(options.olderUnread ? [omittedNote(0, true)] : []), ...sections.inline].join('\n');
+  // Keep the newest entries that fit, reserving room for the omission note.
   const fit = keptSections(sections, { ...options, maxBytes });
   let first = fit.first;
-  const kept = sections.slice(first);
-  if (!kept.length && sections.length) {
-    // The newest message alone exceeds the budget: keep its beginning.
-    const truncated = new TextDecoder().decode(encoder.encode(sections[sections.length - 1]).slice(0, Math.max(0, fit.budget - 1)));
-    kept.push(`${truncated.replace(/�$/, '')}\n`);
-    first = sections.length - 1;
+  const kept = first < entries.length ? [sections.headed[first], ...sections.inline.slice(first + 1)] : [];
+  if (!kept.length && entries.length) {
+    // The newest entry alone exceeds the budget: keep its beginning.
+    const truncated = new TextDecoder().decode(encoder.encode(sections.headed[entries.length - 1]).slice(0, Math.max(0, fit.budget - 1)));
+    kept.push(`${truncated.replace(/\uFFFD$/, '')}\n`);
+    first = entries.length - 1;
   }
   return [header, ...(first > 0 || options.olderUnread ? [omittedNote(first, options.olderUnread)] : []), ...kept].join('\n');
 }

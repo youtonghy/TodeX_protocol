@@ -508,6 +508,15 @@ export type McpServerCatalogDescriptor = {
   error?: string;
 };
 
+/** One MCP entry exactly as declared in its config file (TOML converted to
+ * JSON), credentials included. */
+export type McpServerConfig = {
+  descriptor: McpServerCatalogDescriptor;
+  path: string;
+  format: 'json' | 'toml' | 'native';
+  config: unknown;
+};
+
 export type McpCatalog = {
   provider: ProviderKind;
   servers: McpServerCatalogDescriptor[];
@@ -1036,6 +1045,16 @@ export class V2ApiClient {
   async listMcpCatalog(provider: ProviderKind, workspace: string): Promise<McpCatalog> {
     const query = new URLSearchParams({ provider, workspace });
     return this.request(`/v2/catalog/mcp?${query}`);
+  }
+
+  async getMcpServerConfig(provider: ProviderKind, workspace: string, resourceId: string): Promise<McpServerConfig> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/mcp/${encodeURIComponent(resourceId)}?${query}`);
+  }
+
+  async deleteMcpServer(provider: ProviderKind, workspace: string, resourceId: string): Promise<{ resourceId: string; name: string; path: string }> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/mcp/${encodeURIComponent(resourceId)}?${query}`, { method: 'DELETE' });
   }
 
   async listWorkspaceDirectories(path?: string): Promise<{ root: string; current: string; parent: string | null; entries: Array<{ name: string; path: string; kind: 'directory' }> }> {

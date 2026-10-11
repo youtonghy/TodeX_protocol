@@ -545,6 +545,48 @@ export type ConversationManifest = {
   legacyPlaintext?: boolean;
 };
 
+/** One conversation in GET /v2/history/storage: its manifest plus the bytes
+ * its directory takes on the daemon's disk. */
+export type ConversationStorageEntry = ConversationManifest & { bytes: number };
+
+export type HistoryStorageResponse = {
+  totalBytes: number;
+  count: number;
+  measuredAt: string;
+  conversations: ConversationStorageEntry[];
+};
+
+export type HistoryCleanupSkip = { conversationId: string; code: string; message: string };
+
+export type HistoryCleanupResult = {
+  deleted: string[];
+  skipped: HistoryCleanupSkip[];
+  freedBytes: number;
+};
+
+/** Automatic cleanup of the tenant's conversations. Enabled requires at least
+ * one threshold; the age rule runs first, then the oldest conversations go
+ * until the total fits under `maxTotalBytes`. Active ones are never removed. */
+export type HistoryCleanupPolicy = {
+  enabled: boolean;
+  maxAgeDays: number | null;
+  maxTotalBytes: number | null;
+};
+
+export type HistoryCleanupRun = {
+  at: string;
+  trigger: 'auto' | 'manual';
+  deleted: number;
+  freedBytes: number;
+  error: string | null;
+};
+
+export type HistoryCleanupPolicyResponse = {
+  policy: HistoryCleanupPolicy;
+  lastRun: HistoryCleanupRun | null;
+  nextRunAt: string | null;
+};
+
 export type ExtensionScope = 'session' | 'turn';
 export type ProviderRuntimeState = {
   provider: 'pi';
@@ -1100,6 +1142,26 @@ export class V2ApiClient {
 
   async deleteConversation(id: string): Promise<void> {
     await this.request(`/v2/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async getHistoryStorage(): Promise<HistoryStorageResponse> {
+    return this.request('/v2/history/storage');
+  }
+
+  async cleanupConversations(conversationIds: string[]): Promise<HistoryCleanupResult> {
+    return this.request('/v2/history/cleanup', { method: 'POST', body: JSON.stringify({ conversationIds }) });
+  }
+
+  async getHistoryCleanupPolicy(): Promise<HistoryCleanupPolicyResponse> {
+    return this.request('/v2/history/cleanup-policy');
+  }
+
+  async updateHistoryCleanupPolicy(policy: HistoryCleanupPolicy): Promise<HistoryCleanupPolicyResponse> {
+    return this.request('/v2/history/cleanup-policy', { method: 'PUT', body: JSON.stringify(policy) });
+  }
+
+  async runHistoryCleanupPolicy(): Promise<HistoryCleanupResult & { lastRun: HistoryCleanupRun }> {
+    return this.request('/v2/history/cleanup-policy/run', { method: 'POST' });
   }
 
   async createConversation(input: CreateConversationInput): Promise<ConversationManifest> {

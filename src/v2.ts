@@ -315,6 +315,19 @@ export type CliUpgradeOperation = {
   error?: string;
 };
 
+/** Claude Code's user `settings.json` on the backend host. */
+export type CliSettingsDocument = {
+  path: string;
+  exists: boolean;
+  /** Content hash every write must echo back; `"missing"` before the file exists. */
+  revision: string;
+  /** The file as stored; empty when it does not exist. */
+  text: string;
+  /** The parsed object; `null` when `text` is not a JSON object (see `parseError`). */
+  settings: Record<string, unknown> | null;
+  parseError?: string;
+};
+
 export type CliVersionsResponse = {
   clis: CliVersionInfo[];
   checkedAt: string;
@@ -1018,6 +1031,20 @@ export class V2ApiClient {
   /** Removes TodeX's approval hook and MCP entries from the Antigravity global config; the next Antigravity turn installs them again. */
   async removeAntigravityIntegration(): Promise<{ removed: boolean }> {
     return this.request('/v2/providers/antigravity/integration', { method: 'DELETE' });
+  }
+
+  async getClaudeSettings(): Promise<CliSettingsDocument> {
+    return this.request('/v2/providers/claude-code/settings');
+  }
+
+  /** RFC 7386 merge patch: `null` removes a key, objects merge, other values replace. A stale `revision` is `409 CONFLICT`. */
+  async patchClaudeSettings(revision: string, patch: Record<string, unknown>): Promise<CliSettingsDocument> {
+    return this.request('/v2/providers/claude-code/settings', { method: 'PATCH', body: JSON.stringify({ revision, patch }) });
+  }
+
+  /** Replaces the whole file with `text`, which must be a JSON object. A stale `revision` is `409 CONFLICT`. */
+  async replaceClaudeSettings(revision: string, text: string): Promise<CliSettingsDocument> {
+    return this.request('/v2/providers/claude-code/settings', { method: 'PUT', body: JSON.stringify({ revision, text }) });
   }
 
   async getCliUpgrade(operationId: string): Promise<CliUpgradeOperation> {

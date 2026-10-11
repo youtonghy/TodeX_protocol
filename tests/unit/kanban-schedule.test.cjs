@@ -40,6 +40,18 @@ test('kanban sync payload always carries an explicit conversation list', () => {
   assert.equal(linked.backendConnectionId, undefined);
 });
 
+test('kanban subtasks and priority survive normalization and sync', () => {
+  const sub = todex.normalizeKanbanTask(task({ id: 'task-2', parentId: 'task-1', priority: 'high' }));
+  assert.equal(sub.parentId, 'task-1');
+  assert.equal(sub.priority, 'high');
+  const odd = todex.normalizeKanbanTask(task({ parentId: 'task-1', priority: 'none' }));
+  assert.equal(odd.parentId, undefined, 'a task is never its own parent');
+  assert.equal(odd.priority, undefined, '`none` reads as no priority');
+  const [cleared, set] = todex.prepareKanbanSyncPayload([task(), sub]);
+  assert.equal(cleared.priority, 'none', 'a cleared priority is pushed explicitly');
+  assert.equal(set.priority, 'high');
+});
+
 test('kanban time zone is parsed from the sync response', () => {
   assert.deepEqual(
     todex.parseKanbanTimeZone({ tasks: [], timeZone: { name: 'Asia/Shanghai', offsetMinutes: 480 } }),

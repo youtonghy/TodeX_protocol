@@ -984,6 +984,8 @@ export function workspaceMatchesTombstone(record: WorkspaceRecord, tombstone: Wo
 
 export type KanbanTaskStatus = 'planned' | 'in-progress' | 'done';
 export const KANBAN_TASK_STATUSES: readonly KanbanTaskStatus[] = ['planned', 'in-progress', 'done'];
+export type KanbanTaskPriority = 'low' | 'medium' | 'high' | 'urgent';
+export const KANBAN_TASK_PRIORITIES: readonly KanbanTaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 
 export type KanbanTask = {
   id: string;
@@ -994,6 +996,10 @@ export type KanbanTask = {
   description?: string;
   dueDate?: string;
   status: KanbanTaskStatus;
+  /** Set on a subtask: the id of its parent task (one level deep). A subtask
+   * is an ordinary row with its own status, schedule and conversation. */
+  parentId?: string;
+  priority?: KanbanTaskPriority;
   /** Attached conversations in display order. `conversationId` mirrors the
    * first entry so older clients reading only that field keep working. */
   conversationId?: string;
@@ -1121,6 +1127,9 @@ export function normalizeKanbanTask(value: unknown): KanbanTask | null {
   const rawOrder = (value as Record<string, unknown>).sortOrder ?? (value as Record<string, unknown>).sort_order;
   const sortOrder = typeof rawOrder === 'number' && Number.isFinite(rawOrder) ? rawOrder : undefined;
   const schedule = normalizeKanbanTaskSchedule((value as Record<string, unknown>).schedule);
+  const parentId = stringField(value, ['parentId', 'parent_id']).trim();
+  // `none` is how a cleared priority syncs (an absent field keeps the stored one).
+  const priority = stringField(value, ['priority']);
   return {
     id,
     workspaceId,
@@ -1129,6 +1138,8 @@ export function normalizeKanbanTask(value: unknown): KanbanTask | null {
     ...(description ? { description } : {}),
     ...(dueDate && KANBAN_DUE_DATE_PATTERN.test(dueDate) ? { dueDate } : {}),
     status: normalizeKanbanTaskStatus(stringField(value, ['status'])),
+    ...(parentId && parentId !== id ? { parentId } : {}),
+    ...((KANBAN_TASK_PRIORITIES as readonly string[]).includes(priority) ? { priority: priority as KanbanTaskPriority } : {}),
     ...(conversationIds.length ? { conversationId: conversationIds[0], conversationIds } : {}),
     ...(sortOrder !== undefined ? { sortOrder } : {}),
     ...(schedule ? { schedule } : {}),
@@ -1149,13 +1160,21 @@ export function parseKanbanSyncResponse(value: unknown): KanbanTask[] {
     .filter((task): task is KanbanTask => Boolean(task));
 }
 
-export function prepareKanbanSyncPayload(tasks: KanbanTask[]): KanbanTask[] {
+/** A task as pushed: `priority` is explicit so clearing it reaches the backend. */
+export type KanbanSyncTask = Omit<KanbanTask, 'priority'> & { priority: KanbanTaskPriority | 'none' };
+
+export function prepareKanbanSyncPayload(tasks: KanbanTask[]): KanbanSyncTask[] {
   return tasks
     .map(normalizeKanbanTask)
     .filter((task): task is KanbanTask => Boolean(task))
     // An explicit (possibly empty) list: the backend keeps the stored one
     // when the field is absent, as older clients omit it.
-    .map((task) => ({ ...task, backendConnectionId: undefined, conversationIds: task.conversationIds ?? [] }))
+    .map((task) => ({
+      ...task,
+      backendConnectionId: undefined,
+      conversationIds: task.conversationIds ?? [],
+      priority: task.priority ?? ('none' as const),
+    }))
     .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
 }
 

@@ -491,6 +491,10 @@ export type SkillCatalogDescriptor = {
 export type SkillCatalog = {
   provider: ProviderKind;
   skills: SkillCatalogDescriptor[];
+  /** Whether listed skills can be edited and deleted; absent on old daemons. */
+  editable?: boolean;
+  /** Sources a new skill can be created in (`shared-user`, `provider-project`, …). */
+  creatableSources?: string[];
 };
 
 export type McpServerCatalogDescriptor = {
@@ -520,6 +524,10 @@ export type McpServerConfig = {
 export type McpCatalog = {
   provider: ProviderKind;
   servers: McpServerCatalogDescriptor[];
+  /** Whether listed entries can be edited and deleted; absent on old daemons. */
+  editable?: boolean;
+  /** Scopes a new entry can be added to. */
+  creatableScopes?: CatalogScope[];
 };
 
 export type ConversationManifest = {
@@ -1097,6 +1105,31 @@ export class V2ApiClient {
   async deleteMcpServer(provider: ProviderKind, workspace: string, resourceId: string): Promise<{ resourceId: string; name: string; path: string }> {
     const query = new URLSearchParams({ provider, workspace });
     return this.request(`/v2/catalog/mcp/${encodeURIComponent(resourceId)}?${query}`, { method: 'DELETE' });
+  }
+
+  async updateMcpServer(provider: ProviderKind, workspace: string, resourceId: string, input: { name: string; config: unknown }): Promise<McpServerConfig> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/mcp/${encodeURIComponent(resourceId)}?${query}`, { method: 'PUT', body: JSON.stringify(input) });
+  }
+
+  async createMcpServer(provider: ProviderKind, workspace: string, input: { scope: CatalogScope; name: string; config: unknown }): Promise<McpServerConfig> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/mcp?${query}`, { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async createSkill(provider: ProviderKind, workspace: string, input: { source: string; name: string; content: string }): Promise<SkillCatalogDescriptor> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills?${query}`, { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async updateSkill(provider: ProviderKind, workspace: string, resourceId: string, content: string): Promise<SkillCatalogDescriptor> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills/${encodeURIComponent(resourceId)}?${query}`, { method: 'PUT', body: JSON.stringify({ content }) });
+  }
+
+  async deleteSkill(provider: ProviderKind, workspace: string, resourceId: string): Promise<{ resourceId: string; name: string; path: string }> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills/${encodeURIComponent(resourceId)}?${query}`, { method: 'DELETE' });
   }
 
   async listWorkspaceDirectories(path?: string): Promise<{ root: string; current: string; parent: string | null; entries: Array<{ name: string; path: string; kind: 'directory' }> }> {

@@ -596,7 +596,7 @@ export type HistoryCleanupPolicyResponse = {
 };
 
 /** Agents whose own session history the daemon can manage. */
-export type NativeHistoryProvider = 'claude-code' | 'pi';
+export type NativeHistoryProvider = 'claude-code' | 'pi' | 'codex' | 'grok-build' | 'devin';
 
 export type NativeHistoryProviderInfo = {
   provider: NativeHistoryProvider;
@@ -605,6 +605,9 @@ export type NativeHistoryProviderInfo = {
   sessionCount: number;
   totalBytes: number;
   measuredAt: string;
+  /** `view`: transcripts can be read. `sizes`: per-session sizes are known;
+   * without them sessions report null bytes and size limits are refused. */
+  capabilities: { view: boolean; sizes: boolean };
   /** Claude Code's own retention setting; null for agents without one. */
   native: { cleanupPeriodDays: number | null; settingsPath: string } | null;
 };
@@ -615,7 +618,7 @@ export type NativeHistorySession = {
   cwd: string | null;
   createdAt: string | null;
   updatedAt: string;
-  bytes: number;
+  bytes: number | null;
   /** TodeX conversations resuming this session; they protect it. */
   referencedBy: string[];
   running: boolean;

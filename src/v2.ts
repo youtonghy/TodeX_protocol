@@ -595,6 +595,56 @@ export type HistoryCleanupPolicyResponse = {
   nextRunAt: string | null;
 };
 
+/** Agents whose own session history the daemon can manage. */
+export type NativeHistoryProvider = 'claude-code' | 'pi';
+
+export type NativeHistoryProviderInfo = {
+  provider: NativeHistoryProvider;
+  available: boolean;
+  root: string | null;
+  sessionCount: number;
+  totalBytes: number;
+  measuredAt: string;
+  /** Claude Code's own retention setting; null for agents without one. */
+  native: { cleanupPeriodDays: number | null; settingsPath: string } | null;
+};
+
+export type NativeHistorySession = {
+  id: string;
+  title: string | null;
+  cwd: string | null;
+  createdAt: string | null;
+  updatedAt: string;
+  bytes: number;
+  /** TodeX conversations resuming this session; they protect it. */
+  referencedBy: string[];
+  running: boolean;
+};
+
+export type NativeHistorySessionsResponse = {
+  provider: NativeHistoryProvider;
+  root: string | null;
+  totalBytes: number;
+  count: number;
+  measuredAt: string;
+  sessions: NativeHistorySession[];
+};
+
+export type NativeHistoryMessage = { role: 'user' | 'assistant' | 'tool' | 'system'; text: string; at: string | null };
+
+export type NativeHistoryTranscript = {
+  provider: NativeHistoryProvider;
+  id: string;
+  title: string | null;
+  cwd: string | null;
+  totalMessages: number;
+  /** Earlier messages were left out; `messages` holds the last ones. */
+  truncated: boolean;
+  messages: NativeHistoryMessage[];
+};
+
+export type ClaudeNativeRetention = { cleanupPeriodDays: number | null; settingsPath: string };
+
 export type ExtensionScope = 'session' | 'turn';
 export type ProviderRuntimeState = {
   provider: 'pi';
@@ -1195,6 +1245,43 @@ export class V2ApiClient {
 
   async runHistoryCleanupPolicy(): Promise<HistoryCleanupResult & { lastRun: HistoryCleanupRun }> {
     return this.request('/v2/history/cleanup-policy/run', { method: 'POST' });
+  }
+
+  async listNativeHistoryProviders(): Promise<{ providers: NativeHistoryProviderInfo[] }> {
+    return this.request('/v2/native-history/providers');
+  }
+
+  async listNativeHistorySessions(provider: NativeHistoryProvider): Promise<NativeHistorySessionsResponse> {
+    return this.request(`/v2/native-history/${encodeURIComponent(provider)}/sessions`);
+  }
+
+  async getNativeHistoryTranscript(provider: NativeHistoryProvider, id: string, limit = 200): Promise<NativeHistoryTranscript> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    return this.request(`/v2/native-history/${encodeURIComponent(provider)}/sessions/${encodeURIComponent(id)}/transcript?${query}`);
+  }
+
+  async cleanupNativeHistory(provider: NativeHistoryProvider, sessionIds: string[]): Promise<HistoryCleanupResult> {
+    return this.request(`/v2/native-history/${encodeURIComponent(provider)}/cleanup`, { method: 'POST', body: JSON.stringify({ sessionIds }) });
+  }
+
+  async getNativeHistoryPolicy(provider: NativeHistoryProvider): Promise<HistoryCleanupPolicyResponse> {
+    return this.request(`/v2/native-history/${encodeURIComponent(provider)}/policy`);
+  }
+
+  async updateNativeHistoryPolicy(provider: NativeHistoryProvider, policy: HistoryCleanupPolicy): Promise<HistoryCleanupPolicyResponse> {
+    return this.request(`/v2/native-history/${encodeURIComponent(provider)}/policy`, { method: 'PUT', body: JSON.stringify(policy) });
+  }
+
+  async runNativeHistoryPolicy(provider: NativeHistoryProvider): Promise<HistoryCleanupResult & { lastRun: HistoryCleanupRun }> {
+    return this.request(`/v2/native-history/${encodeURIComponent(provider)}/policy/run`, { method: 'POST' });
+  }
+
+  async getClaudeNativeRetention(): Promise<ClaudeNativeRetention> {
+    return this.request('/v2/native-history/claude-code/native-retention');
+  }
+
+  async updateClaudeNativeRetention(cleanupPeriodDays: number | null): Promise<ClaudeNativeRetention> {
+    return this.request('/v2/native-history/claude-code/native-retention', { method: 'PUT', body: JSON.stringify({ cleanupPeriodDays }) });
   }
 
   async createConversation(input: CreateConversationInput): Promise<ConversationManifest> {

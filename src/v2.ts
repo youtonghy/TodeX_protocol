@@ -315,15 +315,19 @@ export type CliUpgradeOperation = {
   error?: string;
 };
 
-/** Claude Code's user `settings.json` on the backend host. */
+/** CLIs whose user settings file the CLI manager edits. */
+export type CliSettingsProvider = 'claude-code' | 'codex' | 'pi';
+
+/** A CLI's user settings file on the backend host (Claude Code / Pi `settings.json`, Codex `config.toml`). */
 export type CliSettingsDocument = {
   path: string;
+  format: 'json' | 'toml';
   exists: boolean;
   /** Content hash every write must echo back; `"missing"` before the file exists. */
   revision: string;
   /** The file as stored; empty when it does not exist. */
   text: string;
-  /** The parsed object; `null` when `text` is not a JSON object (see `parseError`). */
+  /** The parsed object (TOML as its JSON equivalent); `null` when `text` does not parse (see `parseError`). */
   settings: Record<string, unknown> | null;
   parseError?: string;
 };
@@ -1033,18 +1037,18 @@ export class V2ApiClient {
     return this.request('/v2/providers/antigravity/integration', { method: 'DELETE' });
   }
 
-  async getClaudeSettings(): Promise<CliSettingsDocument> {
-    return this.request('/v2/providers/claude-code/settings');
+  async getCliSettings(provider: CliSettingsProvider): Promise<CliSettingsDocument> {
+    return this.request(`/v2/providers/${provider}/settings`);
   }
 
   /** RFC 7386 merge patch: `null` removes a key, objects merge, other values replace. A stale `revision` is `409 CONFLICT`. */
-  async patchClaudeSettings(revision: string, patch: Record<string, unknown>): Promise<CliSettingsDocument> {
-    return this.request('/v2/providers/claude-code/settings', { method: 'PATCH', body: JSON.stringify({ revision, patch }) });
+  async patchCliSettings(provider: CliSettingsProvider, revision: string, patch: Record<string, unknown>): Promise<CliSettingsDocument> {
+    return this.request(`/v2/providers/${provider}/settings`, { method: 'PATCH', body: JSON.stringify({ revision, patch }) });
   }
 
-  /** Replaces the whole file with `text`, which must be a JSON object. A stale `revision` is `409 CONFLICT`. */
-  async replaceClaudeSettings(revision: string, text: string): Promise<CliSettingsDocument> {
-    return this.request('/v2/providers/claude-code/settings', { method: 'PUT', body: JSON.stringify({ revision, text }) });
+  /** Replaces the whole file with `text`, which must parse (a JSON object, or TOML). A stale `revision` is `409 CONFLICT`. */
+  async replaceCliSettings(provider: CliSettingsProvider, revision: string, text: string): Promise<CliSettingsDocument> {
+    return this.request(`/v2/providers/${provider}/settings`, { method: 'PUT', body: JSON.stringify({ revision, text }) });
   }
 
   async getCliUpgrade(operationId: string): Promise<CliUpgradeOperation> {

@@ -350,6 +350,46 @@ export type CliSettingsDocument = {
   parseError?: string;
 };
 
+/** A CLI's global instruction file on the backend host (Claude Code `CLAUDE.md`, Codex / Pi `AGENTS.md`). */
+export type CliInstructionsDocument = {
+  path: string;
+  exists: boolean;
+  /** Content hash every write must echo back; `"missing"` before the file exists. */
+  revision: string;
+  /** The file as stored; empty when it does not exist. */
+  text: string;
+  /** The instruction preset the file follows; absent when it keeps its own text. */
+  presetId?: string;
+  /** The file was edited after its preset was last written to it; preset edits leave it alone. */
+  drifted: boolean;
+  /** An existing file the CLI reads instead of this one (Codex `AGENTS.override.md`). */
+  overridePath?: string;
+};
+
+/** A shared instruction text that CLIs can follow; edits rewrite the files that follow it. */
+export type InstructionPreset = {
+  id: string;
+  name: string;
+  text: string;
+  /** Bumped on every edit; updates must echo it back. */
+  revision: number;
+  updatedAt: number;
+  /** CLIs whose instruction file follows this preset. */
+  usedBy: CliSettingsProvider[];
+};
+
+/** What a preset edit did to each file that follows it: `drifted` files were edited meanwhile and left alone. */
+export type InstructionPresetSync = {
+  provider: CliSettingsProvider;
+  status: 'updated' | 'drifted' | 'failed';
+  message?: string;
+};
+
+export type InstructionPresetUpdate = {
+  preset: InstructionPreset;
+  sync: InstructionPresetSync[];
+};
+
 export type CliVersionsResponse = {
   clis: CliVersionInfo[];
   checkedAt: string;
@@ -1075,6 +1115,38 @@ export class V2ApiClient {
   /** Replaces the whole file with `text`, which must parse (a JSON object, or TOML). A stale `revision` is `409 CONFLICT`. */
   async replaceCliSettings(provider: CliSettingsProvider, revision: string, text: string): Promise<CliSettingsDocument> {
     return this.request(`/v2/providers/${provider}/settings`, { method: 'PUT', body: JSON.stringify({ revision, text }) });
+  }
+
+  async getCliInstructions(provider: CliSettingsProvider): Promise<CliInstructionsDocument> {
+    return this.request(`/v2/providers/${provider}/instructions`);
+  }
+
+  /** Writes the file's own text and stops it following a preset. A stale `revision` is `409 CONFLICT`. */
+  async writeCliInstructions(provider: CliSettingsProvider, revision: string, text: string): Promise<CliInstructionsDocument> {
+    return this.request(`/v2/providers/${provider}/instructions`, { method: 'PUT', body: JSON.stringify({ revision, text }) });
+  }
+
+  /** Makes the file follow `presetId` (writing the preset's text, also when it already follows it), or keep its current text when `null`. */
+  async setCliInstructionsSource(provider: CliSettingsProvider, revision: string, presetId: string | null): Promise<CliInstructionsDocument> {
+    return this.request(`/v2/providers/${provider}/instructions/source`, { method: 'PUT', body: JSON.stringify({ revision, presetId }) });
+  }
+
+  async listInstructionPresets(): Promise<{ presets: InstructionPreset[] }> {
+    return this.request('/v2/instruction-presets');
+  }
+
+  async createInstructionPreset(name: string, text: string): Promise<InstructionPreset> {
+    return this.request('/v2/instruction-presets', { method: 'POST', body: JSON.stringify({ name, text }) });
+  }
+
+  /** A stale `revision` is `409 CONFLICT`. */
+  async updateInstructionPreset(id: string, revision: number, name: string, text: string): Promise<InstructionPresetUpdate> {
+    return this.request(`/v2/instruction-presets/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ revision, name, text }) });
+  }
+
+  /** CLIs that followed the preset keep their text as their own. */
+  async deleteInstructionPreset(id: string): Promise<void> {
+    await this.request(`/v2/instruction-presets/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   async getCliUpgrade(operationId: string): Promise<CliUpgradeOperation> {

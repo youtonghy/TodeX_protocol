@@ -529,6 +529,10 @@ test('returns stable provider icon metadata for known and unknown agents', () =>
     parity.providerIconMetadata('agy'),
     parity.PROVIDER_ICON_METADATA.antigravity,
   );
+  assert.deepEqual(
+    parity.providerIconMetadata('dsh'),
+    parity.PROVIDER_ICON_METADATA['deepseek-harness'],
+  );
   const unknown = parity.providerIconMetadata('custom-agent');
   assert.equal(unknown.id, 'custom-agent');
   assert.equal(unknown.icon, 'cube-outline');

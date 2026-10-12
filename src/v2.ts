@@ -31,7 +31,16 @@ export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 export type PermissionMode = 'ask' | 'auto' | 'full-access';
 export type WorkMode = 'plan' | 'implement';
 
-export type ProviderKind = 'acp' | 'codex' | 'pi' | 'claude-code' | 'grok-build' | 'devin' | 'opencode' | 'antigravity';
+export type ProviderKind =
+  | 'acp'
+  | 'codex'
+  | 'pi'
+  | 'claude-code'
+  | 'grok-build'
+  | 'devin'
+  | 'opencode'
+  | 'antigravity'
+  | 'deepseek-harness';
 
 export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   acp: 'ACP',
@@ -42,6 +51,7 @@ export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   devin: 'Devin',
   opencode: 'OpenCode',
   antigravity: 'Antigravity',
+  'deepseek-harness': 'DeepSeek Harness',
 };
 
 export function providerDisplayName(provider: ProviderKind | string, fallback?: string): string {
@@ -275,7 +285,15 @@ export type ProviderDescriptor = {
   models: ProviderModelDescriptor[];
 };
 
-export type ManagedCliProvider = 'codex' | 'pi' | 'claude-code' | 'grok-build' | 'devin' | 'opencode' | 'antigravity';
+export type ManagedCliProvider =
+  | 'codex'
+  | 'pi'
+  | 'claude-code'
+  | 'grok-build'
+  | 'devin'
+  | 'opencode'
+  | 'antigravity'
+  | 'deepseek-harness';
 export type CliVersionStatus = 'upToDate' | 'updateAvailable' | 'ahead' | 'unknown' | 'notInstalled' | 'external';
 export type CliUpgradeStatus = 'running' | 'succeeded' | 'failed';
 export type CliOperationAction = 'install' | 'upgrade';

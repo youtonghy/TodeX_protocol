@@ -554,6 +554,10 @@ export type ConversationManifest = {
   ownerId: string;
   workspace: string;
   workspaceId?: string;
+  /** `workspace` is a folder the daemon created for this conversation under
+   * `scratch_workspace_root` because it was started without a workspace
+   * (the clients' "None" workspace). Omitted when false. */
+  scratchWorkspace?: boolean;
   title?: string;
   /** End-to-end encrypted title (docs/history-encryption.md §3.2); `title`
    * is empty then. Decrypt with HistoryDecryptor.decryptTitle. */
@@ -863,9 +867,13 @@ export type V2ApiOptions = {
   historyEncryption?: boolean;
 };
 
+/** Exactly one of `workspace` and `scratchWorkspace: true`. */
 export type CreateConversationInput = {
   provider: ProviderKind;
-  workspace: string;
+  workspace?: string;
+  /** Start without a workspace: the daemon creates the conversation's own
+   * folder under `scratch_workspace_root`. */
+  scratchWorkspace?: boolean;
   title?: string;
   providerProfile?: string;
 };

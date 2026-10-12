@@ -9,6 +9,9 @@ export type ServerVersionInfo = {
   version: string;
   dataDir?: string;
   workspaceRoot?: string;
+  /** Parent of the folders the daemon creates for conversations started
+   * without a workspace; trusted, so usable for discovery before the first. */
+  scratchWorkspaceRoot?: string;
   /** `1` when the backend serves end-to-end encrypted history (§5.4). */
   historyEncryption?: number;
 };
@@ -142,6 +145,8 @@ export async function probeBackendConnection(options: {
       version: typeof versionJson.version === 'string' ? versionJson.version : '',
       dataDir: typeof versionJson.data_dir === 'string' ? versionJson.data_dir : undefined,
       workspaceRoot: typeof versionJson.workspace_root === 'string' ? versionJson.workspace_root : undefined,
+      scratchWorkspaceRoot:
+        typeof versionJson.scratch_workspace_root === 'string' ? versionJson.scratch_workspace_root : undefined,
       historyEncryption: typeof versionJson.historyEncryption === 'number' ? versionJson.historyEncryption : undefined,
     };
     if (version.name && version.name !== 'todex-agentd') {

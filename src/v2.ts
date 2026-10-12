@@ -94,6 +94,9 @@ export type ProviderCapabilities = {
   backendQueue?: boolean;
   /** `conversation.queue.pause` / `.take` and `add` with `paused` (user-held pause). */
   backendQueueControl?: boolean;
+  /** `conversation.schedule`: the daemon holds the conversation's queue until
+   * a set time (pause reason `scheduled`) and then sends it. */
+  scheduledConversations?: boolean;
   /** Session-owned Pi surfaces require explicit support from the connected backend. */
   runtimeStop?: boolean;
   sessionCommands?: boolean;
@@ -259,6 +262,7 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     followUpQueue: capabilities.followUpQueue ?? false,
     backendQueue: capabilities.backendQueue === true,
     backendQueueControl: capabilities.backendQueueControl === true,
+    scheduledConversations: capabilities.scheduledConversations === true,
     runtimeStop: capabilities.runtimeStop === true,
     sessionCommands: capabilities.sessionCommands === true,
     extensionUi: capabilities.extensionUi ?? [],
@@ -630,7 +634,23 @@ export type ConversationManifest = {
    * and deletable, but every write fails with HISTORY_READ_ONLY. Omitted
    * when false. */
   legacyPlaintext?: boolean;
+  /** Scheduled conversation: its follow-up queue is held (pause reason
+   * `scheduled`) until `at`, then sent. The held prompts live in daemon
+   * memory only, so a daemon restart loses them and marks the schedule
+   * `interrupted` until the client re-arms or cancels it. */
+  schedule?: ConversationSchedule;
 };
+
+export type ConversationSchedule = { at: string; interrupted?: boolean };
+
+/** `manifest.schedule`, or undefined when absent or malformed. */
+export function parseConversationSchedule(value: unknown): ConversationSchedule | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const at = typeof record.at === 'string' ? record.at.trim() : '';
+  if (!at || !Number.isFinite(Date.parse(at))) return undefined;
+  return record.interrupted === true ? { at, interrupted: true } : { at };
+}
 
 /** One conversation in GET /v2/history/storage: its manifest plus the bytes
  * its directory takes on the daemon's disk. */

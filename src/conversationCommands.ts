@@ -94,3 +94,12 @@ export function controlFrame(action: ConversationControlAction, conversationId: 
   }
   return { type: `conversation.${action}`, payload: { ...payload, conversationId } };
 }
+
+/** `conversation.schedule`: holds the conversation's follow-up queue until
+ * `at` (an ISO 8601 instant), or cancels the schedule with `null`. Needs the
+ * provider's `scheduledConversations` capability. */
+export function conversationScheduleFrame(conversationId: string, at: string | null): Omit<CommandFrame, 'id'> {
+  if (!conversationId.trim()) throw new Error('定时操作需要会话 ID。');
+  if (at !== null && !Number.isFinite(Date.parse(at))) throw new Error('定时时间无效。');
+  return { type: 'conversation.schedule', payload: { conversationId, at } };
+}

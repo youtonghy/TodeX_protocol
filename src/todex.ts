@@ -1083,6 +1083,15 @@ export function normalizeKanbanTaskSchedule(value: unknown): KanbanTaskSchedule 
   return schedule;
 }
 
+/** ISO instant of a `YYYY-MM-DDTHH:MM` wall-clock time in the backend's
+ * zone, or null when the text is not such a time. */
+export function backendWallClockToIso(local: string, zone: KanbanTimeZone): string | null {
+  if (!KANBAN_SCHEDULE_TIME_PATTERN.test(local)) return null;
+  const utc = Date.parse(`${local}:00Z`);
+  if (!Number.isFinite(utc)) return null;
+  return new Date(utc - zone.offsetMinutes * 60_000).toISOString();
+}
+
 export function parseKanbanTimeZone(value: unknown): KanbanTimeZone | null {
   const zone = isObject(value) ? value.timeZone : undefined;
   if (!isObject(zone) || typeof zone.offsetMinutes !== 'number' || !Number.isFinite(zone.offsetMinutes)) {

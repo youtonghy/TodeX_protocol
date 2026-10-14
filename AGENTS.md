@@ -6,6 +6,7 @@
 
 ## Git delivery
 
+- Before starting each task, sync with the remote so the work is based on the latest code: `git fetch`, then fast-forward the current branch to its upstream (`git pull --ff-only`), and create any task worktree from the updated branch. If the fast-forward is blocked (diverged history, or uncommitted changes in the same files), do not stash, reset, or rebase the user's work; base the task on the fetched upstream instead (for example, a worktree from `origin/<branch>`) and mention it in the final response.
 - Do every complex task — anything beyond a parameter change or a few localized lines — in a dedicated Git worktree on its own branch, not in the main checkout, which may hold the user's uncommitted work. Install dependencies inside the worktree (`npm install`) before running checks.
 - Hand the result back locally: bring the branch into the main checkout (fast-forward or cherry-pick) without modifying the user's uncommitted changes, rerun the relevant checks there, then remove the worktree and its branch.
 - After completing each task, create one or more Git commits for the changes made in that task.

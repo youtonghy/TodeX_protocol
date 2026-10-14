@@ -721,6 +721,9 @@ export type TimelineEntry = {
   /** Sequence of the event that created this row; with `sequence` it bounds
    * the journal range a folded row was built from. */
   firstSequence?: number;
+  /** Time of the event that created this row (`at` is the newest one); a
+   * running tool's elapsed time is measured from it. */
+  firstAt?: number;
   /** Placeholder for a `detail=summary` replay event: content loads on expand. */
   detailStub?: boolean;
   /** Stands for end-to-end encrypted events this device holds no key for
@@ -1083,10 +1086,10 @@ export function reduceConversationEvents(
         }
       }
       const index = timeline.findIndex((item) => item.id === entry.id);
-      if (index < 0) timeline.unshift({ ...entry, firstSequence: coveredStart ?? event.sequence });
+      if (index < 0) timeline.unshift({ ...entry, firstSequence: coveredStart ?? event.sequence, firstAt: entry.at });
       else {
         const previous = timeline[index];
-        timeline[index] = { ...previous, ...entry, firstSequence: previous.firstSequence,
+        timeline[index] = { ...previous, ...entry, firstSequence: previous.firstSequence, firstAt: previous.firstAt,
           subtitle: shouldAppendV2ConversationEvent(event)
             ? `${previous.subtitle === '正在回复...' ? '' : previous.subtitle}${entry.subtitle}`
             : entry.subtitle };

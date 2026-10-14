@@ -945,3 +945,26 @@ test('background task details come from the pending snapshot and progress frames
   assert.equal(progressed.backgroundTasks[0].description, 'CI build step 3');
   assert.equal(progressed.backgroundTasks[0].toolUseId, 'toolu_1');
 });
+
+test('a tool row keeps the time of its first event while later updates advance at', () => {
+  const at = (seconds) => `2026-09-06T00:00:${String(seconds).padStart(2, '0')}.000Z`;
+  const tool = (sequence, seconds, phase, extra = {}) => event(sequence, `tool.${phase === 'started' ? 'started' : phase === 'delta' ? 'updated' : 'completed'}`,
+    { turnId: 't', toolCallId: 'call-1', toolName: 'bash', block: { id: 'call-1', category: 'tool', phase, turnId: 't' }, ...extra },
+    { time: at(seconds) });
+  const events = [event(1, 'turn.started', { turnId: 't' }, { time: at(0) }),
+    tool(2, 5, 'started'), tool(3, 7, 'delta', { partialResult: 'a' }), tool(4, 40, 'completed', { result: 'done' })];
+  const live = apply(empty(), ...events).state.timeline.find(entry => entry.category === 'tool');
+  assert.deepEqual([live.firstAt, live.at], [Date.parse(at(5)), Date.parse(at(40))]);
+
+  // Paging older history in after the newest events keeps the start time.
+  const paged = lazyProjection(events, 3, 1).timeline.find(entry => entry.category === 'tool');
+  assert.equal(paged.firstAt, Date.parse(at(5)));
+
+  // Hydrating a range that starts after the first event keeps the start time.
+  const stubbed = apply(empty(), events[0], tool(2, 5, 'started', { detailStub: true }),
+    tool(3, 7, 'delta', { detailStub: true })).state;
+  const hydrated = runtime.hydrateConversationRuntimeEvents(stubbed, [events[2]])
+    .timeline.find(entry => entry.category === 'tool');
+  assert.equal(hydrated.detailStub, undefined);
+  assert.equal(hydrated.firstAt, Date.parse(at(5)));
+});

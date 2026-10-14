@@ -643,7 +643,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
     const existing = timeline.get(entry.id);
     const next: TimelineEntry = existing && append
       ? { ...existing, ...entry, subtitle: appendedSubtitle(existing, entry) }
-      : { ...entry, firstSequence: coveredStart ?? existing?.firstSequence ?? event.sequence, ...(!existing && append ? { streamedText: true } : {}) };
+      : { ...entry, firstSequence: coveredStart ?? existing?.firstSequence ?? event.sequence, firstAt: existing?.firstAt ?? entry.at, ...(!existing && append ? { streamedText: true } : {}) };
     timeline.set(next);
     if (next.supersedes?.length) timeline.dropSuperseded();
   }
@@ -861,7 +861,8 @@ export function hydrateConversationRuntimeEvents(
       // the full stream already advanced past this event.
       const existing = timeline[index];
       if (!existing.detailStub && (existing.sequence ?? 0) > (entry.sequence ?? 0)) continue;
-      timeline[index] = hydrated;
+      // The fetched range may start after the row's first event.
+      timeline[index] = { ...hydrated, firstAt: earliest(existing.firstAt, hydrated.firstAt) };
       changed = true;
       continue;
     }
@@ -897,16 +898,21 @@ const PROJECTION_FLAGS: ReadonlySet<string> = new Set(['detailStub', 'detailLock
  * wins and only takes the fields it lacks from the older projection. */
 function mergeEarlierEntry(older: TimelineEntry, newer: TimelineEntry): TimelineEntry {
   const firstSequence = older.firstSequence ?? newer.firstSequence;
+  const firstAt = older.firstAt ?? newer.firstAt;
   if (newer.streamedText) {
-    const merged: TimelineEntry = { ...older, ...newer, subtitle: appendedSubtitle(older, newer), firstSequence };
+    const merged: TimelineEntry = { ...older, ...newer, subtitle: appendedSubtitle(older, newer), firstSequence, firstAt };
     if (!older.streamedText) delete merged.streamedText;
     return merged;
   }
-  const merged: Record<string, unknown> = { ...newer, firstSequence };
+  const merged: Record<string, unknown> = { ...newer, firstSequence, firstAt };
   for (const [key, value] of Object.entries(older)) {
     if (merged[key] === undefined && !PROJECTION_FLAGS.has(key)) merged[key] = value;
   }
   return merged as TimelineEntry;
+}
+
+function earliest(left: number | undefined, right: number | undefined): number | undefined {
+  return left === undefined ? right : right === undefined ? left : Math.min(left, right);
 }
 
 const SEGMENT_SUFFIX = '#s';

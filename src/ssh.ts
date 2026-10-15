@@ -61,6 +61,21 @@ export type SshHostsResponse = { hosts: SshHost[]; ftpSites: FtpSite[] };
 
 export type SshHostImportResult = { hosts: ManagedHost[]; errors: string[] };
 
+/**
+ * Connection defaults for every backend ssh run (`/v2/ssh/settings`). A
+ * value the backend user set for a host in `~/.ssh/config` still wins.
+ */
+export type SshConnectionSettings = {
+  serverAliveEnabled: boolean;
+  /** Seconds between keepalive probes; kept while disabled. */
+  serverAliveInterval: number;
+  /** Unanswered probes before ssh closes the connection. */
+  serverAliveCountMax: number;
+};
+
+export const SSH_SERVER_ALIVE_INTERVAL_RANGE = { min: 5, max: 600 } as const;
+export const SSH_SERVER_ALIVE_COUNT_MAX_RANGE = { min: 1, max: 10 } as const;
+
 export const SSH_FAILURE_KINDS = [
   'hostKeyUnverified',
   'hostKeyChanged',

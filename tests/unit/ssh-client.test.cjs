@@ -51,6 +51,18 @@ test('SSH host routes use the contract paths, methods and bodies', async () => {
   assert.deepEqual(calls[5].body, { enabled: true });
 });
 
+test('SSH connection settings round-trip through /v2/ssh/settings', async () => {
+  const settings = { serverAliveEnabled: true, serverAliveInterval: 15, serverAliveCountMax: 3 };
+  const { api, calls } = recordingClient([{ status: 200, body: settings }, { status: 200, body: settings }]);
+  assert.deepEqual(await api.getSshSettings(), settings);
+  assert.deepEqual(await api.setSshSettings(settings), settings);
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url.pathname}`), [
+    'GET /v2/ssh/settings',
+    'PUT /v2/ssh/settings',
+  ]);
+  assert.deepEqual(calls[1].body, settings);
+});
+
 test('FTP site and key routes match the contract', async () => {
   const { api, calls } = recordingClient();
   const site = { name: 'Files', protocol: 'ftps', host: 'ftp.example.com', port: 990, user: 'me' };

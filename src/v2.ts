@@ -10,6 +10,7 @@ import type {
   RemoteConnection,
   RemoteEntriesResponse,
   RemoteFile,
+  SshConnectionSettings,
   SshHost,
   SshHostImportResult,
   SshHostsResponse,
@@ -1618,6 +1619,15 @@ export class V2ApiClient {
 
   async testSshHost(alias: string): Promise<SshTestResult> {
     return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/test`, { method: 'POST' });
+  }
+
+  async getSshSettings(): Promise<SshConnectionSettings> {
+    return this.request('/v2/ssh/settings');
+  }
+
+  /** Applies to ssh processes started afterwards; open shared connections keep their options. */
+  async setSshSettings(settings: SshConnectionSettings): Promise<SshConnectionSettings> {
+    return this.request('/v2/ssh/settings', { method: 'PUT', body: JSON.stringify(settings) });
   }
 
   /** Closes the shared OpenSSH master connection for the host. */

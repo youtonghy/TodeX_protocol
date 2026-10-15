@@ -4,12 +4,16 @@ import { ConnectionError } from './connectionError';
  * SSH hosts, keys and remote file connections served by `todex-agentd`
  * (`/v2/ssh/*`, `/v2/ftp/*`, `/v2/remote/*`). Every host and key belongs to the
  * machine running the backend, never to the client. Passwords and key
- * passphrases are sent per request and are never persisted by either side.
+ * passphrases are sent per request and are never persisted by the backend;
+ * a client may keep a host password in the OS keychain.
  */
 
 export type SshHostSource = 'sshConfig' | 'managed';
 
 export type SshHostOption = { key: string; value: string };
+
+/** `password` hosts skip keys and ask for a password; absent means `key`. */
+export type SshAuthMethod = 'key' | 'password';
 
 /** Editable definition of a TodeX-managed host (`$DATA_DIR/ssh/hosts.conf`). */
 export type ManagedHost = {
@@ -20,6 +24,7 @@ export type ManagedHost = {
   identityFile?: string;
   proxyJump?: string;
   options?: SshHostOption[];
+  authMethod?: SshAuthMethod;
 };
 
 export type SshResolvedHost = {

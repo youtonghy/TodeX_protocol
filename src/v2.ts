@@ -1617,8 +1617,12 @@ export class V2ApiClient {
     });
   }
 
-  async testSshHost(alias: string): Promise<SshTestResult> {
-    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/test`, { method: 'POST' });
+  /** With `password`, ssh answers one password prompt with it instead of only trying keys. */
+  async testSshHost(alias: string, password?: string): Promise<SshTestResult> {
+    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/test`, {
+      method: 'POST',
+      ...(password ? { body: JSON.stringify({ password }) } : {}),
+    });
   }
 
   async getSshSettings(): Promise<SshConnectionSettings> {

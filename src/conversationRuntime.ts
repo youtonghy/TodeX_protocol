@@ -165,11 +165,22 @@ export function upsertUsageRecord(records: UsageRecord[], record: UsageRecord, l
 function usageProjection(state: ConversationRuntime, event: ConversationEvent, turnId: string): void {
   const usage = contextUsageFromV2Event(event);
   if (!usage) return;
-  state.contextUsage = usage;
-  state.compaction = { ...state.compaction, usedTokens: usage.usedTokens, contextWindow: usage.contextWindow,
-    recommended: contextCompactionStatus(usage.usedTokens, usage.contextWindow) === 'recommended' };
   const payload = object(event.payload);
   const provider = string(event.provider) || string(payload.provider) || 'unknown';
+  // A subagent's call or a turn's summed calls do not describe the main
+  // context; they only refine its window. Claude turn totals predate the flag.
+  const summed = payload.aggregation === 'sum'
+    || (provider === 'claude-code' && canonicalConversationEventType(event) === 'usage.updated' && !object(payload.usage).last);
+  const previous = state.contextUsage;
+  const context = payload.subagentId || summed
+    ? previous && usage.contextWindow ? { ...previous, contextWindow: usage.contextWindow } : previous
+    : { ...usage, contextWindow: usage.contextWindow
+      ?? (previous && (!usage.model || !previous.model || usage.model === previous.model) ? previous.contextWindow : undefined) };
+  if (context && context !== previous) {
+    state.contextUsage = context;
+    state.compaction = { ...state.compaction, usedTokens: context.usedTokens, contextWindow: context.contextWindow,
+      recommended: contextCompactionStatus(context.usedTokens, context.contextWindow) === 'recommended' };
+  }
   const raw = usageRecordFromV2Event(event, { provider });
   if (!raw) return;
   const normalized = object(payload.usage);

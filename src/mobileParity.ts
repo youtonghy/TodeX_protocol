@@ -594,6 +594,14 @@ export function contextUsageFromV2Event(
   const normalizedUsage = objectAt(payload, ['usage']);
   const normalizedLast = objectAt(normalizedUsage, ['last']);
   const normalizedBlock = conversationBlock(payload, '');
+  // Anthropic counts cache reads and writes beside `input_tokens`, so the
+  // context holds all of them; elsewhere cached input is part of `input`.
+  const cacheSemantics = readString(normalizedUsage, ['cacheSemantics']) || readString(payload, ['cacheSemantics']);
+  const additiveCache = cacheSemantics
+    ? cacheSemantics === 'additional'
+    : (readString(eventRecord, ['provider']) || readString(payload, ['provider'])) === 'claude-code';
+  const used = (total: number, input: number, output: number, cacheRead: number, cacheWrite: number) =>
+    total || input + output + (additiveCache ? cacheRead + cacheWrite : 0);
   if ((eventType === 'usage.updated' || normalizedBlock?.category === 'usage') && normalizedLast) {
     const inputTokens = usageField(normalizedLast, ['input']);
     const outputTokens = usageField(normalizedLast, ['output']);
@@ -602,7 +610,7 @@ export function contextUsageFromV2Event(
     const total = usageField(normalizedLast, ['total']);
     const model = readString(payload, ['model', 'modelId', 'model_id']);
     return {
-      usedTokens: total || inputTokens + outputTokens,
+      usedTokens: used(total, inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens),
       contextWindow: usageField(payload, ['contextWindow', 'context_window']) || undefined,
       inputTokens,
       outputTokens,
@@ -620,7 +628,7 @@ export function contextUsageFromV2Event(
     const total = usageField(last, ['totalTokens', 'total_tokens', 'total']);
     const model = readString(payload, ['model', 'modelId', 'model_id']);
     return {
-      usedTokens: total || inputTokens + outputTokens,
+      usedTokens: used(total, inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens),
       contextWindow: usageField(tokenUsage, ['modelContextWindow', 'model_context_window', 'contextWindow', 'context_window']) || undefined,
       inputTokens,
       outputTokens,
@@ -644,8 +652,10 @@ export function contextUsageFromV2Event(
   const cachedInputTokens = usageField(usage, ['cacheRead', 'cache_read', 'cachedInputTokens', 'cached_input_tokens', 'cacheReadInputTokens', 'cache_read_input_tokens']);
   const cacheWriteTokens = usageField(usage, ['cacheWrite', 'cache_write', 'cacheWriteInputTokens', 'cache_write_input_tokens', 'cacheCreationInputTokens', 'cache_creation_input_tokens']);
   const total = usageField(usage, ['totalTokens', 'total_tokens', 'total']);
+  const contextWindow = usageField(payload, ['contextWindow', 'context_window']);
   return {
-    usedTokens: total || inputTokens + outputTokens,
+    usedTokens: used(total, inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens),
+    ...(contextWindow ? { contextWindow } : {}),
     inputTokens,
     outputTokens,
     cachedInputTokens,

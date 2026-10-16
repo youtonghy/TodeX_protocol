@@ -357,6 +357,30 @@ test('final turn usage replaces all early request snapshots without losing prior
   assert.deepEqual(apply(state, ...events).state.usageRecords, state.usageRecords);
 });
 
+test('claude context follows the last main-thread call, not the turn sum or a subagent', () => {
+  const call = (input, cacheRead, cacheWrite, output) => ({ input_tokens: input, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite, output_tokens: output });
+  const assistant = (sequence, id, usage, extra = {}) => event(sequence, 'message.completed', { provider: 'claude-code', turnId: 't',
+    message: { id, role: 'assistant', model: 'claude-opus-5-5', content: [], usage }, ...extra });
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    assistant(2, 'm1', call(2, 10443, 11684, 17)),
+    assistant(3, 'm2', call(2, 22127, 5583, 1)),
+    assistant(4, 'sub', call(5, 900000, 0, 3), { subagentId: 'agent-1' }),
+    event(5, 'usage.updated', { provider: 'claude-code', turnId: 't', scope: 'turn', aggregation: 'sum',
+      usage: call(4, 32570, 17267, 80), contextWindow: 1000000 })).state;
+  assert.equal(state.contextUsage.usedTokens, 2 + 22127 + 5583 + 1);
+  assert.equal(state.contextUsage.cachedInputTokens, 22127);
+  assert.equal(state.contextUsage.contextWindow, 1000000);
+  assert.equal(state.compaction.usedTokens, 27713);
+  // Journals written before the flag still keep the last call as context.
+  const legacy = apply(empty(), assistant(1, 'm2', call(2, 22127, 5583, 1)),
+    event(2, 'usage.updated', { provider: 'claude-code', turnId: 't', scope: 'turn', usage: call(4, 32570, 17267, 80) })).state;
+  assert.equal(legacy.contextUsage.usedTokens, 27713);
+  // The window carries over to the next call of the same model.
+  const next = apply(state, assistant(6, 'm3', call(3, 27710, 40, 9))).state;
+  assert.equal(next.contextUsage.contextWindow, 1000000);
+  assert.equal(next.contextUsage.usedTokens, 27762);
+});
+
 test('commentary deltas preserve their started phase and stay visible in progress', () => {
   const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'message.started', { turnId: 't', block: { id: 'm', category: 'assistant_progress', phase: 'started', text: '' } }),

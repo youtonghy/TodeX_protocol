@@ -1182,3 +1182,38 @@ test('WebSocket plaintext on loopback without a pinned key', () => {
   ws.onmessage({ data: '{"type":"server.pong"}' });
   assert.deepEqual(messages, ['{"type":"server.pong"}']);
 });
+
+test('a backend behind a reverse-proxy path prefix keeps the prefix on the wire, not in signatures', async () => {
+  const { normalizeServerUrl, buildHttpUrl, joinServerPath } = require(path.join(compiledDir, 'todex.js'));
+  const { buildV2WebSocketUrl } = require(path.join(compiledDir, 'v2.js'));
+  // Root addresses are unchanged.
+  assert.equal(normalizeServerUrl('localhost:7345/'), 'http://127.0.0.1:7345');
+  assert.equal(normalizeServerUrl('https://h.example'), 'https://h.example');
+  assert.equal(buildHttpUrl('http://10.0.0.5:7345', '/health'), 'http://10.0.0.5:7345/health');
+  assert.equal(buildV2WebSocketUrl('https://h.example/'), 'wss://h.example/v2/ws');
+  // A prefix survives normalization and every URL builder.
+  const base = 'https://h.example/backend/home';
+  assert.equal(normalizeServerUrl(`${base}/?x=1#y`), base);
+  assert.equal(buildHttpUrl(base, '/v2/device-pairing/create'), `${base}/v2/device-pairing/create`);
+  assert.equal(joinServerPath(`${base}/`, 'v2/version'), `${base}/v2/version`);
+  assert.equal(buildV2WebSocketUrl(base), 'wss://h.example/backend/home/v2/ws');
+
+  const server = fakeSealedServer();
+  const outer = [];
+  // The proxy strips the prefix before the backend sees the request.
+  const proxied = async (url, init) => {
+    const parsed = new URL(url);
+    outer.push(parsed.pathname);
+    parsed.pathname = parsed.pathname.replace(/^\/backend\/home/, '');
+    return server.fetchImpl(parsed.toString(), init);
+  };
+  const device = generateDeviceIdentity();
+  const transport = createSecureTransport({ profile: pinnedProfile(base), fetchImpl: proxied, signer: deviceRequestSigner(device) });
+  assert.equal((await transport.fetch({ method: 'GET', path: '/v2/providers' })).status, 202);
+  assert.deepEqual(outer, ['/backend/home/v2/sealed']);
+  assert.equal(server.calls[0].inner.path, '/v2/providers');
+
+  FakeWebSocket.instances = [];
+  createSecureTransport({ profile: pinnedProfile(base), WebSocketImpl: FakeWebSocket, signer: deviceRequestSigner(device) }).openSocket();
+  assert.equal(FakeWebSocket.instances[0].url.pathname, '/backend/home/v2/ws');
+});

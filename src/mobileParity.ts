@@ -139,7 +139,7 @@ function normalizeProfileServerUrl(raw: string): string {
     const origin = parsed.port
       ? `${protocol}//${host}:${parsed.port}`
       : `${protocol}//${host}`;
-    return origin.replace(/\/+$/, '');
+    return `${origin}${parsed.pathname.replace(/\/+$/, '')}`;
   } catch {
     return candidate.replace(/\/+$/, '');
   }

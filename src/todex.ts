@@ -1,3 +1,4 @@
+import { joinServerPath } from './serverUrl';
 export type AppTab = 'chat' | 'settings';
 
 export type ConnectionSettings = {
@@ -466,7 +467,9 @@ export function normalizeServerUrl(raw: string): string {
     const protocol = parsed.protocol === 'https:' ? 'https:' : 'http:';
     const host = hostname.includes(':') ? `[${hostname}]` : hostname;
     const origin = parsed.port ? `${protocol}//${host}:${parsed.port}` : `${protocol}//${host}`;
-    return origin.replace(/\/+$/, '');
+    // A path prefix (a backend behind a reverse proxy at `/backend/<id>`) is
+    // kept; query and fragment are not part of a server address.
+    return `${origin}${parsed.pathname.replace(/\/+$/, '')}`;
   } catch {
     return candidate.replace(/\/+$/, '');
   }
@@ -797,7 +800,7 @@ export function buildHttpUrl(serverUrl: string, pathname: string): string {
     : url.startsWith('wss://')
       ? url.replace(/^wss:\/\//i, 'https://')
       : url;
-  return new URL(pathname, normalized).toString();
+  return joinServerPath(normalized, pathname);
 }
 
 export function displayNameFromPath(path: string): string {
@@ -2882,4 +2885,5 @@ export type {
   WorkspaceLinkTarget,
 } from './mobileParity';
 
+export { joinServerPath } from './serverUrl';
 export * from './conversationRuntime';

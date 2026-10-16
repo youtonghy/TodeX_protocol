@@ -1,5 +1,6 @@
 import { ConnectionError } from './connectionError';
 import { deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
+import { joinServerPath } from './serverUrl';
 import { createSecureTransport, deviceRequestSigner, type SecureTransport } from './secureTransport';
 import type { TransportEncryptionProtocol } from './transportCrypto';
 import type {
@@ -1017,12 +1018,10 @@ export function parseV2Message(raw: string | ArrayBuffer): V2Message | null {
 
 export function buildV2WebSocketUrl(serverUrl: string): string {
   const normalized = serverUrl.trim().replace(/\/+$/, '');
-  const url = normalized.startsWith('ws://') || normalized.startsWith('wss://')
-    ? new URL('/v2/ws', normalized)
-    : new URL('/v2/ws', normalized.startsWith('https://')
-      ? normalized.replace(/^https:\/\//i, 'wss://')
-      : normalized.replace(/^http:\/\//i, 'ws://'));
-  return url.toString();
+  return joinServerPath(
+    normalized.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://'),
+    '/v2/ws',
+  );
 }
 
 /** Value a client declares as `historyEncryption` (WS handshake query,

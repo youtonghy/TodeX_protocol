@@ -1,6 +1,7 @@
 import { ConnectionError, ConnectionErrorType } from './connectionError';
 import { deviceAuthHeaders, deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
 import { isLoopbackUrl } from './mobileParity';
+import { joinServerPath } from './serverUrl';
 import {
   TRANSPORT_V2_SEALED_CONTENT_TYPE,
   TRANSPORT_V2_SEALED_PATH,
@@ -425,7 +426,7 @@ function bodyBytes(body: SecureRequest['body']): Uint8Array {
 }
 
 function originUrl(serverUrl: string, path: string, query = ''): string {
-  const url = new URL(path, serverUrl.replace(/\/+$/, '') + '/');
+  const url = new URL(joinServerPath(serverUrl, path));
   url.search = query;
   return url.toString();
 }

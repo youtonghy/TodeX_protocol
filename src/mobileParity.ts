@@ -711,6 +711,11 @@ export type ConversationBlockCategory =
 
 export type ConversationBlockPhase = 'started' | 'delta' | 'completed' | 'failed';
 
+/** What made a provider start a turn on its own (backend `triggerDetail.kind`). */
+export type ProviderTurnTrigger = 'background_task' | 'wakeup' | 'cron' | 'unknown';
+
+const PROVIDER_TURN_TRIGGERS: ReadonlySet<string> = new Set(['background_task', 'wakeup', 'cron']);
+
 export type TimelineEntry = {
   id: string;
   kind: 'incoming' | 'outgoing' | 'system';
@@ -746,6 +751,10 @@ export type TimelineEntry = {
    * `parent_tool_use_id` frame). Subagent activity folds into the trace but
    * never splits the assistant stream it happens to interleave. */
   subagentId?: string;
+  /** Opens a turn the provider started on its own (`turn.started` with
+   * `trigger: "provider"`): no user message precedes it, so the row says
+   * why it began. The subtitle holds the provider's summary, if any. */
+  providerTrigger?: ProviderTurnTrigger;
   /** The subtitle holds only streamed deltas, so text projected from earlier
    * history for the same row precedes it instead of being replaced. */
   streamedText?: boolean;
@@ -1385,6 +1394,20 @@ export function classifyV2ConversationEvent(
     }
   }
 
+  // A turn the provider opened on its own, e.g. after a background task
+  // finished: one quiet notice stands in for the missing user message.
+  if (type === 'turn.started' && payload.trigger === 'provider') {
+    const detail = asRecord(payload.triggerDetail) || {};
+    const kind = readString(detail, ['kind']);
+    return {
+      id: eventId,
+      kind: 'system',
+      title: type,
+      subtitle: previewText(readString(detail, ['summary'])),
+      providerTrigger: PROVIDER_TURN_TRIGGERS.has(kind) ? kind as ProviderTurnTrigger : 'unknown',
+      ...base,
+    };
+  }
   if (type === 'conversation.created' || type === 'turn.started' || type === 'turn.completed' || type === 'turn.cancelled') {
     return null;
   }

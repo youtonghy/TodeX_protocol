@@ -586,3 +586,51 @@ test('lost journal records render one notice per run of placeholders', () => {
   assert.equal(replayed.timeline.length, 1);
   assert.equal(parity.reduceConversationEvents(events.slice(2, 4), 'workspace-1').timeline.length, 1);
 });
+
+test('a provider-initiated turn opens with one notice row, a user turn with none', () => {
+  const started = (payload, sequence = 1) => event({
+    eventId: `evt-${sequence}`, sequence, type: 'turn.started', payload: { turnId: `turn-${sequence}`, ...payload },
+  });
+  assert.equal(parity.classifyV2ConversationEvent(started({}), 'ws'), null);
+  assert.equal(parity.classifyV2ConversationEvent(started({ trigger: 'user' }), 'ws'), null);
+
+  const background = parity.classifyV2ConversationEvent(started({
+    trigger: 'provider',
+    triggerDetail: { kind: 'background_task', taskIds: ['b74'], taskType: 'local_bash',
+      summary: 'Background command done (exit code 0)' },
+  }), 'ws');
+  assert.equal(background.kind, 'system');
+  assert.equal(background.providerTrigger, 'background_task');
+  assert.equal(background.subtitle, 'Background command done (exit code 0)');
+  assert.equal(background.turnId, 'turn-1');
+
+  const wakeup = parity.classifyV2ConversationEvent(started({ trigger: 'provider', triggerDetail: { kind: 'wakeup' } }), 'ws');
+  assert.equal(wakeup.providerTrigger, 'wakeup');
+  assert.equal(wakeup.subtitle, '');
+  for (const triggerDetail of [undefined, { kind: 'something-new' }, 'not an object']) {
+    const entry = parity.classifyV2ConversationEvent(started({ trigger: 'provider', triggerDetail }), 'ws');
+    assert.equal(entry.providerTrigger, 'unknown');
+  }
+});
+
+test('the live runtime and the replay both show the provider-turn notice before its reply', () => {
+  const events = [
+    event({ eventId: 'e1', sequence: 1, type: 'turn.started',
+      payload: { turnId: 't-own', trigger: 'provider', triggerDetail: { kind: 'wakeup' } } }),
+    event({ eventId: 'e2', sequence: 2, type: 'message.delta',
+      payload: { turnId: 't-own', delta: { type: 'text', text: 'woke' } } }),
+    event({ eventId: 'e3', sequence: 3, type: 'turn.completed', payload: { turnId: 't-own' } }),
+  ];
+  const replay = parity.reduceConversationEvents(events, 'ws').timeline;
+  const live = runtime.applyConversationRuntimeEvents(
+    runtime.createConversationRuntime('conversation-1', 'ws'), events).state.timeline;
+  // Timelines are newest first; clients order rows by journal sequence.
+  for (const timeline of [replay, live]) {
+    const notice = timeline.find((entry) => entry.providerTrigger);
+    const reply = timeline.find((entry) => entry.kind === 'incoming');
+    assert.equal(notice.providerTrigger, 'wakeup');
+    assert.equal(notice.turnId, 't-own');
+    assert.equal(reply.subtitle, 'woke');
+    assert.ok(notice.sequence < reply.firstSequence);
+  }
+});

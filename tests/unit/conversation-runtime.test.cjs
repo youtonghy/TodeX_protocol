@@ -381,6 +381,20 @@ test('claude context follows the last main-thread call, not the turn sum or a su
   assert.equal(next.contextUsage.usedTokens, 27762);
 });
 
+test('claude turn sums replace the per-call records of that turn only', () => {
+  const call = (input, cacheRead, cacheWrite, output) => ({ input_tokens: input, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite, output_tokens: output });
+  const assistant = (sequence, turnId, id, usage) => event(sequence, 'message.completed', { provider: 'claude-code', turnId,
+    message: { id, role: 'assistant', model: 'claude-haiku-5-5', content: [], usage } });
+  const sum = (sequence, turnId, usage) => event(sequence, 'usage.updated', { provider: 'claude-code', turnId, scope: 'turn', aggregation: 'sum', usage });
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 'a' }),
+    assistant(2, 'a', 'm1', call(2, 0, 21380, 4)), sum(3, 'a', call(2, 0, 21380, 4)),
+    event(4, 'turn.started', { turnId: 'b' }),
+    assistant(5, 'b', 'm2', call(2, 10443, 11711, 16)), assistant(6, 'b', 'm3', call(2, 22154, 5961, 5)),
+    sum(7, 'b', call(6, 32597, 34135, 369)), sum(8, 'b', call(8, 60712, 34850, 492))).state;
+  assert.deepEqual(state.usageRecords.map(record => [record.turnId, runtime.usageTotalTokens(record)]).sort(),
+    [['a', 21386], ['b', 8 + 60712 + 34850 + 492]]);
+});
+
 test('commentary deltas preserve their started phase and stay visible in progress', () => {
   const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'message.started', { turnId: 't', block: { id: 'm', category: 'assistant_progress', phase: 'started', text: '' } }),

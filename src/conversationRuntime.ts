@@ -221,8 +221,9 @@ function usageProjection(state: ConversationRuntime, event: ConversationEvent, t
       ?? object(message.usage).totalTokens ?? object(message.usage).total_tokens ?? object(message.usage).total;
     if (typeof explicitTotal === 'number') record.totalTokens = number(explicitTotal);
   }
-  // A provider's final turn snapshot supersedes its earlier per-request usage.
-  if (payload.scope === 'turn' && payload.aggregation === 'snapshot' && payload.final === true && turnId) {
+  // A provider's final turn snapshot, or a running sum of the turn's calls,
+  // supersedes its earlier per-request usage.
+  if (payload.scope === 'turn' && turnId && ((payload.aggregation === 'snapshot' && payload.final === true) || summed)) {
     state.usageRecords = state.usageRecords.filter(item => item.turnId !== turnId);
     record = { ...record, id: `${state.conversationId}:usage:${turnId}`, scope: 'turn' };
   }

@@ -356,6 +356,57 @@ export type CliSettingsDocument = {
   parseError?: string;
 };
 
+/** A package in Pi's global `settings.json` `packages`. `filtered` entries carry `pi config` resource filters and are not toggled from TodeX. */
+export type PiPackage = {
+  source: string;
+  state: 'enabled' | 'disabled' | 'filtered';
+  installedPath?: string;
+  name?: string;
+  version?: string;
+  description?: string;
+};
+
+export type PiBuiltinExtensionId = 'mcp' | 'codemode' | 'tool-search' | 'llama.cpp';
+
+export type PiPluginList = {
+  settingsPath: string;
+  /** Revision of `settings.json`, echoed by `setPiPluginState`. */
+  revision: string;
+  packages: PiPackage[];
+  builtins: { id: PiBuiltinExtensionId; enabled: boolean }[];
+  /** Why `pi list` could not report install paths. */
+  listError?: string;
+  parseError?: string;
+};
+
+/** Known Pi extensions whose configuration file the backend reads and writes. */
+export type PiPluginConfigId =
+  | 'permission-system' | 'mcp-adapter' | 'web-access' | 'exa' | 'fff' | 'subagents'
+  | 'goal' | 'plan-mode' | 'tasks' | 'context-prune' | 'cache-optimizer';
+
+/** Stands in for a stored credential; sending it back keeps the stored value. */
+export const PI_SECRET_PLACEHOLDER = '__todex_secret__';
+
+/** A known Pi extension's configuration file, without its raw text; credentials are masked with `PI_SECRET_PLACEHOLDER`. */
+export type PiPluginConfigDocument = {
+  plugin: PiPluginConfigId;
+  path: string;
+  exists: boolean;
+  revision: string;
+  settings: Record<string, unknown> | null;
+  parseError?: string;
+};
+
+export type PiPackageOperation = {
+  id: string;
+  action: 'install' | 'remove';
+  source: string;
+  status: 'running' | 'succeeded' | 'failed';
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+};
+
 /** A CLI's global instruction file on the backend host (Claude Code `CLAUDE.md`, Codex / Pi `AGENTS.md`). */
 export type CliInstructionsDocument = {
   path: string;
@@ -1135,6 +1186,36 @@ export class V2ApiClient {
   /** Replaces the whole file with `text`, which must parse (a JSON object, or TOML). A stale `revision` is `409 CONFLICT`. */
   async replaceCliSettings(provider: CliSettingsProvider, revision: string, text: string): Promise<CliSettingsDocument> {
     return this.request(`/v2/providers/${provider}/settings`, { method: 'PUT', body: JSON.stringify({ revision, text }) });
+  }
+
+  async listPiPlugins(): Promise<PiPluginList> {
+    return this.request('/v2/providers/pi/plugins');
+  }
+
+  /** Enables or disables a configured package or built-in extension. A stale `revision` is `409 CONFLICT`. */
+  async setPiPluginState(revision: string, target: { source: string } | { builtin: PiBuiltinExtensionId }, enabled: boolean): Promise<PiPluginList> {
+    return this.request('/v2/providers/pi/plugins/state', { method: 'PUT', body: JSON.stringify({ revision, ...target, enabled }) });
+  }
+
+  /** Starts `pi install` / `pi remove` in the background; poll `getPiPackageOperation`. */
+  async startPiPackageOperation(action: PiPackageOperation['action'], source: string): Promise<PiPackageOperation> {
+    return this.request('/v2/providers/pi/plugins/operations', { method: 'POST', body: JSON.stringify({ action, source }) });
+  }
+
+  async getPiPackageOperation(operationId: string): Promise<PiPackageOperation> {
+    return this.request(`/v2/providers/pi/plugins/operations/${encodeURIComponent(operationId)}`);
+  }
+
+  async getPiPluginConfig(plugin: PiPluginConfigId): Promise<PiPluginConfigDocument> {
+    return this.request(`/v2/providers/pi/plugin-config/${plugin}`);
+  }
+
+  /**
+   * RFC 7386 merge patch; `PI_SECRET_PLACEHOLDER` values are ignored. Each key path in `replace` is then set
+   * to the patch's object as sent, keeping its key order. A stale `revision` is `409 CONFLICT`.
+   */
+  async patchPiPluginConfig(plugin: PiPluginConfigId, revision: string, patch: Record<string, unknown>, replace: string[][] = []): Promise<PiPluginConfigDocument> {
+    return this.request(`/v2/providers/pi/plugin-config/${plugin}`, { method: 'PATCH', body: JSON.stringify({ revision, patch, replace }) });
   }
 
   async getCliInstructions(provider: CliSettingsProvider): Promise<CliInstructionsDocument> {

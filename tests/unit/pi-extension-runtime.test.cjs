@@ -117,6 +117,19 @@ test('nested session scope is supported without losing ordinary turn approval li
   assert.equal(update.state.status, 'completed');
 });
 
+test('subagent completion notices summarise their runs instead of the model-facing XML', () => {
+  const details = { id: 'a1', description: 'Read note', status: 'completed', resultPreview: 'hello\n  world',
+    others: [{ id: 'a2', description: 'Scan', status: 'error', error: 'boom' }, { id: 'a3', status: 'stopped' }] };
+  const update = apply(empty(), lifecycle(1, 'r1'),
+    custom(2, { customType: 'subagent-notification', content: '<task-notification>…</task-notification>', details }));
+  const entry = update.state.timeline[0];
+  assert.equal(entry.subtitle, '子代理「Read note」已完成 · hello world\n子代理「Scan」失败 · boom\n子代理「a3」已取消');
+  assert.equal(entry.extensionMessage.content, '<task-notification>…</task-notification>');
+  // Other plugins' details never replace their text.
+  const other = apply(empty(), lifecycle(1, 'r1'), custom(2, { details: { description: 'x', status: 'completed' } }));
+  assert.equal(other.state.timeline[0].subtitle, 'Review is ready');
+});
+
 test('new runtime may reuse a permission id without a late old resolution dismissing it', () => {
   const update = apply(empty(), lifecycle(1, 'r1'), permission(2, 'permission.requested', 'p'), lifecycle(3, 'r2'),
     permission(4, 'permission.requested', 'p', { runtimeId: 'r2' }), permission(5, 'permission.resolved', 'p'));

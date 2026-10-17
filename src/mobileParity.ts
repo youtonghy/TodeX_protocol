@@ -32,6 +32,27 @@ function asRecord(value: unknown): JsonRecord | null {
     : null;
 }
 
+const SUBAGENT_NOTIFICATION_STATUS: Record<string, string> = {
+  completed: '已完成', steered: '已完成', error: '失败', aborted: '已取消', stopped: '已取消',
+};
+
+/** `@tintinweb/pi-subagents` completion notices carry `<task-notification>`
+ * XML meant for the model; their details read as one line per run instead. */
+function subagentNotificationSummary(customType: string, details: unknown): string {
+  const record = asRecord(details);
+  if (customType !== 'subagent-notification' || !record) return '';
+  const others = Array.isArray(record.others) ? record.others : [];
+  return [record, ...others].flatMap(item => {
+    const run = asRecord(item);
+    if (!run) return [];
+    const status = readString(run, ['status']);
+    const preview = readString(run, ['resultPreview', 'error']).replace(/\s+/g, ' ').trim();
+    const line = [`子代理「${readString(run, ['description', 'id']) || '未命名'}」${SUBAGENT_NOTIFICATION_STATUS[status] ?? status}`,
+      preview.length > 120 ? `${preview.slice(0, 120)}…` : preview].filter(Boolean).join(' · ');
+    return [line];
+  }).join('\n');
+}
+
 function readString(record: JsonRecord | null | undefined, keys: string[]): string {
   if (!record) {
     return '';
@@ -1173,7 +1194,7 @@ export function classifyV2ConversationEvent(
       ...base,
       id: `v2-extension-${conversationId}-${runtimeId}-${messageId}`,
       kind: 'system', category: 'extension', phase: 'completed', title: customType,
-      subtitle: text || '此插件消息包含非文本内容。',
+      subtitle: subagentNotificationSummary(customType, message.details) || text || '此插件消息包含非文本内容。',
       extensionMessage: { role: 'custom', customType, content: message.content,
         display: true, runtimeId, messageId,
         ...(message.details !== undefined ? { details: message.details } : {}),

@@ -23,6 +23,7 @@ import type {
 } from './ssh';
 import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
 import type { AgentCallEventType } from './agentCalling';
+import type { PromptUploadChunkResult } from './promptUploads';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -1932,6 +1933,25 @@ export class V2ApiClient {
   ): Promise<{ sizeBytes: number }> {
     const query = new URLSearchParams({ path, offset: String(offset), overwrite: String(overwrite) });
     return this.request(`/v2/remote/connections/${encodeURIComponent(id)}/upload?${query}`, {
+      method: 'PUT', body: bytes as Uint8Array<ArrayBuffer>,
+    }, timeoutMs);
+  }
+
+  /**
+   * Writes one chunk of a prompt attachment (`PUT /v2/uploads`). The first
+   * chunk (offset 0, no `uploadId`) starts a new upload; later chunks pass
+   * the returned `uploadId` and start where the stored file ends.
+   */
+  async uploadPromptChunk(
+    name: string,
+    offset: number,
+    bytes: Uint8Array,
+    uploadId?: string,
+    timeoutMs = 10 * 60_000,
+  ): Promise<PromptUploadChunkResult> {
+    const query = new URLSearchParams({ name, offset: String(offset) });
+    if (uploadId) query.set('uploadId', uploadId);
+    return this.request(`/v2/uploads?${query}`, {
       method: 'PUT', body: bytes as Uint8Array<ArrayBuffer>,
     }, timeoutMs);
   }

@@ -1,4 +1,5 @@
 import type { PromptContentRef, ConversationControlAction } from './v2';
+import { uploadedPromptContent } from './promptUploads';
 
 export type CommandFrame = { id: string; type: string; payload: Record<string, unknown> };
 export class CommandOutcomeUnknown extends Error {}
@@ -42,8 +43,15 @@ export class ConversationCommands {
   }
 }
 
-export function promptContentFromAttachments(attachments: readonly { kind: string; name: string; dataUrl: string; mimeType: string; textContent?: string }[]): PromptContentRef[] {
+/** Prompt `content` for composer attachments. Uploaded ones (with
+ * `uploadedPath`) are named by their path on the daemon's machine; the rest
+ * travel inline. */
+export function promptContentFromAttachments(attachments: readonly { kind: string; name: string; dataUrl: string; mimeType: string; textContent?: string; uploadedPath?: string; sizeBytes?: number | null }[]): PromptContentRef[] {
+  const imageBudget = { used: 0 };
   return attachments.map((attachment) => {
+    if (attachment.uploadedPath) {
+      return uploadedPromptContent({ path: attachment.uploadedPath, name: attachment.name, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes ?? null }, imageBudget);
+    }
     if (attachment.kind === 'image') {
       const match = /^data:(image\/[^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(attachment.dataUrl);
       const data = match?.[2].replace(/\s/g, '') ?? '';

@@ -1162,6 +1162,9 @@ export function classifyV2ConversationEvent(
   // Desktop browser and Computer Use actions also show as the MCP tool call;
   // their views follow ConversationRuntime.desktopBrowser / desktopComputer.
   if (type.startsWith('desktop.')) return null;
+  // Agent calls show as the `todex_agents` MCP tool call; their view follows
+  // ConversationRuntime.agentCalls.
+  if (type.startsWith('agent.call.')) return null;
   const eventId = readString(eventRecord, ['eventId', 'event_id', 'id']) || `sequence-${readNumber(eventRecord, ['sequence'], 0)}`;
   const conversationId = readString(eventRecord, ['conversationId', 'conversation_id']);
   const content = conversationContent(payload, message, delta);

@@ -5,6 +5,8 @@ import { assistantSegmentBase, classifyV2ConversationEvent, contextUsageFromV2Ev
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 import { SSH_EXEC_RUN_LIMIT, type SshExecOutputChunk, type SshExecRun } from './ssh';
 import type { DesktopBrowserActionEvent, DesktopComputerActionEvent } from './agentDesktop';
+import { AGENT_CALL_STATUSES, isActiveAgentCallStatus, type AgentCallError, type AgentCallSession, type AgentCallStatus, type AgentCallTurn } from './agentCalling';
+export type { AgentCallError, AgentCallSession, AgentCallStatus, AgentCallTurn } from './agentCalling';
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue => value && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};
@@ -84,6 +86,10 @@ export type ConversationRuntime = {
   contextUsage: ConversationContextUsage | null;
   cumulativeUsage: Record<string, number> | null;
   subagents: SubagentRun[];
+  /** Child conversations this conversation's agent called through the
+   * `todex_agents` MCP server (`agent.call.*`), one per child; active ones
+   * first, then settled ones. */
+  agentCalls: AgentCallSession[];
   /** Agent `ssh_exec` calls, oldest first (see `ssh.exec.*` events). */
   sshExecs: SshExecRun[];
   /** Agent desktop browser: whether the conversation holds a grant, and its
@@ -144,7 +150,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
   return {
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
-    subagents: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
+    subagents: [], agentCalls: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false, followUps: EMPTY_FOLLOW_UP_QUEUE,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
@@ -736,6 +742,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
       }
     }
   }
+  if (type.startsWith('agent.call.')) projectAgentCall(state, type.slice('agent.call.'.length), payload, event);
   if (type.startsWith('ssh.exec.')) projectSshExec(state, type.slice('ssh.exec.'.length), payload, event.time);
   if (type === 'desktop.browser.action' || type === 'desktop.browser.grant' || type === 'desktop.browser.tab') projectDesktopBrowser(state, type, payload, event.time);
   if (type === 'desktop.computer.action' || type === 'desktop.computer.session' || type === 'desktop.computer.grant') projectDesktopComputer(state, type, payload, event.time);
@@ -1083,6 +1090,127 @@ function appendSshExecOutput(output: SshExecOutputChunk[], chunks: readonly SshE
   return next;
 }
 
+const SETTLED_AGENT_CALL_PHASES: Record<string, AgentCallStatus> = {
+  completed: 'completed', failed: 'failed', cancelled: 'cancelled',
+};
+function agentCallStatus(value: unknown): AgentCallStatus | undefined {
+  const status = string(value);
+  return (AGENT_CALL_STATUSES as readonly string[]).includes(status) ? status as AgentCallStatus : undefined;
+}
+function agentCallError(value: unknown): AgentCallError | undefined {
+  if (typeof value === 'string') return value ? { message: value } : undefined;
+  const record = object(value);
+  const message = string(record.message);
+  const code = string(record.code);
+  if (!message && !code) return undefined;
+  return { ...(code ? { code } : {}), message: message || code };
+}
+function isSettledAgentCall(session: AgentCallSession): boolean {
+  return !isActiveAgentCallStatus(session.status);
+}
+function latestAgentCallStatus(turns: AgentCallTurn[], fallback: AgentCallStatus): AgentCallStatus {
+  return turns.length ? turns[turns.length - 1].status : fallback;
+}
+
+/** One `agent.call.*` event. A settled turn stays settled: a late or
+ * duplicated `started`/`updated` only fills fields it lacks, so replays and
+ * out-of-order progress frames cannot resurrect a finished call. */
+function projectAgentCall(state: ConversationRuntime, phase: string, payload: RecordValue, event: ConversationEvent): void {
+  const childConversationId = string(payload.childConversationId);
+  if (!childConversationId) return;
+  const childTurnId = string(payload.childTurnId);
+  const previous = state.agentCalls.find(item => item.childConversationId === childConversationId);
+  const turns = [...(previous?.turns ?? [])];
+  if (childTurnId) {
+    const index = turns.findIndex(turn => turn.childTurnId === childTurnId);
+    const earlier = index >= 0 ? turns[index] : undefined;
+    const settled = earlier !== undefined && !isActiveAgentCallStatus(earlier.status);
+    const reported = phase === 'started' ? 'running'
+      : phase === 'updated' ? agentCallStatus(payload.status)
+        : phase === 'failed' ? (payload.status === 'interrupted' ? 'interrupted' : 'failed')
+          : SETTLED_AGENT_CALL_PHASES[phase];
+    if (!reported && !earlier) return;
+    const status: AgentCallStatus = settled ? earlier.status
+      : reported && (phase !== 'updated' || isActiveAgentCallStatus(reported)) ? reported : earlier?.status ?? 'running';
+    const output = typeof payload.output === 'string' ? payload.output : undefined;
+    const error = phase === 'failed' ? agentCallError(payload.error) : undefined;
+    const durationMs = typeof payload.durationMs === 'number' && Number.isFinite(payload.durationMs) ? Math.max(0, payload.durationMs) : undefined;
+    const turn: AgentCallTurn = {
+      ...earlier,
+      childTurnId,
+      text: earlier?.text || string(payload.text),
+      status,
+      ...(!earlier?.model && string(payload.model) ? { model: string(payload.model) } : {}),
+      ...(!earlier?.reasoningEffort && string(payload.reasoningEffort) ? { reasoningEffort: string(payload.reasoningEffort) } : {}),
+      ...(!settled && output !== undefined ? { output } : {}),
+      ...(!settled && error ? { error } : {}),
+      ...(!settled && durationMs !== undefined ? { durationMs } : {}),
+      ...(!earlier?.startedAt && phase === 'started' ? { startedAt: string(payload.startedAt) || event.time } : {}),
+    };
+    if (index >= 0) turns[index] = turn;
+    else turns.push(turn);
+  } else if (!previous) {
+    return;
+  }
+  const session: AgentCallSession = {
+    childConversationId,
+    agent: previous?.agent || string(payload.agent),
+    ...(previous?.title || string(payload.title) ? { title: previous?.title || string(payload.title) } : {}),
+    status: latestAgentCallStatus(turns, previous?.status ?? 'running'),
+    turns,
+    updatedSequence: Math.max(previous?.updatedSequence ?? 0, event.sequence),
+  };
+  // Like subagent runs, a session keeps its slot while it updates; only a
+  // first sighting or a change between active and settled moves it.
+  if (previous && isSettledAgentCall(previous) === isSettledAgentCall(session)) {
+    state.agentCalls = state.agentCalls.map(item => (item.childConversationId === childConversationId ? session : item));
+  } else {
+    const others = state.agentCalls.filter(item => item.childConversationId !== childConversationId);
+    const firstSettled = others.findIndex(isSettledAgentCall);
+    const insertAt = isSettledAgentCall(session) ? (firstSettled === -1 ? others.length : firstSettled) : 0;
+    others.splice(insertAt, 0, session);
+    state.agentCalls = others;
+  }
+}
+
+/** A turn projected from an earlier page fills what the loaded turn lacks;
+ * the loaded (newer) status wins. */
+function mergeEarlierAgentCallTurn(older: AgentCallTurn, newer: AgentCallTurn): AgentCallTurn {
+  const merged: Record<string, unknown> = { ...newer };
+  for (const [key, value] of Object.entries(older)) {
+    if (merged[key] === undefined || merged[key] === '') merged[key] = value;
+  }
+  return { ...merged, status: newer.status } as AgentCallTurn;
+}
+
+/** Merge child sessions projected from an earlier page: turns seen only in
+ * the earlier page started first, so they go before the loaded ones. */
+function mergeEarlierAgentCalls(current: AgentCallSession[], earlier: AgentCallSession[]): AgentCallSession[] {
+  if (!earlier.length) return current;
+  const olderById = new Map(earlier.map(item => [item.childConversationId, item]));
+  const merged = current.map((session) => {
+    const older = olderById.get(session.childConversationId);
+    if (!older) return session;
+    const newerTurns = new Map(session.turns.map(turn => [turn.childTurnId, turn]));
+    const olderIds = new Set(older.turns.map(turn => turn.childTurnId));
+    const turns = [
+      ...older.turns.map(turn => {
+        const newer = newerTurns.get(turn.childTurnId);
+        return newer ? mergeEarlierAgentCallTurn(turn, newer) : turn;
+      }),
+      ...session.turns.filter(turn => !olderIds.has(turn.childTurnId)),
+    ];
+    return { ...session, agent: session.agent || older.agent,
+      ...(session.title || older.title ? { title: session.title || older.title } : {}),
+      turns, status: latestAgentCallStatus(turns, session.status) };
+  });
+  const known = new Set(current.map(item => item.childConversationId));
+  const appended = earlier.filter(item => !known.has(item.childConversationId));
+  if (!appended.length && merged.every((item, index) => item === current[index])) return current;
+  const all = [...merged, ...appended];
+  return [...all.filter(item => !isSettledAgentCall(item)), ...all.filter(isSettledAgentCall)];
+}
+
 /** An earlier page holds the start and the first output of a call whose
  * later output and completion are already loaded. */
 function mergeEarlierSshExec(older: SshExecRun, newer: SshExecRun): SshExecRun {
@@ -1218,9 +1346,11 @@ export function prependConversationRuntimeEvents(
   const subagents = partitionSettledSubagents(mergeEarlierCollection(previous.subagents, scratch.subagents, mergeEarlierSubagent));
   const memoryEntries = mergeEarlierCollection(previous.memoryEntries, scratch.memoryEntries);
   const sshExecs = mergeEarlierSshExecs(previous.sshExecs, scratch.sshExecs);
+  const agentCalls = mergeEarlierAgentCalls(previous.agentCalls, scratch.agentCalls);
   if (!scratch.timeline.length) {
     return subagents === previous.subagents && memoryEntries === previous.memoryEntries && sshExecs === previous.sshExecs
-      ? previous : { ...previous, subagents, memoryEntries, sshExecs };
+      && agentCalls === previous.agentCalls
+      ? previous : { ...previous, subagents, memoryEntries, sshExecs, agentCalls };
   }
   const older = new Map(scratch.timeline.map((entry) => [entry.id, entry]));
   let timeline = previous.timeline;
@@ -1244,7 +1374,7 @@ export function prependConversationRuntimeEvents(
     return earlier ? mergeEarlierEntry(earlier, entry) : entry;
   });
   const appended = scratch.timeline.filter((entry) => !loaded.has(entry.id));
-  return { ...previous, ...stream, subagents, memoryEntries, sshExecs,
+  return { ...previous, ...stream, subagents, memoryEntries, sshExecs, agentCalls,
     timeline: dropCoveredAssistantSegmentEntries(dropSupersededProgressEntries([...merged, ...appended])) };
 }
 

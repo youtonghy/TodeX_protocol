@@ -22,6 +22,7 @@ import type {
   SshTestResult,
 } from './ssh';
 import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
+import type { AgentCallEventType } from './agentCalling';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -687,11 +688,110 @@ export type ConversationManifest = {
    * and deletable, but every write fails with HISTORY_READ_ONLY. Omitted
    * when false. */
   legacyPlaintext?: boolean;
+  /** Set on a child conversation an agent started through the `todex_agents`
+   * MCP server (Agent Calling): the calling conversation. Children are left
+   * out of `GET /v2/conversations` unless `includeChildren=true`. */
+  parentConversationId?: string;
   /** Scheduled conversation: its follow-up queue is held (pause reason
    * `scheduled`) until `at`, then sent. The held prompts live in daemon
    * memory only, so a daemon restart loses them and marks the schedule
    * `interrupted` until the client re-arms or cancels it. */
   schedule?: ConversationSchedule;
+};
+
+// ---- Agent Calling (`/v2/agent-calling`, `/v2/api-keys`) -------------------
+
+/** Which agents and models agents may call (MCP entry) and API keys may use
+ * (CLI entry, intersected with each key's own scopes). */
+export type AgentScope = {
+  /** `null`: every agent; otherwise only these provider ids (may be empty). */
+  agents: ProviderKind[] | null;
+  /** Provider id → allowed model ids (never empty). A provider absent from
+   * the map may use all of its models. */
+  models: Partial<Record<ProviderKind, string[]>>;
+};
+
+/** How permission requests of an agent call or API-key conversation are answered. */
+export type AgentCallingApproval = 'ask' | 'auto-approve' | 'reject';
+
+/** `GET|PUT /v2/agent-calling`. A 404 means the daemon predates Agent Calling. */
+export type AgentCallingSettings = {
+  scope: AgentScope;
+  mcp: {
+    enabled: boolean;
+    approval: AgentCallingApproval;
+    /** The `todex_agents` MCP server would be injected now (enabled and at least one agent allowed). */
+    injected: boolean;
+  };
+  /** The external API listener (`/api/v1`, config.toml `[api]`). */
+  apiListener: {
+    /** Saved config. */
+    enabled: boolean;
+    host: string;
+    /** Saved config. */
+    port: number;
+    /** A listener runs in this backend process. */
+    listening: boolean;
+    /** The running listener's base URL (`http://127.0.0.1:7346/api/v1`); null when not listening. */
+    baseUrl: string | null;
+    /** The saved config differs from the running listener; takes effect after a backend restart. */
+    pendingRestart: boolean;
+  };
+  limits: { maxConcurrentCalls: number; maxWaitSecs: number; defaultWaitSecs: number };
+};
+
+/** `PUT /v2/agent-calling`; absent fields stay as they are. */
+export type AgentCallingUpdate = {
+  scope?: AgentScope;
+  mcp?: { enabled?: boolean; approval?: AgentCallingApproval };
+};
+
+/** `PUT /v2/agent-calling/api-listener`; takes effect after a backend restart. */
+export type ApiListenerUpdate = { enabled?: boolean; port?: number };
+
+/** What an API key may reach; an absent field means every agent / every workspace. */
+export type ApiKeyScopes = {
+  /** Provider ids; never empty when present. */
+  agents?: ProviderKind[];
+  /** Absolute workspace roots (1..64); never empty when present. */
+  workspaces?: string[];
+};
+
+export type ApiKeyStatus = 'active' | 'expired' | 'revoked';
+
+/** One key in `GET /v2/api-keys` (no secret). Times are Unix milliseconds. */
+export type ApiKeySummary = {
+  id: string;
+  name: string;
+  /** `tdx_<id>`: the start of the key, safe to show. */
+  prefix: string;
+  status: ApiKeyStatus;
+  scopes: ApiKeyScopes;
+  approval: AgentCallingApproval;
+  createdAt: number;
+  expiresAt: number | null;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+};
+
+/** `POST /v2/api-keys`. `name` is 1..100 characters; `expiresAt` (Unix ms) must lie in the future. */
+export type ApiKeyCreateRequest = {
+  name: string;
+  scopes?: ApiKeyScopes;
+  approval?: AgentCallingApproval;
+  expiresAt?: number | null;
+};
+
+/** `POST /v2/api-keys` result: the summary plus the full key, returned only this once. */
+export type ApiKeyCreated = ApiKeySummary & { key: string };
+
+/** `PATCH /v2/api-keys/{id}`; absent fields stay as they are. `scopes`
+ * replaces the whole scope object; `expiresAt: null` clears the expiry. */
+export type ApiKeyUpdate = {
+  name?: string;
+  scopes?: ApiKeyScopes;
+  approval?: AgentCallingApproval;
+  expiresAt?: number | null;
 };
 
 export type ConversationSchedule = { at: string; interrupted?: boolean };
@@ -844,6 +944,7 @@ export type AgentEventType =
   | 'tool.completed' | 'tool.failed' | 'terminal.started' | 'terminal.output' | 'terminal.exited'
   | 'compaction.started' | 'compaction.completed' | 'protocol.error'
   | 'subagent.started' | 'subagent.updated' | 'subagent.completed' | 'subagent.failed' | 'subagent.cancelled'
+  | AgentCallEventType
   | 'extension.ui' | 'extension.message' | 'provider.runtime';
 
 export type AgentEventEnvelope = {
@@ -902,7 +1003,7 @@ export function canonicalConversationEventType(event: Pick<ConversationEvent, 't
     'tool.created': 'tool.started', 'tool.result': 'tool.completed', 'tool.error': 'tool.failed',
   };
   if (aliases[event.type]) return aliases[event.type];
-  if (/^(?:message|turn|permission|usage|subagent|compaction|memory|extension)\./.test(event.type) || event.type === 'provider.runtime') return event.type;
+  if (/^(?:message|turn|permission|usage|subagent|compaction|memory|extension|agent\.call)\./.test(event.type) || event.type === 'provider.runtime') return event.type;
   return event.normalizedType || event.type;
 }
 
@@ -1689,6 +1790,38 @@ export class V2ApiClient {
 
   async getAgentShot(conversationId: string, shotId: string): Promise<AgentShot> {
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-shots/${encodeURIComponent(shotId)}`);
+  }
+
+  /** `GET /v2/agent-calling`; a 404 (`ConnectionError.httpStatus`) means the daemon predates Agent Calling. */
+  async getAgentCalling(): Promise<AgentCallingSettings> {
+    return this.request('/v2/agent-calling');
+  }
+
+  async setAgentCalling(update: AgentCallingUpdate): Promise<AgentCallingSettings> {
+    return this.request('/v2/agent-calling', { method: 'PUT', body: JSON.stringify(update) });
+  }
+
+  /** Saves the external API listener config; it takes effect after a backend restart (`apiListener.pendingRestart`). */
+  async setApiListener(update: ApiListenerUpdate): Promise<AgentCallingSettings> {
+    return this.request('/v2/agent-calling/api-listener', { method: 'PUT', body: JSON.stringify(update) });
+  }
+
+  async listApiKeys(): Promise<{ keys: ApiKeySummary[] }> {
+    return this.request('/v2/api-keys');
+  }
+
+  /** The result's `key` is the only time the full key is available. */
+  async createApiKey(request: ApiKeyCreateRequest): Promise<ApiKeyCreated> {
+    return this.request('/v2/api-keys', { method: 'POST', body: JSON.stringify(request) });
+  }
+
+  async updateApiKey(id: string, update: ApiKeyUpdate): Promise<ApiKeySummary> {
+    return this.request(`/v2/api-keys/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(update) });
+  }
+
+  /** Revoked keys stay listed (status `revoked`); their running turns are cancelled. */
+  async revokeApiKey(id: string): Promise<{ id: string; revoked: boolean }> {
+    return this.request(`/v2/api-keys/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   async setSshHostAgentAccess(alias: string, enabled: boolean): Promise<{ alias: string; agentAccess: boolean }> {

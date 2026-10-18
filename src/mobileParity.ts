@@ -734,6 +734,10 @@ export type ConversationBlockPhase = 'started' | 'delta' | 'completed' | 'failed
 
 /** What made a provider start a turn on its own (backend `triggerDetail.kind`). */
 export type ProviderTurnTrigger = 'background_task' | 'wakeup' | 'cron' | 'unknown';
+/** Provider notices (`provider.event` methods) shown as one quiet timeline
+ * line; clients render their own localized text for each. */
+export type ProviderNotice = 'auto_mode_unavailable';
+const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable']);
 
 const PROVIDER_TURN_TRIGGERS: ReadonlySet<string> = new Set(['background_task', 'wakeup', 'cron']);
 
@@ -776,6 +780,10 @@ export type TimelineEntry = {
    * `trigger: "provider"`): no user message precedes it, so the row says
    * why it began. The subtitle holds the provider's summary, if any. */
   providerTrigger?: ProviderTurnTrigger;
+  /** A provider notice (`provider.event` with this `providerMethod`, e.g.
+   * auto mode was unavailable so the turn ran with per-request approvals).
+   * The subtitle holds the provider's reason, if any. */
+  providerNotice?: ProviderNotice;
   /** The subtitle holds only streamed deltas, so text projected from earlier
    * history for the same row precedes it instead of being replaced. */
   streamedText?: boolean;
@@ -1207,6 +1215,19 @@ export function classifyV2ConversationEvent(
 
   if (type === 'provider.event' && isProviderLifecycleMethod(providerMethod)) {
     return null;
+  }
+
+  // Provider notices clients explain in their own words; every other
+  // `providerMethod` keeps the handling below.
+  if (type === 'provider.event' && PROVIDER_NOTICES.has(providerMethod)) {
+    return {
+      ...base,
+      id: `v2-provider-notice-${conversationId}-${providerMethod}-${turnId || eventId}`,
+      kind: 'system',
+      title: type,
+      subtitle: previewText(readString(asRecord(payload.metadata), ['reason'])),
+      providerNotice: providerMethod as ProviderNotice,
+    };
   }
 
   // The backend replaces corrupt journal records with placeholders; one

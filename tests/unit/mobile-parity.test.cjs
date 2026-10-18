@@ -634,3 +634,21 @@ test('the live runtime and the replay both show the provider-turn notice before 
     assert.ok(notice.sequence < reply.firstSequence);
   }
 });
+
+test('auto mode being unavailable shows one provider notice per turn', () => {
+  const notice = (sequence, extra = {}) => event({
+    eventId: `evt-${sequence}`, sequence, type: 'provider.event',
+    payload: { turnId: 'turn-1', provider: 'claude-code', providerMethod: 'auto_mode_unavailable', metadata: { reason: 'model' }, ...extra },
+  });
+  const entry = parity.classifyV2ConversationEvent(notice(1), 'ws');
+  assert.equal(entry.kind, 'system');
+  assert.equal(entry.providerNotice, 'auto_mode_unavailable');
+  assert.equal(entry.subtitle, 'model');
+  assert.equal(entry.turnId, 'turn-1');
+  assert.equal(parity.reduceConversationEvents([notice(1), notice(2)], 'ws').timeline.length, 1);
+
+  const other = parity.classifyV2ConversationEvent(event({
+    eventId: 'evt-9', sequence: 9, type: 'provider.event', payload: { turnId: 'turn-1', providerMethod: 'something_else' },
+  }), 'ws');
+  assert.equal(other?.providerNotice, undefined);
+});

@@ -73,10 +73,15 @@ export class ConnectionError extends Error {
     );
   }
 
+  /** HTTP 401 / `UNAUTHENTICATED`: the device is not paired or its signature
+   * was rejected. The message is a locale-neutral fallback; clients show their
+   * own text keyed by `code` (`authentication_failed`). A 403 / `UNAUTHORIZED`
+   * is a permission refusal and goes through `apiRequestFailed` instead so the
+   * backend's message reaches the user. */
   static authenticationFailed(status: number): ConnectionError {
     const error = new ConnectionError(
       ConnectionErrorType.AUTHENTICATION_FAILED,
-      'Token 缺失或无效',
+      'Device not paired or authentication failed',
       `HTTP ${status}`,
       false,
       'authentication_failed',
@@ -244,6 +249,34 @@ export class ConnectionError extends Error {
     }
     return ConnectionError.networkOffline(details);
   }
+}
+
+/** Parses a backend error envelope (`{code, message}`) from a response body;
+ * null when the body is not a JSON object. */
+export function parseBackendErrorBody(body: Uint8Array | undefined): { code?: string; message?: string } | null {
+  if (!body || body.length === 0) return null;
+  try {
+    const value = JSON.parse(new TextDecoder().decode(body)) as unknown;
+    if (!value || typeof value !== 'object') return null;
+    const record = value as { code?: unknown; message?: unknown };
+    return {
+      code: typeof record.code === 'string' ? record.code : undefined,
+      message: typeof record.message === 'string' ? record.message : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a failed HTTP response means the device itself is not
+ * authenticated (401 or `UNAUTHENTICATED`). A 403 / `UNAUTHORIZED` is a
+ * permission refusal for an authenticated device, not a pairing problem. */
+export function isAuthenticationFailure(status: number, backendCode?: string): boolean {
+  if (backendCode === 'UNAUTHENTICATED') return true;
+  // `REMOTE_*` codes are SFTP/FTP login failures on the far side, not a
+  // rejected device signature; they must reach the caller intact.
+  if (backendCode?.startsWith('REMOTE_')) return false;
+  return status === 401;
 }
 
 /** Compare-and-save endpoints (e.g. PUT /v2/workspace/file) report a stale

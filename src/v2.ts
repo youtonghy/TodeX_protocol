@@ -1,4 +1,4 @@
-import { ConnectionError } from './connectionError';
+import { ConnectionError, isAuthenticationFailure } from './connectionError';
 import { deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
 import { joinServerPath } from './serverUrl';
 import { createSecureTransport, deviceRequestSigner, type SecureTransport } from './secureTransport';
@@ -1983,10 +1983,9 @@ export class V2ApiClient {
         const backendError = parseErrorBody(response.body);
         const backendCode = typeof backendError?.code === 'string' ? backendError.code : undefined;
         const backendMessage = typeof backendError?.message === 'string' ? backendError.message : undefined;
-        // `REMOTE_*` codes are SFTP/FTP login failures on the far side, not a
-        // rejected device signature; they must reach the caller intact.
-        const remoteFailure = backendCode?.startsWith('REMOTE_') === true;
-        if ((response.status === 401 && !remoteFailure) || backendCode === 'UNAUTHENTICATED' || backendCode === 'UNAUTHORIZED') {
+        // Only 401 / UNAUTHENTICATED means "not paired"; 403 / UNAUTHORIZED is
+        // a permission refusal whose server message must reach the user.
+        if (isAuthenticationFailure(response.status, backendCode)) {
           throw ConnectionError.authenticationFailed(response.status);
         }
         throw ConnectionError.apiRequestFailed(

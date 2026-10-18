@@ -51,3 +51,53 @@ test('authenticationFailed records the HTTP status', () => {
   assert.equal(error.httpStatus, 401);
   assert.equal(isConflictError(error), false);
 });
+
+test('only 401 / UNAUTHENTICATED count as an authentication failure', () => {
+  const { isAuthenticationFailure, parseBackendErrorBody } = require(path.join(compiledDir, 'lib', 'connectionError.js'));
+  assert.equal(isAuthenticationFailure(401), true);
+  assert.equal(isAuthenticationFailure(400, 'UNAUTHENTICATED'), true);
+  assert.equal(isAuthenticationFailure(401, 'REMOTE_AUTH_FAILED'), false);
+  assert.equal(isAuthenticationFailure(403), false);
+  assert.equal(isAuthenticationFailure(403, 'UNAUTHORIZED'), false);
+  assert.deepEqual(parseBackendErrorBody(new TextEncoder().encode('{"code":"UNAUTHORIZED","message":"nope"}')), { code: 'UNAUTHORIZED', message: 'nope' });
+  assert.equal(parseBackendErrorBody(new TextEncoder().encode('not json')), null);
+  assert.equal(parseBackendErrorBody(undefined), null);
+});
+
+test('authenticationFailed carries a locale-neutral fallback message', () => {
+  const error = ConnectionError.authenticationFailed(401);
+  assert.equal(error.code, 'authentication_failed');
+  assert.doesNotMatch(error.userMessage, /[一-鿿]/);
+});
+
+test('a 403 permission refusal keeps the server message', () => {
+  const error = ConnectionError.apiRequestFailed(403, 'UNAUTHORIZED', 'device lacks the admin role');
+  assert.equal(error.code, 'request_failed');
+  assert.equal(error.userMessage, 'device lacks the admin role');
+  assert.equal(error.httpStatus, 403);
+});
+
+function fakeTransport(responses) {
+  return {
+    fetch: async request => {
+      const entry = responses[request.path];
+      return { status: entry.status, headers: {}, body: new TextEncoder().encode(JSON.stringify(entry.body ?? {})) };
+    },
+  };
+}
+
+test('probeBackendConnection separates 401 from 403', async () => {
+  const { probeBackendConnection } = require(path.join(compiledDir, 'lib', 'connectionProbe.js'));
+  const unauthenticated = await probeBackendConnection({
+    serverUrl: 'http://127.0.0.1:7345',
+    transport: fakeTransport({ '/v2/version': { status: 401, body: { code: 'UNAUTHENTICATED', message: 'unsigned' } } }),
+  });
+  assert.equal(unauthenticated.code, 'authentication_failed');
+  const forbidden = await probeBackendConnection({
+    serverUrl: 'http://127.0.0.1:7345',
+    transport: fakeTransport({ '/v2/version': { status: 403, body: { code: 'UNAUTHORIZED', message: 'device revoked by admin' } } }),
+  });
+  assert.equal(forbidden.code, 'request_failed');
+  assert.equal(forbidden.error.userMessage, 'device revoked by admin');
+  assert.equal(forbidden.error.httpStatus, 403);
+});

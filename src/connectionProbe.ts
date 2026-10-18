@@ -1,6 +1,6 @@
 import { normalizeServerUrl } from './todex';
 import { jitteredBackoffMs } from './backoff';
-import { ConnectionError, type ConnectionFailureCode } from './connectionError';
+import { ConnectionError, isAuthenticationFailure, parseBackendErrorBody, type ConnectionFailureCode } from './connectionError';
 import type { SecureResponse, SecureTransport } from './secureTransport';
 import type { ProviderDescriptor } from './v2';
 
@@ -90,9 +90,14 @@ async function probeGet(transport: SecureTransport, path: string, timeoutMs: num
   }
 }
 
-function classifyHttp(status: number, endpoint: string): ConnectionError {
-  if (status === 401 || status === 403) {
+function classifyHttp(status: number, endpoint: string, body?: Uint8Array): ConnectionError {
+  const backendError = parseBackendErrorBody(body);
+  if (isAuthenticationFailure(status, backendError?.code)) {
     return ConnectionError.authenticationFailed(status);
+  }
+  if (status === 403 || backendError?.code === 'UNAUTHORIZED') {
+    // A permission refusal for a paired device: keep the server's message.
+    return ConnectionError.apiRequestFailed(status, backendError?.code, backendError?.message);
   }
   if (status === 404 && endpoint.includes('/v2/')) {
     return ConnectionError.protocolMismatch(`${endpoint} returned ${status}`);
@@ -136,7 +141,7 @@ export async function probeBackendConnection(options: {
   try {
     const versionResponse = await probeGet(transport, '/v2/version', timeoutMs);
     if (!isOk(versionResponse)) {
-      const error = classifyHttp(versionResponse.status, '/v2/version');
+      const error = classifyHttp(versionResponse.status, '/v2/version', versionResponse.body);
       return { ...empty, error, code: error.code };
     }
     const versionJson = json(versionResponse) as Record<string, unknown>;
@@ -156,13 +161,13 @@ export async function probeBackendConnection(options: {
 
     const healthResponse = await probeGet(transport, '/health', timeoutMs);
     if (!isOk(healthResponse)) {
-      const error = classifyHttp(healthResponse.status, '/health');
+      const error = classifyHttp(healthResponse.status, '/health', healthResponse.body);
       return { ...empty, version, error, code: error.code };
     }
 
     const providersResponse = await probeGet(transport, '/v2/providers', timeoutMs);
     if (!isOk(providersResponse)) {
-      const error = classifyHttp(providersResponse.status, '/v2/providers');
+      const error = classifyHttp(providersResponse.status, '/v2/providers', providersResponse.body);
       return { ...empty, version, error, code: error.code };
     }
     const providersJson = json(providersResponse) as { providers?: ProviderDescriptor[] };

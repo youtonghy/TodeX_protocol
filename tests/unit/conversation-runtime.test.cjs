@@ -962,8 +962,24 @@ test('background tasks keep the turn open until the model resumes or the turn en
   assert.deepEqual(resumed.backgroundTasks, []);
   assert.deepEqual(apply(resumed, pending(7, ['b'])).state.backgroundTasks, [{ taskId: 'b' }]);
 
+  // A completed turn keeps waiting: the provider reports back in a turn of its own.
   const done = apply(waiting, event(4, 'turn.completed', { turnId: 't' })).state;
-  assert.deepEqual(done.backgroundTasks, []);
+  assert.deepEqual(done.backgroundTasks, [{ taskId: 'a' }, { taskId: 'b' }]);
+  assert.equal(done.activeTurnId, '');
+  assert.deepEqual(apply(done, event(5, 'turn.started', { turnId: 'u', trigger: 'provider' })).state.backgroundTasks, []);
+  assert.deepEqual(apply(done, event(5, 'turn.started', { turnId: 'u' })).state.backgroundTasks, []);
+  // Work lost with its process ends the wait, in or outside a turn.
+  const lost = event(5, 'provider.event', { provider: 'claude-code', providerMethod: 'background_tasks_ended',
+    metadata: { taskIds: [], reason: 'daemon_restarted' } });
+  assert.deepEqual(apply(done, lost).state.backgroundTasks, []);
+  // Any other ending drops the tasks with the turn.
+  assert.deepEqual(apply(waiting, event(4, 'turn.failed', { turnId: 't' })).state.backgroundTasks, []);
+});
+
+test('background tasks older than the provider hold are no longer awaited', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z');
+  const tasks = [{ taskId: 'old', startedAt: '2026-10-19T04:00:00Z' }, { taskId: 'new', startedAt: '2026-10-19T11:00:00Z' }, { taskId: 'undated' }];
+  assert.deepEqual(runtime.awaitedBackgroundTasks(tasks, now).map(task => task.taskId), ['new', 'undated']);
 });
 
 test('background task details come from the pending snapshot and progress frames', () => {

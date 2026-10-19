@@ -736,8 +736,8 @@ export type ConversationBlockPhase = 'started' | 'delta' | 'completed' | 'failed
 export type ProviderTurnTrigger = 'background_task' | 'wakeup' | 'cron' | 'unknown';
 /** Provider notices (`provider.event` methods) shown as one quiet timeline
  * line; clients render their own localized text for each. */
-export type ProviderNotice = 'auto_mode_unavailable';
-const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable']);
+export type ProviderNotice = 'auto_mode_unavailable' | 'background_tasks_ended';
+const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable', 'background_tasks_ended']);
 
 const PROVIDER_TURN_TRIGGERS: ReadonlySet<string> = new Set(['background_task', 'wakeup', 'cron']);
 

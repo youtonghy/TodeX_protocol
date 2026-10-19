@@ -652,3 +652,12 @@ test('auto mode being unavailable shows one provider notice per turn', () => {
   }), 'ws');
   assert.equal(other?.providerNotice, undefined);
 });
+
+test('background work lost with its process shows a notice carrying the reason', () => {
+  const entry = parity.classifyV2ConversationEvent(event({
+    eventId: 'evt-3', sequence: 3, type: 'provider.event',
+    payload: { provider: 'claude-code', providerMethod: 'background_tasks_ended', metadata: { taskIds: ['b1'], reason: 'settings_changed' } },
+  }), 'ws');
+  assert.equal(entry.providerNotice, 'background_tasks_ended');
+  assert.equal(entry.subtitle, 'settings_changed');
+});

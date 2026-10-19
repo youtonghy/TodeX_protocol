@@ -128,11 +128,14 @@ export type ConversationRuntime = {
   /** The daemon-held follow-up queue; separate from a provider's native queue. */
   followUps: FollowUpQueueState;
   lastProgressAt: string | null;
-  /** Provider background tasks (e.g. a CI watcher) that keep the turn open
-   * after the model has stopped answering. Set by `background_tasks_pending`,
-   * refreshed by `task_progress`, shrunk by `task_notification`, emptied once
-   * the model resumes or the turn ends — so a non-empty list means the
-   * conversation is only waiting. */
+  /** Provider background tasks (e.g. a CI watcher) the agent still waits on
+   * after the model has stopped answering, during the turn and after it
+   * completed. Set by `background_tasks_pending`, refreshed by
+   * `task_progress`, shrunk by `task_notification`, emptied once the model
+   * resumes, a new turn starts (the provider's own follow-up included), the
+   * turn ends any other way than completing, or `background_tasks_ended`
+   * reports the work gone — so a non-empty list means the conversation is
+   * only waiting. */
   backgroundTasks: BackgroundTask[];
 };
 /** One background task as the provider described it; every field but the id
@@ -240,7 +243,9 @@ const MODEL_ACTIVITY_EVENT = /^(?:message|assistant|reasoning|tool|permission|tu
 function projectBackgroundTasks(state: ConversationRuntime, type: string, payload: RecordValue): void {
   if (type === 'provider.event') {
     const metadata = object(payload.metadata);
-    if (payload.providerMethod === 'background_tasks_pending') {
+    if (payload.providerMethod === 'background_tasks_ended') {
+      state.backgroundTasks = [];
+    } else if (payload.providerMethod === 'background_tasks_pending') {
       state.backgroundTasks = pendingBackgroundTasks(metadata);
     } else if (payload.providerMethod === 'task_progress' && state.backgroundTasks.length > 0) {
       const description = string(metadata.description);
@@ -250,9 +255,22 @@ function projectBackgroundTasks(state: ConversationRuntime, type: string, payloa
     } else if (payload.providerMethod === 'task_notification' && state.backgroundTasks.length > 0) {
       state.backgroundTasks = state.backgroundTasks.filter(task => task.taskId !== metadata.taskId);
     }
-  } else if (state.backgroundTasks.length > 0 && MODEL_ACTIVITY_EVENT.test(type)) {
+  } else if (state.backgroundTasks.length > 0 && type !== 'turn.completed' && MODEL_ACTIVITY_EVENT.test(type)) {
+    // A completed turn leaves the tasks running: the provider reports back
+    // in a turn of its own.
     state.backgroundTasks = [];
   }
+}
+/** How long background tasks can keep a provider waiting: Claude Code holds
+ * them at most 6 h past the turn. Older ones are gone even when no
+ * `background_tasks_ended` reached the journal. */
+const BACKGROUND_TASK_HORIZON_MS = 7 * 3600_000;
+/** The background tasks still worth showing as awaited at `now`. */
+export function awaitedBackgroundTasks(tasks: readonly BackgroundTask[], now = Date.now()): readonly BackgroundTask[] {
+  return tasks.filter(task => {
+    const started = task.startedAt ? Date.parse(task.startedAt) : NaN;
+    return Number.isNaN(started) || now - started < BACKGROUND_TASK_HORIZON_MS;
+  });
 }
 function pendingBackgroundTasks(metadata: RecordValue): BackgroundTask[] {
   // Backends that predate `tasks` only send `taskIds`.

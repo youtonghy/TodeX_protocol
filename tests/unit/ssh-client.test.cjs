@@ -63,6 +63,18 @@ test('SSH connection settings round-trip through /v2/ssh/settings', async () => 
   assert.deepEqual(calls[1].body, settings);
 });
 
+test('agent output filter round-trips through /v2/ssh/agent-output-filter', async () => {
+  const filter = { enabled: true, categories: { privateKey: true, publicKey: false, credential: true, bankCard: true, idCard: false } };
+  const { api, calls } = recordingClient([{ status: 200, body: filter }, { status: 200, body: filter }]);
+  assert.deepEqual(await api.getAgentOutputFilter(), filter);
+  assert.deepEqual(await api.setAgentOutputFilter(filter), filter);
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url.pathname}`), [
+    'GET /v2/ssh/agent-output-filter',
+    'PUT /v2/ssh/agent-output-filter',
+  ]);
+  assert.deepEqual(calls[1].body, filter);
+});
+
 test('FTP site and key routes match the contract', async () => {
   const { api, calls } = recordingClient();
   const site = { name: 'Files', protocol: 'ftps', host: 'ftp.example.com', port: 990, user: 'me' };
@@ -277,4 +289,15 @@ test('validateSshIpPoolCidr mirrors the backend pool range rules', () => {
   assert.equal(ssh.validateSshIpPoolCidr('127.0.0.0/24'), 'containsLocalhost');
   assert.equal(ssh.validateSshIpPoolCidr('127.0.0.0/16'), 'containsLocalhost');
   assert.equal(ssh.validateSshIpPoolCidr('127.0.1.0/24'), null);
+});
+
+test('agent output redactions keep positive counts in canonical order', () => {
+  assert.equal(ssh.parseAgentOutputRedactions(undefined), undefined);
+  assert.equal(ssh.parseAgentOutputRedactions({ credential: 0 }), undefined);
+  assert.deepEqual(ssh.parseAgentOutputRedactions({ idCard: 1, credential: 2, other: 3, bankCard: 'x' }), { credential: 2, idCard: 1 });
+  assert.deepEqual(ssh.summarizeAgentOutputRedactions({ idCard: 1, privateKey: 1, credential: 2 }), {
+    total: 4,
+    items: [{ category: 'privateKey', count: 1 }, { category: 'credential', count: 2 }, { category: 'idCard', count: 1 }],
+  });
+  assert.deepEqual(ssh.summarizeAgentOutputRedactions(undefined), { total: 0, items: [] });
 });

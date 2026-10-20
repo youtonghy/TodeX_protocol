@@ -78,6 +78,53 @@ export type SshConnectionSettings = {
   serverAliveCountMax: number;
 };
 
+/**
+ * Kinds of secrets the backend can redact from `ssh_exec` output before it
+ * reaches the agent, in display order.
+ */
+export const AGENT_OUTPUT_FILTER_CATEGORIES = ['privateKey', 'publicKey', 'credential', 'bankCard', 'idCard'] as const;
+
+export type AgentOutputFilterCategory = (typeof AGENT_OUTPUT_FILTER_CATEGORIES)[number];
+
+export type AgentOutputFilterCategories = Record<AgentOutputFilterCategory, boolean>;
+
+/**
+ * Privacy filter for command output returned to agents
+ * (`/v2/ssh/agent-output-filter`). The user's own terminal and the live
+ * `ssh.exec.output` stream stay unfiltered. Best effort, not a security
+ * boundary.
+ */
+export type AgentOutputFilter = {
+  enabled: boolean;
+  categories: AgentOutputFilterCategories;
+};
+
+/** Values hidden from the agent per category; only counts above zero. */
+export type AgentOutputRedactions = Partial<Record<AgentOutputFilterCategory, number>>;
+
+/** Reads `ssh.exec.completed`'s `redactions`; undefined when nothing was hidden. */
+export function parseAgentOutputRedactions(value: unknown): AgentOutputRedactions | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const counts: AgentOutputRedactions = {};
+  for (const category of AGENT_OUTPUT_FILTER_CATEGORIES) {
+    const count = record[category];
+    if (typeof count === 'number' && Number.isFinite(count) && count > 0) counts[category] = Math.floor(count);
+  }
+  return Object.keys(counts).length ? counts : undefined;
+}
+
+/** Nonzero categories in canonical order, with the total. */
+export function summarizeAgentOutputRedactions(redactions: AgentOutputRedactions | undefined): {
+  total: number;
+  items: Array<{ category: AgentOutputFilterCategory; count: number }>;
+} {
+  const items = AGENT_OUTPUT_FILTER_CATEGORIES
+    .map(category => ({ category, count: redactions?.[category] ?? 0 }))
+    .filter(item => item.count > 0);
+  return { total: items.reduce((sum, item) => sum + item.count, 0), items };
+}
+
 export const SSH_SERVER_ALIVE_INTERVAL_RANGE = { min: 5, max: 600 } as const;
 export const SSH_SERVER_ALIVE_COUNT_MAX_RANGE = { min: 1, max: 10 } as const;
 
@@ -252,6 +299,9 @@ export type SshExecRun = {
   truncated?: boolean;
   /** The recorded output below stopped at 64 KiB per stream. */
   outputTruncated?: boolean;
+  /** Values the privacy filter hid from the agent's copy of the output;
+   * absent when nothing was hidden. The recorded output stays raw. */
+  redactions?: AgentOutputRedactions;
   /** Output in arrival order; consecutive chunks of one stream are joined. */
   output: SshExecOutputChunk[];
   turnId?: string;

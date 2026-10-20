@@ -781,7 +781,7 @@ test('agent ssh_exec calls collect per execId without touching the timeline', ()
     event(4, 'ssh.exec.output', { execId: 'b', stream: 'stderr', data: 'denied\n' }),
     event(5, 'ssh.exec.output', { execId: 'a', stream: 'stdout', data: 'ux\n' }),
     event(6, 'ssh.exec.output', { execId: 'a', stream: 'stderr', data: 'warn\n' }),
-    event(7, 'ssh.exec.completed', { execId: 'a', host: 'web', exitCode: 0, durationMs: 12, truncated: false, outputTruncated: false }),
+    event(7, 'ssh.exec.completed', { execId: 'a', host: 'web', exitCode: 0, durationMs: 12, truncated: false, outputTruncated: false, redactions: { credential: 2, privateKey: 1, bankCard: 0, bogus: 4 } }),
     event(8, 'ssh.exec.completed', { execId: 'b', host: 'db', exitCode: 255, durationMs: 3, failure: 'authenticationFailed', truncated: false, outputTruncated: true }),
   ];
   const state = apply(empty(), ...events).state;
@@ -794,6 +794,8 @@ test('agent ssh_exec calls collect per execId without touching the timeline', ()
   assert.equal(a.exitCode, 0);
   assert.equal(b.failure, 'authenticationFailed');
   assert.equal(b.outputTruncated, true);
+  assert.deepEqual(a.redactions, { privateKey: 1, credential: 2 });
+  assert.equal('redactions' in b, false);
 
   // Paging the start in below a window that only saw later frames.
   let paged = apply(runtime.createConversationRuntime('c', 'w', 4), ...events.slice(4)).state;

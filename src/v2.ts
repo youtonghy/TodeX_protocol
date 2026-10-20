@@ -4,6 +4,7 @@ import { joinServerPath } from './serverUrl';
 import { createSecureTransport, deviceRequestSigner, type SecureTransport } from './secureTransport';
 import type { TransportEncryptionProtocol } from './transportCrypto';
 import type {
+  AgentOutputFilter,
   FtpSite,
   FtpSiteInput,
   ManagedHost,
@@ -1904,6 +1905,16 @@ export class V2ApiClient {
   /** Applies to ssh processes started afterwards; open shared connections keep their options. */
   async setSshSettings(settings: SshConnectionSettings): Promise<SshConnectionSettings> {
     return this.request('/v2/ssh/settings', { method: 'PUT', body: JSON.stringify(settings) });
+  }
+
+  /** Older backends answer 404 (see `isNotFoundError`). */
+  async getAgentOutputFilter(): Promise<AgentOutputFilter> {
+    return this.request('/v2/ssh/agent-output-filter');
+  }
+
+  /** Takes the full filter (unknown fields are rejected); later `ssh_exec` results use it. */
+  async setAgentOutputFilter(filter: AgentOutputFilter): Promise<AgentOutputFilter> {
+    return this.request('/v2/ssh/agent-output-filter', { method: 'PUT', body: JSON.stringify(filter) });
   }
 
   /** Closes the shared OpenSSH master connection for the host. */

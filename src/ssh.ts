@@ -453,3 +453,28 @@ export function isLoopbackBindAddress(value: string | undefined): boolean {
 export function formatSshHostPort(host: string, port: number): string {
   return host.includes(':') && !host.startsWith('[') ? `[${host}]:${port}` : `${host}:${port}`;
 }
+
+export const SSH_IP_POOL_PREFIX_RANGE = { min: 16, max: 30 } as const;
+
+export type SshIpPoolCidrError = 'format' | 'outsideLoopback' | 'prefix' | 'hostBits' | 'containsLocalhost';
+
+/**
+ * Checks a pool range the way the backend does: an IPv4 CIDR inside
+ * 127.0.0.0/8 with a prefix of 16..30, no host bits set, and not containing
+ * 127.0.0.1. Returns `null` when valid.
+ */
+export function validateSshIpPoolCidr(value: string): SshIpPoolCidrError | null {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(value.trim());
+  if (!match) return 'format';
+  const octets = match.slice(1, 5).map(Number);
+  const prefix = Number(match[5]);
+  if (octets.some((octet) => octet > 255) || prefix > 32) return 'format';
+  if (octets[0] !== 127 || prefix < 8) return 'outsideLoopback';
+  if (prefix < SSH_IP_POOL_PREFIX_RANGE.min || prefix > SSH_IP_POOL_PREFIX_RANGE.max) return 'prefix';
+  const address = ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  if ((address & mask) >>> 0 !== address) return 'hostBits';
+  const localhost = 0x7f000001;
+  if (((localhost & mask) >>> 0) === address) return 'containsLocalhost';
+  return null;
+}

@@ -261,3 +261,20 @@ test('port counting, listener memory and bind address helpers', () => {
   assert.equal(ssh.SSH_FORWARD_RUN_LIMIT, 32);
   assert.equal(ssh.SSH_IP_MANUAL_PORT_LIMIT, 4096);
 });
+
+test('validateSshIpPoolCidr mirrors the backend pool range rules', () => {
+  assert.equal(ssh.validateSshIpPoolCidr('127.77.0.0/24'), null);
+  assert.equal(ssh.validateSshIpPoolCidr(' 127.200.0.0/16 '), null);
+  assert.equal(ssh.validateSshIpPoolCidr('127.77.0.4/30'), null);
+  for (const bad of ['', '127.77.0.0', '127.77.0/24', '127.300.0.0/24', '127.77.0.0/33', 'abc/24']) {
+    assert.equal(ssh.validateSshIpPoolCidr(bad), 'format', bad);
+  }
+  assert.equal(ssh.validateSshIpPoolCidr('10.0.0.0/24'), 'outsideLoopback');
+  assert.equal(ssh.validateSshIpPoolCidr('127.0.0.0/8'), 'prefix');
+  assert.equal(ssh.validateSshIpPoolCidr('127.77.0.0/15'), 'prefix');
+  assert.equal(ssh.validateSshIpPoolCidr('127.77.0.0/31'), 'prefix');
+  assert.equal(ssh.validateSshIpPoolCidr('127.77.0.1/24'), 'hostBits');
+  assert.equal(ssh.validateSshIpPoolCidr('127.0.0.0/24'), 'containsLocalhost');
+  assert.equal(ssh.validateSshIpPoolCidr('127.0.0.0/16'), 'containsLocalhost');
+  assert.equal(ssh.validateSshIpPoolCidr('127.0.1.0/24'), null);
+});

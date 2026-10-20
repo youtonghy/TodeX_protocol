@@ -257,7 +257,37 @@ export type SshExecRun = {
   turnId?: string;
   startedAt?: string;
   finishedAt?: string;
+  /** The login this call asked for when ssh could not authenticate on its
+   * own (`ssh.login.*`); calls that joined another call's request have none. */
+  login?: SshExecLogin;
 };
+
+/** How an agent's login request ended (`ssh.login.resolved`). */
+export type SshLoginOutcome = 'connected' | 'declined' | 'timedOut' | 'cancelled';
+
+export type SshExecLogin = {
+  requestId: string;
+  status: 'pending' | SshLoginOutcome;
+  /** When the backend stops waiting (RFC 3339). */
+  expiresAt?: string;
+  /** The login used a password the client had saved. */
+  remembered?: boolean;
+};
+
+/** Body of `POST /v2/ssh/hosts/{alias}/login`; no password declines. */
+export type SshLoginAnswerInput = { requestId: string; password?: string; saved?: boolean };
+
+/** Reply to a login answer; `failed` leaves the request open for another try. */
+export type SshLoginAnswer =
+  | { status: 'connected' | 'declined' }
+  | { status: 'failed'; failure?: SshFailureKind; detail?: string };
+
+/** A login request still waiting for an answer at `now`. */
+export function isSshLoginPending(login: SshExecLogin | undefined, now = Date.now()): boolean {
+  if (!login || login.status !== 'pending') return false;
+  const expires = login.expiresAt ? Date.parse(login.expiresAt) : NaN;
+  return !Number.isFinite(expires) || expires > now;
+}
 
 /** Most recent calls kept per conversation runtime. */
 export const SSH_EXEC_RUN_LIMIT = 50;

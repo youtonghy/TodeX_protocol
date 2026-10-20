@@ -3,7 +3,7 @@ import { canonicalConversationEventType, contextCompactionStatus, normalizeConve
 import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun, SubagentStatus } from './v2';
 import { assistantSegmentBase, classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
-import { SSH_EXEC_RUN_LIMIT, type SshExecOutputChunk, type SshExecRun } from './ssh';
+import { SSH_EXEC_RUN_LIMIT, type SshExecLogin, type SshExecOutputChunk, type SshExecRun, type SshLoginOutcome } from './ssh';
 import type { DesktopBrowserActionEvent, DesktopComputerActionEvent } from './agentDesktop';
 import { AGENT_CALL_STATUSES, isActiveAgentCallStatus, type AgentCallError, type AgentCallSession, type AgentCallStatus, type AgentCallTurn } from './agentCalling';
 export type { AgentCallError, AgentCallSession, AgentCallStatus, AgentCallTurn } from './agentCalling';
@@ -762,6 +762,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
   }
   if (type.startsWith('agent.call.')) projectAgentCall(state, type.slice('agent.call.'.length), payload, event);
   if (type.startsWith('ssh.exec.')) projectSshExec(state, type.slice('ssh.exec.'.length), payload, event.time);
+  if (type === 'ssh.login.requested' || type === 'ssh.login.resolved') projectSshLogin(state, type, payload);
   if (type === 'desktop.browser.action' || type === 'desktop.browser.grant' || type === 'desktop.browser.tab') projectDesktopBrowser(state, type, payload, event.time);
   if (type === 'desktop.computer.action' || type === 'desktop.computer.session' || type === 'desktop.computer.grant') projectDesktopComputer(state, type, payload, event.time);
   if (type === 'memory.updated' || type === 'memory.created') {
@@ -1098,6 +1099,24 @@ function projectSshExec(state: ConversationRuntime, phase: string, payload: Reco
     : [...state.sshExecs, run].slice(-SSH_EXEC_RUN_LIMIT);
 }
 
+const SSH_LOGIN_OUTCOMES: readonly SshLoginOutcome[] = ['connected', 'declined', 'timedOut', 'cancelled'];
+
+/** Attaches an agent's login request to the call that asked for it. */
+function projectSshLogin(state: ConversationRuntime, type: string, payload: RecordValue): void {
+  const requestId = string(payload.requestId);
+  if (!requestId) return;
+  if (type === 'ssh.login.requested') {
+    const execId = string(payload.execId);
+    const login: SshExecLogin = { requestId, status: 'pending', ...(string(payload.expiresAt) ? { expiresAt: string(payload.expiresAt) } : {}) };
+    state.sshExecs = state.sshExecs.map(item => (item.id === execId ? { ...item, login } : item));
+    return;
+  }
+  const outcome = SSH_LOGIN_OUTCOMES.find(item => item === payload.outcome) ?? 'cancelled';
+  state.sshExecs = state.sshExecs.map(item => (item.login?.requestId === requestId
+    ? { ...item, login: { ...item.login, status: outcome, remembered: payload.remembered === true } }
+    : item));
+}
+
 function appendSshExecOutput(output: SshExecOutputChunk[], chunks: readonly SshExecOutputChunk[]): SshExecOutputChunk[] {
   const next = [...output];
   for (const chunk of chunks) {
@@ -1237,6 +1256,8 @@ function mergeEarlierSshExec(older: SshExecRun, newer: SshExecRun): SshExecRun {
     command: newer.command || older.command,
     cwd: newer.cwd ?? older.cwd,
     startedAt: older.startedAt ?? newer.startedAt,
+    // A request whose resolution is loaded but not the request itself.
+    ...(newer.login ?? older.login ? { login: newer.login ?? older.login } : {}),
     output: appendSshExecOutput(older.output, newer.output) };
 }
 

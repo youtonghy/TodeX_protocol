@@ -19,6 +19,8 @@ import type {
   SshKeyGenerateInput,
   SshKeyImportInput,
   SshKeysResponse,
+  SshLoginAnswer,
+  SshLoginAnswerInput,
   SshTestResult,
 } from './ssh';
 import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
@@ -1900,6 +1902,12 @@ export class V2ApiClient {
   /** Closes the shared OpenSSH master connection for the host. */
   async disconnectSshHost(alias: string): Promise<{ disconnected: boolean }> {
     return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/disconnect`, { method: 'POST' });
+  }
+
+  /** Answers an agent's `ssh.login.requested`: a password logs in (a shared
+   * connection the waiting command reuses), none declines. */
+  async answerSshLogin(alias: string, input: SshLoginAnswerInput): Promise<SshLoginAnswer> {
+    return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/login`, { method: 'POST', body: JSON.stringify(input) });
   }
 
   async createFtpSite(site: FtpSiteInput): Promise<{ site: FtpSite }> {

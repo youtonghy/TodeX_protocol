@@ -805,6 +805,26 @@ test('agent ssh_exec calls collect per execId without touching the timeline', ()
   assert.deepEqual(paged.sshExecs.map(run => run.id), ['a', 'b']);
 });
 
+test('an agent login request attaches to the call that asked for it', () => {
+  const ssh = require(path.join(__dirname, '../../dist/unit/lib/ssh.js'));
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const requested = apply(empty(),
+    event(1, 'ssh.exec.started', { execId: 'a', host: 'pw', command: 'ls' }),
+    event(2, 'ssh.exec.started', { execId: 'b', host: 'pw', command: 'df' }),
+    event(3, 'ssh.login.requested', { requestId: 'sshl_1', host: 'pw', execId: 'a', expiresAt }),
+  ).state;
+  const [a, b] = requested.sshExecs;
+  assert.deepEqual(a.login, { requestId: 'sshl_1', status: 'pending', expiresAt });
+  assert.equal(b.login, undefined);
+  assert.equal(ssh.isSshLoginPending(a.login), true);
+  assert.equal(ssh.isSshLoginPending(a.login, Date.parse(expiresAt) + 1), false, 'expired');
+  const resolved = apply(requested, event(4, 'ssh.login.resolved', { requestId: 'sshl_1', host: 'pw', outcome: 'connected', remembered: true })).state;
+  assert.deepEqual(resolved.sshExecs[0].login, { requestId: 'sshl_1', status: 'connected', expiresAt, remembered: true });
+  assert.equal(ssh.isSshLoginPending(resolved.sshExecs[0].login), false);
+  const odd = apply(requested, event(4, 'ssh.login.resolved', { requestId: 'sshl_1', outcome: 'weird' })).state;
+  assert.equal(odd.sshExecs[0].login.status, 'cancelled');
+});
+
 test('ssh_exec runs are capped and cancellation is its own status', () => {
   const events = [];
   for (let index = 1; index <= 60; index += 1) {

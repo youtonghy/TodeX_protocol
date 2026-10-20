@@ -409,6 +409,40 @@ export type PiPackageOperation = {
   error?: string;
 };
 
+/** How Pi offers an MCP server's tools to the model. */
+export type PiMcpExposure = 'codemode' | 'deferred' | 'direct' | 'hidden';
+
+/** One `mcpServers` entry of Pi's `mcp.json`: stdio (`command`) or streamable HTTP (`url`). Unknown keys are kept. */
+export type PiMcpServerConfig = {
+  type?: 'stdio' | 'http' | 'streamable-http';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  exposure?: PiMcpExposure | 'codemode-deferred';
+  toolExposure?: Record<string, PiMcpExposure>;
+  enabled?: boolean;
+  timeout?: number;
+  description?: string;
+  [key: string]: unknown;
+};
+
+/** Pi's global `<pi_dir>/mcp.json`; `env` and `headers` values are served as stored. */
+export type PiMcpDocument = {
+  path: string;
+  exists: boolean;
+  revision: string;
+  /** The parsed file; `null` when it does not parse (see `parseError`). */
+  config: { mcpServers?: Record<string, PiMcpServerConfig>; autoEnableCodemode?: boolean; [key: string]: unknown } | null;
+  parseError?: string;
+  /** `builtin:mcp` is on in `settings.json`; Pi ignores `mcp.json` while it is off. */
+  builtinEnabled: boolean;
+  /** An enabled `pi-mcp-adapter` package takes over `/mcp`, so Pi ignores `mcp.json`. */
+  adapterInstalled: boolean;
+};
+
 /** A CLI's global instruction file on the backend host (Claude Code `CLAUDE.md`, Codex / Pi `AGENTS.md`). */
 export type CliInstructionsDocument = {
   path: string;
@@ -1318,6 +1352,21 @@ export class V2ApiClient {
    */
   async patchPiPluginConfig(plugin: PiPluginConfigId, revision: string, patch: Record<string, unknown>, replace: string[][] = []): Promise<PiPluginConfigDocument> {
     return this.request(`/v2/providers/pi/plugin-config/${plugin}`, { method: 'PATCH', body: JSON.stringify({ revision, patch, replace }) });
+  }
+
+  async getPiMcp(): Promise<PiMcpDocument> {
+    return this.request('/v2/providers/pi/mcp');
+  }
+
+  /**
+   * Each `mcpServers` entry replaces the stored server of that name, or removes it when `null`; `autoEnableCodemode`
+   * is set, or removed when `null`. Entries are checked with Pi's rules (`400`); a stale `revision` is `409 CONFLICT`.
+   */
+  async patchPiMcp(
+    revision: string,
+    patch: { mcpServers?: Record<string, PiMcpServerConfig | null>; autoEnableCodemode?: boolean | null },
+  ): Promise<PiMcpDocument> {
+    return this.request('/v2/providers/pi/mcp', { method: 'PATCH', body: JSON.stringify({ revision, patch }) });
   }
 
   async getCliInstructions(provider: CliSettingsProvider): Promise<CliInstructionsDocument> {

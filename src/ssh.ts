@@ -291,3 +291,165 @@ export function isSshLoginPending(login: SshExecLogin | undefined, now = Date.no
 
 /** Most recent calls kept per conversation runtime. */
 export const SSH_EXEC_RUN_LIMIT = 50;
+
+// ---------------------------------------------------------------------------
+// Port forwarding (`/v2/ssh/forwards`) and the loopback IP pool
+// (`/v2/ssh/ip-pool`). Both run on the machine running the backend.
+
+/** `ssh -L` / `-R` / `-D`. */
+export type SshForwardKind = 'local' | 'remote' | 'dynamic';
+
+export const SSH_FORWARD_KINDS: readonly SshForwardKind[] = ['local', 'remote', 'dynamic'];
+
+/** Bind addresses the backend accepts for `local` and `dynamic` forwards. */
+export const SSH_LOOPBACK_BIND_ADDRESSES = ['127.0.0.1', '::1', 'localhost'] as const;
+
+export const SSH_FORWARD_DEFAULT_BIND_ADDRESS = '127.0.0.1';
+
+export type SshForwardInput = {
+  /** Must exist in the host list. */
+  alias: string;
+  kind: SshForwardKind;
+  /** local/dynamic: one of `SSH_LOOPBACK_BIND_ADDRESSES` (default 127.0.0.1); remote: optional. */
+  bindAddress?: string;
+  bindPort: number;
+  /** Required for local/remote, absent for dynamic. */
+  targetHost?: string;
+  targetPort?: number;
+  /** At most `SSH_FORWARD_LABEL_MAX` characters. */
+  label?: string;
+};
+
+export type SshForwardStatus = 'stopped' | 'starting' | 'running' | 'failed';
+
+export type SshForward = SshForwardInput & {
+  id: string;
+  status: SshForwardStatus;
+  failure?: SshFailureKind;
+  /** Short reason (stderr summary); never contains passwords. */
+  error?: string;
+  /** RFC3339. */
+  startedAt?: string;
+};
+
+/** Forwards that may run at the same time. */
+export const SSH_FORWARD_RUN_LIMIT = 32;
+export const SSH_FORWARD_LABEL_MAX = 80;
+export const SSH_TARGET_HOST_MAX = 253;
+export const SSH_PORT_RANGE = { min: 1, max: 65535 } as const;
+
+export type SshIpPortMode = 'auto' | 'manual';
+
+export type SshIpPoolConfig = {
+  enabled: boolean;
+  /** Inside 127.0.0.0/8, prefix 16..30, not containing 127.0.0.1. */
+  cidr: string;
+  idleMinutes: number;
+};
+
+export type SshIpAssignmentInput = {
+  /** Omitted: next free address in the pool. */
+  ip?: string;
+  alias: string;
+  portMode: SshIpPortMode;
+  /** Manual only: `8080` or `7000-7010` entries. */
+  ports?: string[];
+};
+
+export type SshIpAssignmentUpdate = { portMode: SshIpPortMode; ports?: string[] };
+
+export type SshIpAssignmentState = 'disabled' | 'idle' | 'connecting' | 'connected' | 'needsLogin' | 'failed';
+
+export type SshIpBindError = { kind: 'addressUnavailable' | 'other'; message: string };
+
+export type SshIpAssignment = {
+  ip: string;
+  alias: string;
+  portMode: SshIpPortMode;
+  /** Manual list as saved (`[]` in auto mode). */
+  ports: string[];
+  listeningPorts: number;
+  /** Ports that could not be bound; at most 100 listed. */
+  skippedPorts: number[];
+  skippedPortCount: number;
+  bindError?: SshIpBindError;
+  state: SshIpAssignmentState;
+  activeConnections: number;
+  connectedAt?: string;
+  lastUsedAt?: string;
+  failure?: SshFailureKind;
+  error?: string;
+};
+
+export type SshIpPool = SshIpPoolConfig & {
+  supported: boolean;
+  unsupportedReason?: string;
+  autoPorts: string[];
+  manualPortLimit: number;
+  assignments: SshIpAssignment[];
+};
+
+export const SSH_IP_POOL_DEFAULT_CIDR = '127.77.0.0/24';
+export const SSH_IP_POOL_IDLE_MINUTES_RANGE = { min: 1, max: 1440 } as const;
+export const SSH_IP_POOL_DEFAULT_IDLE_MINUTES = 15;
+/** Ports one manual assignment may listen on. */
+export const SSH_IP_MANUAL_PORT_LIMIT = 4096;
+/** Rough backend memory cost of one idle listener, for estimates only. */
+export const SSH_IP_BYTES_PER_LISTENER = 3_700;
+
+function parsePortNumber(text: string): number | undefined {
+  if (!/^\d{1,5}$/.test(text)) return undefined;
+  const port = Number(text);
+  return port >= SSH_PORT_RANGE.min && port <= SSH_PORT_RANGE.max ? port : undefined;
+}
+
+export type SshPortSpecResult = { ports: number[] } | { error: string };
+
+/**
+ * Expands `8080` / `7000-7010` entries into sorted unique ports, rejecting
+ * malformed entries, reversed ranges and sets above `limit`.
+ */
+export function parseSshPortSpec(entries: readonly string[], limit = SSH_IP_MANUAL_PORT_LIMIT): SshPortSpecResult {
+  const ports = new Set<number>();
+  for (const raw of entries) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const match = /^(\d+)\s*-\s*(\d+)$/.exec(entry);
+    if (match) {
+      const start = parsePortNumber(match[1]);
+      const end = parsePortNumber(match[2]);
+      if (start === undefined || end === undefined) return { error: `Invalid port range: ${entry}` };
+      if (start > end) return { error: `Range start is above its end: ${entry}` };
+      for (let port = start; port <= end; port += 1) {
+        ports.add(port);
+        if (ports.size > limit) return { error: `More than ${limit} ports` };
+      }
+      continue;
+    }
+    const port = parsePortNumber(entry);
+    if (port === undefined) return { error: `Invalid port: ${entry}` };
+    ports.add(port);
+    if (ports.size > limit) return { error: `More than ${limit} ports` };
+  }
+  return { ports: [...ports].sort((a, b) => a - b) };
+}
+
+/** Number of distinct ports in a valid spec; 0 when it does not parse. */
+export function countSshPorts(entries: readonly string[]): number {
+  const result = parseSshPortSpec(entries, Number.MAX_SAFE_INTEGER);
+  return 'ports' in result ? result.ports.length : 0;
+}
+
+/** Bytes the backend roughly needs to keep `listeners` idle listeners. */
+export function estimateSshListenerBytes(listeners: number): number {
+  return Math.max(0, listeners) * SSH_IP_BYTES_PER_LISTENER;
+}
+
+export function isLoopbackBindAddress(value: string | undefined): boolean {
+  return (SSH_LOOPBACK_BIND_ADDRESSES as readonly string[]).includes((value ?? '').trim().toLowerCase());
+}
+
+/** `host:port`, bracketing IPv6 literals. */
+export function formatSshHostPort(host: string, port: number): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]:${port}` : `${host}:${port}`;
+}

@@ -191,3 +191,73 @@ test('agent desktop routes use the contract paths, methods and bodies', async ()
   ]);
   assert.equal(calls[7].url.search, '?capability=browser');
 });
+
+test('SSH forward and IP pool routes use the contract paths, methods and bodies', async () => {
+  const { api, calls } = recordingClient();
+  const forward = { alias: 'prod', kind: 'local', bindAddress: '127.0.0.1', bindPort: 8080, targetHost: 'localhost', targetPort: 80 };
+  const pool = { enabled: true, cidr: '127.77.0.0/24', idleMinutes: 15 };
+  await api.listSshForwards();
+  await api.createSshForward(forward);
+  await api.updateSshForward('f/1', forward);
+  await api.deleteSshForward('f/1');
+  await api.startSshForward('f/1');
+  await api.startSshForward('f/1', 'secret');
+  await api.stopSshForward('f/1');
+  await api.getSshIpPool();
+  await api.updateSshIpPool(pool);
+  await api.createSshIpAssignment({ alias: 'prod', portMode: 'auto' });
+  await api.updateSshIpAssignment('127.77.0.2', { portMode: 'manual', ports: ['8080', '7000-7010'] });
+  await api.deleteSshIpAssignment('127.77.0.2');
+  await api.connectSshIpAssignment('127.77.0.2');
+  await api.connectSshIpAssignment('127.77.0.2', 'secret');
+  await api.disconnectSshIpAssignment('127.77.0.2');
+  assert.deepEqual(calls.map(call => [call.method, call.url.pathname, call.body]), [
+    ['GET', '/v2/ssh/forwards', undefined],
+    ['POST', '/v2/ssh/forwards', forward],
+    ['PUT', '/v2/ssh/forwards/f%2F1', forward],
+    ['DELETE', '/v2/ssh/forwards/f%2F1', undefined],
+    ['POST', '/v2/ssh/forwards/f%2F1/start', undefined],
+    ['POST', '/v2/ssh/forwards/f%2F1/start', { password: 'secret' }],
+    ['POST', '/v2/ssh/forwards/f%2F1/stop', undefined],
+    ['GET', '/v2/ssh/ip-pool', undefined],
+    ['PUT', '/v2/ssh/ip-pool', pool],
+    ['POST', '/v2/ssh/ip-pool/assignments', { alias: 'prod', portMode: 'auto' }],
+    ['PUT', '/v2/ssh/ip-pool/assignments/127.77.0.2', { portMode: 'manual', ports: ['8080', '7000-7010'] }],
+    ['DELETE', '/v2/ssh/ip-pool/assignments/127.77.0.2', undefined],
+    ['POST', '/v2/ssh/ip-pool/assignments/127.77.0.2/connect', undefined],
+    ['POST', '/v2/ssh/ip-pool/assignments/127.77.0.2/connect', { password: 'secret' }],
+    ['POST', '/v2/ssh/ip-pool/assignments/127.77.0.2/disconnect', undefined],
+  ]);
+});
+
+test('parseSshPortSpec expands, dedupes, sorts and limits port entries', () => {
+  assert.deepEqual(ssh.parseSshPortSpec(['8080', ' 3000-3002 ', '3001', '']), { ports: [3000, 3001, 3002, 8080] });
+  assert.deepEqual(ssh.parseSshPortSpec([]), { ports: [] });
+  assert.deepEqual(ssh.parseSshPortSpec(['1', '65535']), { ports: [1, 65535] });
+  for (const bad of ['0', '65536', 'http', '80a', '10-5', '1-', '-5', '1-2-3', '1.5']) {
+    assert.ok('error' in ssh.parseSshPortSpec([bad]), bad);
+  }
+  assert.equal(ssh.parseSshPortSpec(['1-4096']).ports.length, 4096);
+  assert.ok('error' in ssh.parseSshPortSpec(['1-4096', '5000']));
+  assert.ok('error' in ssh.parseSshPortSpec(['1-20'], 10));
+  assert.deepEqual(ssh.parseSshPortSpec(['1-10', '5-10'], 10), { ports: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
+});
+
+test('port counting, listener memory and bind address helpers', () => {
+  assert.equal(ssh.countSshPorts(['80', '8000-8100', '8050']), 102);
+  assert.equal(ssh.countSshPorts(['nope']), 0);
+  assert.equal(ssh.countSshPorts(['1-65535']), 65535);
+  assert.equal(ssh.estimateSshListenerBytes(10), 10 * ssh.SSH_IP_BYTES_PER_LISTENER);
+  assert.equal(ssh.estimateSshListenerBytes(-1), 0);
+  assert.ok(ssh.isLoopbackBindAddress('127.0.0.1'));
+  assert.ok(ssh.isLoopbackBindAddress('::1'));
+  assert.ok(ssh.isLoopbackBindAddress(' LocalHost '));
+  assert.ok(!ssh.isLoopbackBindAddress('0.0.0.0'));
+  assert.ok(!ssh.isLoopbackBindAddress(undefined));
+  assert.equal(ssh.formatSshHostPort('::1', 22), '[::1]:22');
+  assert.equal(ssh.formatSshHostPort('127.0.0.1', 22), '127.0.0.1:22');
+  assert.deepEqual(ssh.SSH_IP_POOL_IDLE_MINUTES_RANGE, { min: 1, max: 1440 });
+  assert.equal(ssh.SSH_IP_POOL_DEFAULT_IDLE_MINUTES, 15);
+  assert.equal(ssh.SSH_FORWARD_RUN_LIMIT, 32);
+  assert.equal(ssh.SSH_IP_MANUAL_PORT_LIMIT, 4096);
+});

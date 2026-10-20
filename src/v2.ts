@@ -12,9 +12,16 @@ import type {
   RemoteEntriesResponse,
   RemoteFile,
   SshConnectionSettings,
+  SshForward,
+  SshForwardInput,
   SshHost,
   SshHostImportResult,
   SshHostsResponse,
+  SshIpAssignment,
+  SshIpAssignmentInput,
+  SshIpAssignmentUpdate,
+  SshIpPool,
+  SshIpPoolConfig,
   SshKey,
   SshKeyGenerateInput,
   SshKeyImportInput,
@@ -1908,6 +1915,75 @@ export class V2ApiClient {
    * connection the waiting command reuses), none declines. */
   async answerSshLogin(alias: string, input: SshLoginAnswerInput): Promise<SshLoginAnswer> {
     return this.request(`/v2/ssh/hosts/${encodeURIComponent(alias)}/login`, { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  // Port forwards (`/v2/ssh/forwards`). They never start on their own.
+
+  async listSshForwards(): Promise<{ forwards: SshForward[] }> {
+    return this.request('/v2/ssh/forwards');
+  }
+
+  async createSshForward(input: SshForwardInput): Promise<{ forward: SshForward }> {
+    return this.request('/v2/ssh/forwards', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  /** 409 while the forward is starting or running. */
+  async updateSshForward(id: string, input: SshForwardInput): Promise<{ forward: SshForward }> {
+    return this.request(`/v2/ssh/forwards/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) });
+  }
+
+  async deleteSshForward(id: string): Promise<{ deleted: boolean }> {
+    return this.request(`/v2/ssh/forwards/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /**
+   * Resolves once the forward runs or failed (the backend waits up to ~20 s);
+   * runtime failures come back as `status: 'failed'` rather than an error.
+   */
+  async startSshForward(id: string, password?: string): Promise<{ forward: SshForward }> {
+    return this.request(`/v2/ssh/forwards/${encodeURIComponent(id)}/start`, {
+      method: 'POST',
+      ...(password ? { body: JSON.stringify({ password }) } : {}),
+    }, Math.max(this.timeout, 30_000));
+  }
+
+  async stopSshForward(id: string): Promise<{ forward: SshForward }> {
+    return this.request(`/v2/ssh/forwards/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+  }
+
+  // Loopback IP pool (`/v2/ssh/ip-pool`).
+
+  async getSshIpPool(): Promise<SshIpPool> {
+    return this.request('/v2/ssh/ip-pool');
+  }
+
+  /** 409 when the new CIDR drops an assigned IP; 501 when enabling on an unsupported platform. */
+  async updateSshIpPool(config: SshIpPoolConfig): Promise<SshIpPool> {
+    return this.request('/v2/ssh/ip-pool', { method: 'PUT', body: JSON.stringify(config) });
+  }
+
+  async createSshIpAssignment(input: SshIpAssignmentInput): Promise<{ assignment: SshIpAssignment }> {
+    return this.request('/v2/ssh/ip-pool/assignments', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async updateSshIpAssignment(ip: string, update: SshIpAssignmentUpdate): Promise<{ assignment: SshIpAssignment }> {
+    return this.request(`/v2/ssh/ip-pool/assignments/${encodeURIComponent(ip)}`, { method: 'PUT', body: JSON.stringify(update) });
+  }
+
+  async deleteSshIpAssignment(ip: string): Promise<{ deleted: boolean }> {
+    return this.request(`/v2/ssh/ip-pool/assignments/${encodeURIComponent(ip)}`, { method: 'DELETE' });
+  }
+
+  /** Opens the assignment's dedicated ssh connection now; password hosts need this. */
+  async connectSshIpAssignment(ip: string, password?: string): Promise<{ assignment: SshIpAssignment }> {
+    return this.request(`/v2/ssh/ip-pool/assignments/${encodeURIComponent(ip)}/connect`, {
+      method: 'POST',
+      ...(password ? { body: JSON.stringify({ password }) } : {}),
+    }, Math.max(this.timeout, 30_000));
+  }
+
+  async disconnectSshIpAssignment(ip: string): Promise<{ assignment: SshIpAssignment }> {
+    return this.request(`/v2/ssh/ip-pool/assignments/${encodeURIComponent(ip)}/disconnect`, { method: 'POST' });
   }
 
   async createFtpSite(site: FtpSiteInput): Promise<{ site: FtpSite }> {

@@ -351,13 +351,14 @@ export type CliUpgradeOperation = {
   error?: string;
 };
 
-/** CLIs whose user settings file the CLI manager edits. */
-export type CliSettingsProvider = 'claude-code' | 'codex' | 'pi';
+/** CLIs whose user settings file (and global instructions) the CLI manager edits. DeepSeek Harness's file is YAML, replaced as text only. */
+export type CliSettingsProvider = 'claude-code' | 'codex' | 'pi' | 'deepseek-harness';
 
-/** A CLI's user settings file on the backend host (Claude Code / Pi `settings.json`, Codex `config.toml`). */
+/** A CLI's user settings file on the backend host (Claude Code / Pi `settings.json`, Codex `config.toml`, DeepSeek Harness's acp profile patch). */
 export type CliSettingsDocument = {
   path: string;
-  format: 'json' | 'toml';
+  /** `yaml`: a DeepSeek Harness patch layer; `settings` is always `{}` and only `replaceCliSettings` writes it. */
+  format: 'json' | 'toml' | 'yaml';
   exists: boolean;
   /** Content hash every write must echo back; `"missing"` before the file exists. */
   revision: string;
@@ -453,7 +454,88 @@ export type PiMcpDocument = {
   adapterInstalled: boolean;
 };
 
-/** A CLI's global instruction file on the backend host (Claude Code `CLAUDE.md`, Codex / Pi `AGENTS.md`). */
+/** How a composed DeepSeek Harness plugin row is switched. `conditional` rows follow a `!!js` expression. */
+export type DshRowState =
+  | { kind: 'enabled' }
+  | { kind: 'disabled' }
+  | { kind: 'conditional'; expression: string };
+
+/** One row of DeepSeek Harness's composed `acp` profile (`dsh --dump-config`). */
+export type DshPluginRow = {
+  id?: string;
+  /** The plugin module, e.g. `@deepseek-ai/dsh-web`. */
+  name: string;
+  state: DshRowState;
+  /** The bundle package or patch file that declared the row. */
+  source: string;
+  sourceLayer: 'bundle' | 'profile' | 'home' | 'todex' | 'other';
+  patchedBy?: string[];
+  /** TodeX's launch overlay keeps it off (it uploads data to the DeepSeek API). */
+  locked: boolean;
+  /** `$DSH_HOME/cordis.patch.yml` decides its state. */
+  overridden: boolean;
+  toggleable: boolean;
+  /** `getDshPluginConfig` has a settings page for it. */
+  configurable: boolean;
+};
+
+/** A bundle the acp profile composes or a package it installs. */
+export type DshPackage = {
+  name: string;
+  /** The dependency spec; absent for bundles the dsh installation supplies. */
+  spec?: string;
+  version?: string;
+  description?: string;
+  /** Declares a dsh bundle patch. */
+  bundle: boolean;
+  /** Listed in `dsh.profile.bundles`. */
+  selected: boolean;
+  /** Supplied by the dsh installation: neither removable nor deselectable. */
+  builtin: boolean;
+};
+
+export type DshPluginList = {
+  profilePath: string;
+  /** Revision of the profile patch, echoed by `setDshPluginState` and settings pages. */
+  revision: string;
+  /** Revision of the profile manifest, echoed by `setDshBundleSelected`. */
+  manifestRevision: string;
+  runtimeVersion?: string;
+  /** Installing and removing packages needs pnpm on the backend host. */
+  pnpmAvailable: boolean;
+  rows: DshPluginRow[];
+  packages: DshPackage[];
+  exemptions: { package: string; runtimeVersions: string[] }[];
+  /** Why `dsh --dump-config` failed; `rows` is empty then. */
+  composeError?: string;
+  /** The profile patch cannot be edited entry by entry (edit its YAML instead). */
+  parseError?: string;
+};
+
+export type DshPluginConfigId = 'web' | 'web-deepseek-api';
+
+/** A known dsh plugin's effective settings, as composed. */
+export type DshPluginConfigDocument = {
+  id: DshPluginConfigId;
+  revision: string;
+  config: Record<string, unknown>;
+  /** The home-level patch sets this row's config: read only. */
+  overridden: boolean;
+};
+
+export type DshPluginOperation = {
+  id: string;
+  action: 'install' | 'remove' | 'allow-version' | 'revoke-version';
+  source: string;
+  status: 'running' | 'succeeded' | 'failed';
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  /** Packages refused for their version, with the exemption that would admit each. */
+  incompatible?: { package: string; runtimeVersion: string }[];
+};
+
+/** A CLI's global instruction file on the backend host (Claude Code `CLAUDE.md`, Codex / Pi / DeepSeek Harness `AGENTS.md`). */
 export type CliInstructionsDocument = {
   path: string;
   exists: boolean;
@@ -581,9 +663,9 @@ export type ProviderCommandsResponse = {
 
 // --- Managed agent provider accounts (cc-switch model) ---
 
-export type ManagedProviderAgent = 'codex' | 'claude-code' | 'grok-build' | 'pi' | 'opencode';
+export type ManagedProviderAgent = 'codex' | 'claude-code' | 'grok-build' | 'pi' | 'opencode' | 'deepseek-harness';
 
-export const MANAGED_PROVIDER_AGENTS: ManagedProviderAgent[] = ['codex', 'claude-code', 'grok-build', 'pi', 'opencode'];
+export const MANAGED_PROVIDER_AGENTS: ManagedProviderAgent[] = ['codex', 'claude-code', 'grok-build', 'pi', 'opencode', 'deepseek-harness'];
 
 export type AgentProviderProfile = {
   id: string;
@@ -695,7 +777,8 @@ export type McpServerCatalogDescriptor = {
 export type McpServerConfig = {
   descriptor: McpServerCatalogDescriptor;
   path: string;
-  format: 'json' | 'toml' | 'native';
+  /** `dsh_patch`: a DeepSeek Harness `dsh-mcp-client` row, shown and edited as entry JSON. */
+  format: 'json' | 'toml' | 'native' | 'dsh_patch';
   config: unknown;
 };
 
@@ -1329,7 +1412,7 @@ export class V2ApiClient {
     return this.request(`/v2/providers/${provider}/settings`, { method: 'PATCH', body: JSON.stringify({ revision, patch }) });
   }
 
-  /** Replaces the whole file with `text`, which must parse (a JSON object, or TOML). A stale `revision` is `409 CONFLICT`. */
+  /** Replaces the whole file with `text`, which must parse (a JSON object, TOML, or a YAML list of dsh patch entries). A stale `revision` is `409 CONFLICT`. */
   async replaceCliSettings(provider: CliSettingsProvider, revision: string, text: string): Promise<CliSettingsDocument> {
     return this.request(`/v2/providers/${provider}/settings`, { method: 'PUT', body: JSON.stringify({ revision, text }) });
   }
@@ -1362,6 +1445,46 @@ export class V2ApiClient {
    */
   async patchPiPluginConfig(plugin: PiPluginConfigId, revision: string, patch: Record<string, unknown>, replace: string[][] = []): Promise<PiPluginConfigDocument> {
     return this.request(`/v2/providers/pi/plugin-config/${plugin}`, { method: 'PATCH', body: JSON.stringify({ revision, patch, replace }) });
+  }
+
+  async listDshPlugins(): Promise<DshPluginList> {
+    return this.request('/v2/providers/deepseek-harness/plugins');
+  }
+
+  /** Turns a composed row on or off in the acp profile patch. A stale `revision` is `409 CONFLICT`. */
+  async setDshPluginState(revision: string, id: string, enabled: boolean): Promise<DshPluginList> {
+    return this.request('/v2/providers/deepseek-harness/plugins/state', { method: 'PUT', body: JSON.stringify({ revision, id, enabled }) });
+  }
+
+  /** Selects or deselects an installed bundle; `manifestRevision` comes from the list. */
+  async setDshBundleSelected(manifestRevision: string, name: string, enabled: boolean): Promise<DshPluginList> {
+    return this.request('/v2/providers/deepseek-harness/plugins/bundles', { method: 'PUT', body: JSON.stringify({ revision: manifestRevision, name, enabled }) });
+  }
+
+  /**
+   * Starts `dsh plugin --profile acp add|remove|allow-version|revoke-version` in the background; poll
+   * `getDshPluginOperation`. Exemptions name `package@version` as `source` plus `runtimeVersion`;
+   * `allow-version` needs `acceptRisk` after the user accepted that an incompatible plugin may break dsh.
+   */
+  async startDshPluginOperation(
+    action: DshPluginOperation['action'],
+    source: string,
+    options: { runtimeVersion?: string; acceptRisk?: boolean } = {},
+  ): Promise<DshPluginOperation> {
+    return this.request('/v2/providers/deepseek-harness/plugins/operations', { method: 'POST', body: JSON.stringify({ action, source, ...options }) });
+  }
+
+  async getDshPluginOperation(operationId: string): Promise<DshPluginOperation> {
+    return this.request(`/v2/providers/deepseek-harness/plugins/operations/${encodeURIComponent(operationId)}`);
+  }
+
+  async getDshPluginConfig(id: DshPluginConfigId): Promise<DshPluginConfigDocument> {
+    return this.request(`/v2/providers/deepseek-harness/plugin-config/${id}`);
+  }
+
+  /** Sets top-level fields (`null` keeps the composed value); the backend pins the whole row config. */
+  async patchDshPluginConfig(id: DshPluginConfigId, revision: string, patch: Record<string, unknown>): Promise<DshPluginConfigDocument> {
+    return this.request(`/v2/providers/deepseek-harness/plugin-config/${id}`, { method: 'PATCH', body: JSON.stringify({ revision, patch }) });
   }
 
   async getPiMcp(): Promise<PiMcpDocument> {

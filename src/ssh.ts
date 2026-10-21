@@ -99,6 +99,21 @@ export type AgentOutputFilter = {
   categories: AgentOutputFilterCategories;
 };
 
+/** Alias of the backend-machine host agents get when the local terminal is on. */
+export const AGENT_LOCAL_HOST = 'Local';
+
+/**
+ * Agent local terminal (`/v2/ssh/agent-local`). When enabled, agents' TodeX
+ * SSH tools list an `AGENT_LOCAL_HOST` host that runs commands on the machine
+ * running the TodeX backend, with the same approvals and output filter as SSH
+ * hosts. Takes effect from the next conversation start; turning it off applies
+ * immediately. An SSH host whose alias equals `Local` (case-insensitively) is
+ * then hidden from agents.
+ */
+export type AgentLocalTerminal = {
+  enabled: boolean;
+};
+
 /** Values hidden from the agent per category; only counts above zero. */
 export type AgentOutputRedactions = Partial<Record<AgentOutputFilterCategory, number>>;
 

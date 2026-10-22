@@ -653,6 +653,28 @@ test('auto mode being unavailable shows one provider notice per turn', () => {
   assert.equal(other?.providerNotice, undefined);
 });
 
+test('permission notices carry the settings layer that caused them', () => {
+  const classify = (providerMethod, metadata) => parity.classifyV2ConversationEvent(event({
+    eventId: `evt-${providerMethod}`, sequence: 4, type: 'provider.event',
+    payload: { turnId: 'turn-2', provider: 'claude-code', providerMethod, metadata },
+  }), 'ws');
+  const auto = classify('auto_mode_unavailable', { reason: 'settings', cause: 'settings', settingsSource: 'projectSettings' });
+  assert.equal(auto.providerNotice, 'auto_mode_unavailable');
+  assert.equal(auto.providerNoticeCause, 'settings');
+  assert.equal(auto.providerNoticeSettingsSource, 'projectSettings');
+
+  const legacy = classify('auto_mode_unavailable', { reason: 'model' });
+  assert.equal(legacy.providerNoticeCause, undefined);
+  assert.equal(legacy.providerNoticeSettingsSource, undefined);
+
+  const bypass = classify('bypass_mode_disabled', {
+    requestedMode: 'full-access', reportedMode: 'default', settingsSource: null, reason: 'disableBypassPermissionsMode',
+  });
+  assert.equal(bypass.providerNotice, 'bypass_mode_disabled');
+  assert.equal(bypass.providerNoticeSettingsSource, undefined);
+  assert.equal(bypass.subtitle, 'disableBypassPermissionsMode');
+});
+
 test('background work lost with its process shows a notice carrying the reason', () => {
   const entry = parity.classifyV2ConversationEvent(event({
     eventId: 'evt-3', sequence: 3, type: 'provider.event',

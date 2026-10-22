@@ -736,8 +736,8 @@ export type ConversationBlockPhase = 'started' | 'delta' | 'completed' | 'failed
 export type ProviderTurnTrigger = 'background_task' | 'wakeup' | 'cron' | 'unknown';
 /** Provider notices (`provider.event` methods) shown as one quiet timeline
  * line; clients render their own localized text for each. */
-export type ProviderNotice = 'auto_mode_unavailable' | 'background_tasks_ended';
-const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable', 'background_tasks_ended']);
+export type ProviderNotice = 'auto_mode_unavailable' | 'background_tasks_ended' | 'bypass_mode_disabled';
+const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable', 'background_tasks_ended', 'bypass_mode_disabled']);
 
 const PROVIDER_TURN_TRIGGERS: ReadonlySet<string> = new Set(['background_task', 'wakeup', 'cron']);
 
@@ -784,6 +784,14 @@ export type TimelineEntry = {
    * auto mode was unavailable so the turn ran with per-request approvals).
    * The subtitle holds the provider's reason, if any. */
   providerNotice?: ProviderNotice;
+  /** Why a permission notice happened (`metadata.cause`): `settings` when a
+   * Claude Code settings layer turned the requested mode off. Absent from
+   * older backends, which then read as `unavailable`. */
+  providerNoticeCause?: 'settings' | 'unavailable';
+  /** The settings layer behind a `settings` cause (`metadata.settingsSource`:
+   * userSettings, projectSettings, localSettings, policySettings,
+   * flagSettings), when the provider reported one. */
+  providerNoticeSettingsSource?: string;
   /** The subtitle holds only streamed deltas, so text projected from earlier
    * history for the same row precedes it instead of being replaced. */
   streamedText?: boolean;
@@ -1220,13 +1228,18 @@ export function classifyV2ConversationEvent(
   // Provider notices clients explain in their own words; every other
   // `providerMethod` keeps the handling below.
   if (type === 'provider.event' && PROVIDER_NOTICES.has(providerMethod)) {
+    const metadata = asRecord(payload.metadata);
+    const cause = readString(metadata, ['cause']);
+    const settingsSource = readString(metadata, ['settingsSource']);
     return {
       ...base,
       id: `v2-provider-notice-${conversationId}-${providerMethod}-${turnId || eventId}`,
       kind: 'system',
       title: type,
-      subtitle: previewText(readString(asRecord(payload.metadata), ['reason'])),
+      subtitle: previewText(readString(metadata, ['reason'])),
       providerNotice: providerMethod as ProviderNotice,
+      ...(cause === 'settings' || cause === 'unavailable' ? { providerNoticeCause: cause } : {}),
+      ...(settingsSource ? { providerNoticeSettingsSource: settingsSource } : {}),
     };
   }
 

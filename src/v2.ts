@@ -751,6 +751,8 @@ export type SkillCatalogDescriptor = {
   shadowedBy?: string;
   valid: boolean;
   error?: string;
+  /** Shipped and managed by the CLI itself (Codex's `skills/.system`); absent when false or on old daemons. */
+  builtIn?: boolean;
 };
 
 export type SkillCatalog = {
@@ -761,6 +763,27 @@ export type SkillCatalog = {
   /** Sources a new skill can be created in (`shared-user`, `provider-project`, …). */
   creatableSources?: string[];
 };
+
+/** One file of a skill directory, relative to the skill root ('/'-separated). */
+export type SkillBundleFile = {
+  path: string;
+  contentBase64: string;
+  executable?: boolean;
+};
+
+/** A whole skill directory (`SKILL.md` plus assets). Symlinks and special
+ * files are not followed and are listed in `skipped`. */
+export type SkillBundle = {
+  resourceId: string;
+  name: string;
+  source: string;
+  files: SkillBundleFile[];
+  skipped: string[];
+};
+
+/** Bundle ceilings the backend enforces on read and write. */
+export const SKILL_BUNDLE_MAX_FILES = 200;
+export const SKILL_BUNDLE_MAX_BYTES = 4 * 1024 * 1024;
 
 export type McpServerCatalogDescriptor = {
   resourceId: string;
@@ -1698,6 +1721,24 @@ export class V2ApiClient {
   async updateSkill(provider: ProviderKind, workspace: string, resourceId: string, content: string): Promise<SkillCatalogDescriptor> {
     const query = new URLSearchParams({ provider, workspace });
     return this.request(`/v2/catalog/skills/${encodeURIComponent(resourceId)}?${query}`, { method: 'PUT', body: JSON.stringify({ content }) });
+  }
+
+  /** The whole skill directory; a 404 on an existing skill means the daemon predates bundles. */
+  async getSkillBundle(provider: ProviderKind, workspace: string, resourceId: string): Promise<SkillBundle> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills/${encodeURIComponent(resourceId)}/bundle?${query}`);
+  }
+
+  /** Replaces the skill directory with exactly `files`, which must include `SKILL.md`. */
+  async replaceSkillBundle(provider: ProviderKind, workspace: string, resourceId: string, files: SkillBundleFile[]): Promise<SkillCatalogDescriptor> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills/${encodeURIComponent(resourceId)}/bundle?${query}`, { method: 'PUT', body: JSON.stringify({ files }) });
+  }
+
+  /** Creates a skill directory from `files`; `409` when it already exists. */
+  async createSkillBundle(provider: ProviderKind, workspace: string, input: { source: string; name: string; files: SkillBundleFile[] }): Promise<SkillCatalogDescriptor> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills/bundle?${query}`, { method: 'POST', body: JSON.stringify(input) });
   }
 
   async deleteSkill(provider: ProviderKind, workspace: string, resourceId: string): Promise<{ resourceId: string; name: string; path: string }> {

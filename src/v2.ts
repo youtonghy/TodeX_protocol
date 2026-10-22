@@ -578,8 +578,12 @@ export type InstructionPresetUpdate = {
 
 export type CliVersionsResponse = {
   clis: CliVersionInfo[];
+  /** When the oldest latest-release check in `clis` ran. */
   checkedAt: string;
+  /** The earliest-started running operation; kept for clients that track only one. */
   activeOperation?: CliUpgradeOperation;
+  /** Every running install or upgrade, at most one per CLI. Missing on older backends, which run one at a time. */
+  activeOperations?: CliUpgradeOperation[];
 };
 
 export type QuotaWindow = {
@@ -1387,8 +1391,9 @@ export class V2ApiClient {
     return this.request('/v2/providers');
   }
 
-  async listCliVersions(): Promise<CliVersionsResponse> {
-    return this.request('/v2/providers/versions');
+  /** `refresh` re-queries every CLI's latest release instead of using the backend's cache. */
+  async listCliVersions(options: { refresh?: boolean } = {}): Promise<CliVersionsResponse> {
+    return this.request(options.refresh ? '/v2/providers/versions?refresh=true' : '/v2/providers/versions');
   }
 
   async upgradeCli(provider: ManagedCliProvider): Promise<CliUpgradeOperation> {

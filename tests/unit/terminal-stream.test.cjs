@@ -43,8 +43,11 @@ test('unsequenced output appends and the kept output stays under the limit', () 
   stream.applyOutput('67890');
   stream.append('abc');
   assert.equal(stream.snapshot(), '67890abc');
+  assert.equal(stream.truncated, true, 'trimming marks the stream truncated');
   stream.append('x'.repeat(25));
   assert.equal(stream.snapshot().length, 10);
+  stream.applyAttached({ reset: true, data: 'screen', seq: 3 });
+  assert.equal(stream.truncated, false, 'a reset brings back a whole screen');
 });
 
 test('the store creates streams on demand and retains only live terminals', () => {

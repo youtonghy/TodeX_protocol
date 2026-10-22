@@ -58,3 +58,26 @@ test('linked paths resolve inside the workspace only', () => {
   assert.equal(resolveTerminalPath('~/repo/a.ts', '/', '/home/me/repo', '/home/me'), '/home/me/repo/a.ts');
   assert.equal(resolveTerminalPath('a.ts', '', '/repo'), null);
 });
+
+const {
+  TERMINAL_IMAGE_TTL_MS, isTerminalImageType, terminalImageNeedsPng, terminalImageName, isStaleTerminalImage,
+} = require('../../dist/unit/lib/terminalText.js');
+
+test('pasted images get agent-friendly names and formats', () => {
+  const when = new Date(2026, 9, 22, 15, 30, 45);
+  assert.equal(terminalImageName('image/png', when), 'paste-20261022-153045-1.png');
+  assert.equal(terminalImageName('IMAGE/JPEG', when, 2), 'paste-20261022-153045-3.jpg');
+  assert.equal(terminalImageName('image/tiff', when), 'paste-20261022-153045-1.png');
+  assert.equal(isTerminalImageType('image/bmp'), true);
+  assert.equal(isTerminalImageType('text/plain'), false);
+  assert.equal(terminalImageNeedsPng('image/webp'), false);
+  assert.equal(terminalImageNeedsPng('image/bmp'), true);
+});
+
+test('only old pasted images are cleaned up remotely', () => {
+  const now = Date.now();
+  assert.equal(isStaleTerminalImage('paste-20261001-101010-1.png', now - TERMINAL_IMAGE_TTL_MS - 1, now), true);
+  assert.equal(isStaleTerminalImage('paste-20261001-101010-1.png', now - 1000, now), false);
+  assert.equal(isStaleTerminalImage('notes.png', now - TERMINAL_IMAGE_TTL_MS - 1, now), false);
+  assert.equal(isStaleTerminalImage('paste-20261001-101010-1.png', undefined, now), false);
+});

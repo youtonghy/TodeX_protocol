@@ -157,3 +157,44 @@ export function resolveTerminalPath(path: string, cwd: string, root: string, hom
   if (!base) return null;
   return normalized === base || normalized.startsWith(`${base}/`) ? normalized : null;
 }
+
+/** Images pasted or dropped into a terminal go to the PTY's machine and their
+ * path is pasted; agent CLIs (Claude Code, Codex) attach such paths. */
+export const TERMINAL_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+/** Formats the agents read as they are; others are converted to PNG. */
+export const TERMINAL_IMAGE_TYPES: Readonly<Record<string, string>> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+/** Where SSH terminals' pasted images go, under the remote home. */
+export const TERMINAL_REMOTE_IMAGE_DIR = '.cache/todex/paste';
+/** Pasted images older than this are removed from the remote directory. */
+export const TERMINAL_IMAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function isTerminalImageType(mimeType: string): boolean {
+  return /^image\//i.test(mimeType);
+}
+
+export function terminalImageNeedsPng(mimeType: string): boolean {
+  return !(mimeType.toLowerCase() in TERMINAL_IMAGE_TYPES);
+}
+
+/**
+ * A file name agents recognize as an image and shells need no quoting for:
+ * `paste-20261022-153045-1.png` (lowercase extension, no spaces).
+ */
+export function terminalImageName(mimeType: string, when: Date, index = 0): string {
+  const extension = TERMINAL_IMAGE_TYPES[mimeType.toLowerCase()] ?? 'png';
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const stamp = `${when.getFullYear()}${pad(when.getMonth() + 1)}${pad(when.getDate())}-${pad(when.getHours())}${pad(when.getMinutes())}${pad(when.getSeconds())}`;
+  return `paste-${stamp}-${index + 1}.${extension}`;
+}
+
+/** A remote pasted image the cleanup may remove. */
+export function isStaleTerminalImage(name: string, modifiedAtMs: number | undefined, now: number): boolean {
+  return /^paste-\d{8}-\d{6}-\d+\.(png|jpg|gif|webp)$/.test(name)
+    && modifiedAtMs !== undefined
+    && now - modifiedAtMs > TERMINAL_IMAGE_TTL_MS;
+}

@@ -30,6 +30,9 @@ export class TerminalStream {
   seq = 0;
   /** A gap was seen: live output waits for the next attach. */
   resyncing = false;
+  /** The kept output lost its start to the size limit, so replaying it may
+   * begin mid-sequence: a view should ask the backend for a snapshot. */
+  truncated = false;
 
   constructor(private readonly limit = TERMINAL_STREAM_LIMIT) {}
 
@@ -95,6 +98,7 @@ export class TerminalStream {
   private replace(data: string) {
     this.chunks = data ? [data] : [];
     this.length = data.length;
+    this.truncated = false;
     this.trim();
     this.emit({ kind: 'reset', data });
   }
@@ -109,8 +113,10 @@ export class TerminalStream {
   private trim() {
     while (this.length > this.limit && this.chunks.length > 1) {
       this.length -= this.chunks.shift()!.length;
+      this.truncated = true;
     }
     if (this.length > this.limit && this.chunks.length === 1) {
+      this.truncated = true;
       const tail = this.chunks[0].slice(this.length - this.limit);
       this.chunks = [tail];
       this.length = tail.length;

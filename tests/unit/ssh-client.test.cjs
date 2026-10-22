@@ -332,3 +332,25 @@ test('agent output redactions keep positive counts in canonical order', () => {
   assert.ok(!ssh.isValidAgentOutputFilterKey('has space'));
   assert.ok(!ssh.isValidAgentOutputFilterKey(''));
 });
+
+test('maskSshExecOutput splits chunks around hidden values of their stream', () => {
+  const value = (stream, text, label = 'credential') => ({ stream, category: 'credential', label, text });
+  const uuid = value('stdout', 'abcd-1234', 'uuid');
+  const short = value('stdout', '1234');
+  const err = value('stderr', 'pw9');
+  const chunks = [
+    { stream: 'stdout', data: 'id abcd-1234 and abcd-1234; 1234\n' },
+    { stream: 'stderr', data: 'bad pw9 / 1234\n' },
+    { stream: 'stdout', data: 'clean\n' },
+  ];
+  assert.deepEqual(ssh.maskSshExecOutput(chunks, [short, uuid, err]), [
+    [
+      { text: 'id ' }, { text: 'abcd-1234', redacted: uuid }, { text: ' and ' },
+      { text: 'abcd-1234', redacted: uuid }, { text: '; ' }, { text: '1234', redacted: short }, { text: '\n' },
+    ],
+    [{ text: 'bad ' }, { text: 'pw9', redacted: err }, { text: ' / 1234\n' }],
+    [{ text: 'clean\n' }],
+  ]);
+  assert.deepEqual(ssh.maskSshExecOutput(chunks.slice(2), undefined), [[{ text: 'clean\n' }]]);
+  assert.equal(ssh.parseSshExecRedactedValues('x'), undefined);
+});

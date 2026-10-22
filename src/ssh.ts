@@ -341,6 +341,71 @@ export function remoteBaseName(path: string): string {
 /** One agent `ssh_exec` call, rebuilt from `ssh.exec.*` conversation events. */
 export type SshExecOutputChunk = { stream: 'stdout' | 'stderr'; data: string };
 export type SshExecStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+/** A value the privacy filter hid from the agent (`ssh.exec.completed`'s
+ * `redactedValues`); `category` may be one this client does not know. */
+export type SshExecRedactedValue = {
+  stream: 'stdout' | 'stderr';
+  category: string;
+  /** As in the agent's `[REDACTED:<label>]` placeholder. */
+  label: string;
+  text: string;
+};
+
+/** Reads `ssh.exec.completed`'s `redactedValues`, dropping malformed entries. */
+export function parseSshExecRedactedValues(value: unknown): SshExecRedactedValue[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values: SshExecRedactedValue[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { stream, category, label, text } = entry as Record<string, unknown>;
+    if ((stream !== 'stdout' && stream !== 'stderr') || typeof text !== 'string' || !text) continue;
+    values.push({
+      stream,
+      category: typeof category === 'string' ? category : '',
+      label: typeof label === 'string' ? label : '',
+      text,
+    });
+  }
+  return values.length ? values : undefined;
+}
+
+/** A piece of one output chunk: plain text, or a value hidden from the agent. */
+export type SshExecOutputSegment = { text: string; redacted?: SshExecRedactedValue };
+
+/**
+ * Splits each chunk into plain and hidden segments: every occurrence of a
+ * value of the chunk's stream, longer values first, without overlaps. Values
+ * cut across chunks or beyond the recorded output stay plain.
+ */
+export function maskSshExecOutput(
+  chunks: readonly SshExecOutputChunk[],
+  values: readonly SshExecRedactedValue[] | undefined,
+): SshExecOutputSegment[][] {
+  const byLength = [...(values ?? [])].sort((a, b) => b.text.length - a.text.length);
+  return chunks.map((chunk) => {
+    const found: Array<{ start: number; end: number; value: SshExecRedactedValue }> = [];
+    for (const value of byLength) {
+      if (value.stream !== chunk.stream) continue;
+      for (let at = chunk.data.indexOf(value.text); at >= 0; at = chunk.data.indexOf(value.text, at + 1)) {
+        const end = at + value.text.length;
+        if (found.some(other => at < other.end && other.start < end)) continue;
+        found.push({ start: at, end, value });
+      }
+    }
+    if (!found.length) return [{ text: chunk.data }];
+    found.sort((a, b) => a.start - b.start);
+    const segments: SshExecOutputSegment[] = [];
+    let copied = 0;
+    for (const { start, end, value } of found) {
+      if (start > copied) segments.push({ text: chunk.data.slice(copied, start) });
+      segments.push({ text: chunk.data.slice(start, end), redacted: value });
+      copied = end;
+    }
+    if (copied < chunk.data.length) segments.push({ text: chunk.data.slice(copied) });
+    return segments;
+  });
+}
 export type SshExecRun = {
   /** The backend `execId`. */
   id: string;
@@ -358,6 +423,9 @@ export type SshExecRun = {
   /** Values the privacy filter hid from the agent's copy of the output;
    * absent when nothing was hidden. The recorded output stays raw. */
   redactions?: AgentOutputRedactions;
+  /** The hidden values themselves, for masking them in the recorded output
+   * (`maskSshExecOutput`); absent on older backends and before completion. */
+  redactedValues?: SshExecRedactedValue[];
   /** Output in arrival order; consecutive chunks of one stream are joined. */
   output: SshExecOutputChunk[];
   turnId?: string;

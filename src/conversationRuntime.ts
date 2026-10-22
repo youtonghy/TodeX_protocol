@@ -3,7 +3,7 @@ import { canonicalConversationEventType, contextCompactionStatus, normalizeConve
 import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun, SubagentStatus } from './v2';
 import { assistantSegmentBase, classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
-import { SSH_EXEC_RUN_LIMIT, parseAgentOutputRedactions, type SshExecLogin, type SshExecOutputChunk, type SshExecRun, type SshLoginOutcome } from './ssh';
+import { SSH_EXEC_RUN_LIMIT, parseAgentOutputRedactions, parseSshExecRedactedValues, type SshExecLogin, type SshExecOutputChunk, type SshExecRun, type SshLoginOutcome } from './ssh';
 import type { DesktopBrowserActionEvent, DesktopComputerActionEvent } from './agentDesktop';
 import { AGENT_CALL_STATUSES, isActiveAgentCallStatus, type AgentCallError, type AgentCallSession, type AgentCallStatus, type AgentCallTurn } from './agentCalling';
 export type { AgentCallError, AgentCallSession, AgentCallStatus, AgentCallTurn } from './agentCalling';
@@ -1086,6 +1086,7 @@ function projectSshExec(state: ConversationRuntime, phase: string, payload: Reco
   } else {
     const failure = string(payload.failure);
     const redactions = parseAgentOutputRedactions(payload.redactions);
+    const redactedValues = parseSshExecRedactedValues(payload.redactedValues);
     run = { ...run,
       status: failure === 'cancelled' ? 'cancelled' : failure ? 'failed' : 'completed',
       ...(typeof payload.exitCode === 'number' ? { exitCode: payload.exitCode } : {}),
@@ -1094,6 +1095,7 @@ function projectSshExec(state: ConversationRuntime, phase: string, payload: Reco
       truncated: payload.truncated === true,
       outputTruncated: payload.outputTruncated === true,
       ...(redactions ? { redactions } : {}),
+      ...(redactedValues ? { redactedValues } : {}),
       finishedAt: time };
   }
   state.sshExecs = previous

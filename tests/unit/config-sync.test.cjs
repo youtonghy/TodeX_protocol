@@ -248,6 +248,24 @@ test('settings sync writes changed values, keeps excluded keys, and is a no-op t
   assert.deepEqual(second.entries.filter(entry => entry.status !== 'same').map(entry => entry.key), []);
 });
 
+test('the output filter syncs only what an older target knows', async () => {
+  const oldShape = { privateKey: true, publicKey: true, credential: true, bankCard: true, idCard: true };
+  const source = fakeBackend({
+    outputFilter: { enabled: true, categories: { ...oldShape, publicKey: false, proxyCredential: true, uuid: true }, customKeys: ['pin'] },
+  });
+  const target = fakeBackend({ outputFilter: { enabled: true, categories: { ...oldShape } } });
+  const writes = [];
+  const set = target.api.setAgentOutputFilter;
+  target.api.setAgentOutputFilter = async (value) => { writes.push(structuredClone(value)); return set(value); };
+
+  const first = await syncAll(source, target, ['settings']);
+  assert.ok(first.results.every(result => result.ok), JSON.stringify(first.results));
+  assert.deepEqual(writes, [{ enabled: true, categories: { ...oldShape, publicKey: false } }]);
+  // The target kept what it could; the baseline remembers the difference.
+  const second = await planBetween(source, target, ['settings'], first.baseline);
+  assert.equal(second.entries.find(entry => entry.key === 'settings:outputFilter').status, 'same');
+});
+
 test('target-side edits are reported, not overwritten', async () => {
   const source = fakeBackend();
   const target = fakeBackend();

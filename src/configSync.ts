@@ -1,7 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { ConnectionError } from './connectionError';
-import type { ManagedHost, SshKey } from './ssh';
+import { fitAgentOutputFilter, type AgentOutputFilter, type ManagedHost, type SshKey } from './ssh';
 import {
   AGENT_PROVIDER_TRANSFER_FORMAT,
   MANAGED_PROVIDER_AGENTS,
@@ -613,7 +613,12 @@ class TargetState {
 async function applyValue(api: ConfigSyncApi, kind: ConfigSyncItemKind, value: unknown): Promise<void> {
   switch (kind) {
     case 'sshSettings': await api.setSshSettings(value as Parameters<ConfigSyncApi['setSshSettings']>[0]); return;
-    case 'outputFilter': await api.setAgentOutputFilter(value as Parameters<ConfigSyncApi['setAgentOutputFilter']>[0]); return;
+    case 'outputFilter': {
+      // An older target rejects categories and fields it does not know.
+      const target = await api.getAgentOutputFilter();
+      await api.setAgentOutputFilter(fitAgentOutputFilter(value as AgentOutputFilter, target));
+      return;
+    }
     case 'agentLocal': await api.setAgentLocal(value as Parameters<ConfigSyncApi['setAgentLocal']>[0]); return;
     case 'historyCleanup': await api.updateHistoryCleanupPolicy(value as Parameters<ConfigSyncApi['updateHistoryCleanupPolicy']>[0]); return;
     default: throw new Error(`unsupported settings item ${kind}`);

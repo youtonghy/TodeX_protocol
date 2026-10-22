@@ -313,4 +313,22 @@ test('agent output redactions keep positive counts in canonical order', () => {
     items: [{ category: 'privateKey', count: 1 }, { category: 'credential', count: 2 }, { category: 'idCard', count: 1 }],
   });
   assert.deepEqual(ssh.summarizeAgentOutputRedactions(undefined), { total: 0, items: [] });
+  assert.deepEqual(ssh.parseAgentOutputRedactions({ proxyCredential: 4, publicIp: 1, future: 2 }), { proxyCredential: 4, publicIp: 1 });
+  assert.deepEqual(
+    ssh.fitAgentOutputFilter(
+      { enabled: true, categories: { credential: true, uuid: true }, customKeys: ['pin'] },
+      { enabled: false, categories: { credential: false } },
+    ),
+    { enabled: true, categories: { credential: true } },
+  );
+  assert.deepEqual(
+    ssh.fitAgentOutputFilter(
+      { enabled: true, categories: { uuid: true }, customKeys: ['pin'] },
+      { enabled: true, categories: { uuid: false }, customKeys: [] },
+    ),
+    { enabled: true, categories: { uuid: true }, customKeys: ['pin'] },
+  );
+  assert.ok(ssh.isValidAgentOutputFilterKey('router_pin.v2-x'));
+  assert.ok(!ssh.isValidAgentOutputFilterKey('has space'));
+  assert.ok(!ssh.isValidAgentOutputFilterKey(''));
 });

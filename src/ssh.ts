@@ -79,25 +79,66 @@ export type SshConnectionSettings = {
 };
 
 /**
- * Kinds of secrets the backend can redact from `ssh_exec` output before it
- * reaches the agent, in display order.
+ * Kinds of secrets the backend redacts by default from `ssh_exec` output
+ * before it reaches the agent, in display order.
  */
-export const AGENT_OUTPUT_FILTER_CATEGORIES = ['privateKey', 'publicKey', 'credential', 'bankCard', 'idCard'] as const;
+export const AGENT_OUTPUT_FILTER_STANDARD_CATEGORIES = ['privateKey', 'publicKey', 'credential', 'bankCard', 'idCard', 'proxyCredential'] as const;
+
+/**
+ * Aggressive categories, off by default: they match by shape alone and also
+ * hide values that are not secrets. Older backends lack them.
+ */
+export const AGENT_OUTPUT_FILTER_AGGRESSIVE_CATEGORIES = ['urlToken', 'highEntropy', 'uuid', 'email', 'phone', 'publicIp'] as const;
+
+/** Every category, in display order. */
+export const AGENT_OUTPUT_FILTER_CATEGORIES = [
+  ...AGENT_OUTPUT_FILTER_STANDARD_CATEGORIES,
+  ...AGENT_OUTPUT_FILTER_AGGRESSIVE_CATEGORIES,
+] as const;
 
 export type AgentOutputFilterCategory = (typeof AGENT_OUTPUT_FILTER_CATEGORIES)[number];
 
-export type AgentOutputFilterCategories = Record<AgentOutputFilterCategory, boolean>;
+/** A backend reports only the categories it knows; show and send only those. */
+export type AgentOutputFilterCategories = Partial<Record<AgentOutputFilterCategory, boolean>>;
+
+/** Custom key names: at most this many, each 1–64 of `[A-Za-z0-9_.-]`. */
+export const AGENT_OUTPUT_FILTER_CUSTOM_KEYS_LIMIT = 32;
+
+export function isValidAgentOutputFilterKey(key: string): boolean {
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(key);
+}
 
 /**
  * Privacy filter for command output returned to agents
  * (`/v2/ssh/agent-output-filter`). The user's own terminal and the live
  * `ssh.exec.output` stream stay unfiltered. Best effort, not a security
- * boundary.
+ * boundary. `PUT` keeps the saved value of a category or `customKeys` it
+ * leaves out, but rejects ones the backend does not know.
  */
 export type AgentOutputFilter = {
   enabled: boolean;
   categories: AgentOutputFilterCategories;
+  /** Extra key names whose values are hidden like passwords; absent on older backends. */
+  customKeys?: string[];
 };
+
+/**
+ * `filter` cut down to what `target` (a backend's current setting) knows,
+ * so it can be sent to that backend: unknown categories and, on backends
+ * without them, custom keys are left out.
+ */
+export function fitAgentOutputFilter(filter: AgentOutputFilter, target: AgentOutputFilter): AgentOutputFilter {
+  const known = new Set(Object.keys(target.categories ?? {}));
+  const categories: AgentOutputFilterCategories = {};
+  for (const [category, enabled] of Object.entries(filter.categories ?? {})) {
+    if (known.has(category)) categories[category as AgentOutputFilterCategory] = enabled;
+  }
+  return {
+    enabled: filter.enabled,
+    categories,
+    ...(target.customKeys !== undefined && filter.customKeys !== undefined ? { customKeys: filter.customKeys } : {}),
+  };
+}
 
 /** Alias of the backend-machine host agents get when the local terminal is on. */
 export const AGENT_LOCAL_HOST = 'Local';

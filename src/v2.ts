@@ -2082,7 +2082,11 @@ export class V2ApiClient {
     return this.request('/v2/ssh/agent-output-filter');
   }
 
-  /** Takes the full filter (unknown fields are rejected); later `ssh_exec` results use it. */
+  /**
+   * Takes `enabled` and `categories`; left-out categories and `customKeys` keep
+   * their saved value, unknown ones are rejected (see `fitAgentOutputFilter`).
+   * Later `ssh_exec` results use it.
+   */
   async setAgentOutputFilter(filter: AgentOutputFilter): Promise<AgentOutputFilter> {
     return this.request('/v2/ssh/agent-output-filter', { method: 'PUT', body: JSON.stringify(filter) });
   }

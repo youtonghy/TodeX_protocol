@@ -43,7 +43,7 @@ import type { PromptUploadChunkResult } from './promptUploads';
  */
 export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 
-export type PermissionMode = 'ask' | 'auto' | 'full-access';
+export type PermissionMode = 'ask' | 'accept-edits' | 'auto' | 'full-access';
 export type WorkMode = 'plan' | 'implement';
 
 export type ProviderKind =

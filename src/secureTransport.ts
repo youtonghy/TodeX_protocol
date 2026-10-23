@@ -1,7 +1,7 @@
 import { ConnectionError, ConnectionErrorType } from './connectionError';
 import { deviceAuthHeaders, deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
 import { isLocalBackendUrl } from './mobileParity';
-import { isIpcServerUrl, ipcWebSocketImpl } from './ipcServerUrl';
+import { ipcFetchImplFor, isIpcServerUrl, ipcWebSocketImpl } from './ipcServerUrl';
 import { joinServerPath } from './serverUrl';
 import {
   TRANSPORT_V2_SEALED_CONTENT_TYPE,
@@ -367,7 +367,7 @@ export async function verifyTransportPolicy(
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) controller.abort();
   const timer = setTimeout(abort, options.timeoutMs ?? POLICY_TIMEOUT_MS);
-  const fetchImpl = options.fetchImpl ?? (typeof window !== 'undefined' ? fetch.bind(window) : fetch);
+  const fetchImpl = options.fetchImpl ?? ipcFetchImplFor(profile.serverUrl) ?? (typeof window !== 'undefined' ? fetch.bind(window) : fetch);
   let value: unknown;
   try {
     let response: Response;
@@ -562,6 +562,8 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
   const maxBodyBytes = options.maxBodyBytes ?? MAX_REST_BODY_BYTES;
   const fetchImpl = (): typeof fetch => {
     if (options.fetchImpl) return options.fetchImpl;
+    const ipc = ipcFetchImplFor(profile.serverUrl);
+    if (ipc) return ipc;
     // Browser fetch requires its Window receiver when called detached.
     return typeof window !== 'undefined' ? fetch.bind(window) : fetch;
   };

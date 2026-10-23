@@ -34,6 +34,7 @@ export function ipcServerUrl(instance: string): string {
 type WebSocketConstructor = typeof WebSocket;
 
 let ipcWebSocket: WebSocketConstructor | null = null;
+let ipcFetch: typeof fetch | null = null;
 
 /** Registers the WebSocket implementation that serves `todex-ipc://` URLs
  * (pass null to remove it). Platforms without IPC never register one. */
@@ -44,4 +45,16 @@ export function setIpcWebSocketImpl(impl: WebSocketConstructor | null): void {
 export function ipcWebSocketImpl(): WebSocketConstructor {
   if (!ipcWebSocket) throw new Error('this client cannot open local IPC backends');
   return ipcWebSocket;
+}
+
+/** Registers the `fetch` that serves `todex-ipc://` URLs where the global
+ * one cannot (a host process talking to the socket directly). Clients whose
+ * global `fetch` already handles the scheme register nothing. */
+export function setIpcFetchImpl(impl: typeof fetch | null): void {
+  ipcFetch = impl;
+}
+
+/** The registered IPC `fetch` for an IPC server URL, else null. */
+export function ipcFetchImplFor(serverUrl: string): typeof fetch | null {
+  return ipcFetch && isIpcServerUrl(serverUrl) ? ipcFetch : null;
 }

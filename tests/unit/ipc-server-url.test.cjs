@@ -55,3 +55,16 @@ test('an unpaired IPC profile may use plaintext and opens sockets through the re
     setIpcWebSocketImpl(null);
   }
 });
+
+test('a registered IPC fetch serves IPC profiles only', async () => {
+  const { setIpcFetchImpl } = require(path.join(lib, 'ipcServerUrl.js'));
+  const seen = [];
+  setIpcFetchImpl(async (url) => { seen.push(String(url)); return new Response('{"ok":true}'); });
+  try {
+    const transport = createSecureTransport({ profile: { serverUrl: 'todex-ipc://local', encryptionProtocol: 'none', encryptionPublicKey: '' } });
+    await transport.fetch({ method: 'GET', path: '/v2/version' });
+    assert.deepEqual(seen, ['todex-ipc://local/v2/version']);
+  } finally {
+    setIpcFetchImpl(null);
+  }
+});

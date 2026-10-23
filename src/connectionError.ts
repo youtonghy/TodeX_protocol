@@ -185,6 +185,9 @@ export class ConnectionError extends Error {
       case 'WORKSPACE_PATH_OUTSIDE_ROOT':
         userMessage = '工作区目录不在 Backend 允许的根目录内';
         break;
+      case 'CLI_MANAGED_BY_IMAGE':
+        userMessage = '该 CLI 随容器镜像更新，请升级镜像';
+        break;
       case 'HISTORY_READ_ONLY':
         userMessage = '这是旧版未加密的历史对话，只能查看、归档、导出或删除';
         break;

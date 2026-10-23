@@ -2,6 +2,7 @@ import { normalizeServerUrl } from './todex';
 import { jitteredBackoffMs } from './backoff';
 import { ConnectionError, isAuthenticationFailure, parseBackendErrorBody, type ConnectionFailureCode } from './connectionError';
 import type { SecureResponse, SecureTransport } from './secureTransport';
+import { parseBackendDeployment, parsePathMappings, type BackendDeployment, type PathMapping } from './pathMapping';
 import type { ProviderDescriptor } from './v2';
 
 export type ServerVersionInfo = {
@@ -14,6 +15,10 @@ export type ServerVersionInfo = {
   scratchWorkspaceRoot?: string;
   /** `1` when the backend serves end-to-end encrypted history (§5.4). */
   historyEncryption?: number;
+  /** Where the backend runs; `host` when an older backend omits it. */
+  deployment: BackendDeployment;
+  /** Host ↔ backend folder pairs (trusted part); empty when none. */
+  pathMappings: PathMapping[];
 };
 
 export type BackendProbeResult = {
@@ -153,6 +158,8 @@ export async function probeBackendConnection(options: {
       scratchWorkspaceRoot:
         typeof versionJson.scratch_workspace_root === 'string' ? versionJson.scratch_workspace_root : undefined,
       historyEncryption: typeof versionJson.historyEncryption === 'number' ? versionJson.historyEncryption : undefined,
+      deployment: parseBackendDeployment(versionJson.deployment),
+      pathMappings: parsePathMappings(versionJson.pathMappings),
     };
     if (version.name && version.name !== 'todex-agentd') {
       const error = ConnectionError.protocolMismatch(`unexpected server name ${version.name}`);

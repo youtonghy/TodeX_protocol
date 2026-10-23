@@ -324,6 +324,10 @@ type CliVersionInfoBase = {
   latestVersion?: string;
   status: CliVersionStatus;
   error?: string;
+  /** `image`: installed and updated with the container image; the backend
+   * reports `upgradeSupported`/`installSupported` false and answers upgrade
+   * or install with 409 `CLI_MANAGED_BY_IMAGE`. Absent otherwise. */
+  managedBy?: 'image';
 };
 
 export type CliVersionInfo = CliVersionInfoBase & ({

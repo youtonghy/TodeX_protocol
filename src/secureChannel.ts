@@ -5,6 +5,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 
+import { isIpcServerUrl } from './ipcServerUrl';
 import { isLoopbackHostname } from './loopback';
 import { MAX_LEGACY_MESSAGE_BYTES } from './transport';
 import { decodeBase64UrlBytes, encodeBase64Url, type TransportEncryptionProtocol } from './transportCrypto';
@@ -1168,6 +1169,7 @@ function decodeCanonicalBase64Url(value: string): Uint8Array {
 }
 
 function isLoopbackServerUrl(serverUrl: string | URL): boolean {
+  if (isIpcServerUrl(String(serverUrl))) return true;
   let parsed: URL;
   try {
     parsed = new URL(String(serverUrl).trim().replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://'));

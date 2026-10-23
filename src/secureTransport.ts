@@ -1,6 +1,7 @@
 import { ConnectionError, ConnectionErrorType } from './connectionError';
 import { deviceAuthHeaders, deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
-import { isLoopbackUrl } from './mobileParity';
+import { isLocalBackendUrl } from './mobileParity';
+import { isIpcServerUrl, ipcWebSocketImpl } from './ipcServerUrl';
 import { joinServerPath } from './serverUrl';
 import {
   TRANSPORT_V2_SEALED_CONTENT_TYPE,
@@ -301,7 +302,7 @@ export function secureTransportRefusal(profile: SecureTransportProfile): Connect
     }
     return protocol ? null : new InvalidPinnedKeyError(String(profile.encryptionProtocol ?? 'none'));
   }
-  return isLoopbackUrl(httpServerUrl(profile.serverUrl)) ? null : new EncryptionRequiredError(profile.serverUrl);
+  return isLocalBackendUrl(httpServerUrl(profile.serverUrl)) ? null : new EncryptionRequiredError(profile.serverUrl);
 }
 
 /**
@@ -727,9 +728,12 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
       for (const [key, value] of Object.entries(signed)) params.set(key, value);
     }
     const url = new URL(originUrl(profile.serverUrl, path, params.toString()));
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    // An IPC backend keeps its `todex-ipc:` URL; the platform's registered
+    // implementation carries the socket over the local channel.
+    const ipc = isIpcServerUrl(profile.serverUrl);
+    if (!ipc) url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 
-    const WebSocketImpl = options.WebSocketImpl ?? WebSocket;
+    const WebSocketImpl = options.WebSocketImpl ?? (ipc ? ipcWebSocketImpl() : WebSocket);
     const socket = new WebSocketImpl(url.toString());
     socket.binaryType = 'arraybuffer';
     let session: WsChannelSession | null = null;

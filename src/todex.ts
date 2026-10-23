@@ -1,3 +1,4 @@
+import { ipcServerInstance, ipcServerUrl } from './ipcServerUrl';
 import { joinServerPath } from './serverUrl';
 export type AppTab = 'chat' | 'settings';
 
@@ -445,6 +446,8 @@ export function normalizeServerUrl(raw: string): string {
   if (!value) {
     return 'http://127.0.0.1:7345';
   }
+  const ipcInstance = ipcServerInstance(value);
+  if (ipcInstance) return ipcServerUrl(ipcInstance);
 
   let candidate = value;
   if (!/^https?:\/\//i.test(candidate) && !/^wss?:\/\//i.test(candidate)) {
@@ -2847,6 +2850,7 @@ export {
   isCollapsibleProgressEntry,
   isLifecycleProgressText,
   isLoopbackHostname,
+  isLocalBackendUrl,
   isLoopbackUrl,
   isStepProgressEntry,
   isThinkingProgressEntry,
@@ -2886,4 +2890,5 @@ export type {
 } from './mobileParity';
 
 export { joinServerPath } from './serverUrl';
+export { IPC_SERVER_PROTOCOL, ipcServerInstance, ipcServerUrl, isIpcServerUrl } from './ipcServerUrl';
 export * from './conversationRuntime';

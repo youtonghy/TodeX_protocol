@@ -5,6 +5,7 @@
  * re-exported by the legacy protocol module without introducing a runtime
  * dependency cycle in the React Native bundle.
  */
+import { ipcServerInstance, ipcServerUrl, isIpcServerUrl } from './ipcServerUrl';
 import type {
   BackendConnectionProfile,
   ConnectionSettings,
@@ -140,6 +141,8 @@ function normalizeProfileServerUrl(raw: string): string {
   if (!value) {
     return DEFAULT_SERVER_URL;
   }
+  const ipcInstance = ipcServerInstance(value);
+  if (ipcInstance) return ipcServerUrl(ipcInstance);
 
   let candidate = value;
   if (!/^https?:\/\//i.test(candidate) && !/^wss?:\/\//i.test(candidate)) {
@@ -1702,6 +1705,13 @@ export function isLoopbackUrl(value: string | URL): boolean {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
   if (parsed.username || parsed.password) return false;
   return isLoopbackHostname(parsed.hostname);
+}
+
+/** Whether a backend server URL names this machine: a loopback HTTP(S)
+ * origin or a local IPC backend (`todex-ipc://…`). Preview and other web
+ * URLs keep using `isLoopbackUrl`, which never accepts IPC URLs. */
+export function isLocalBackendUrl(value: string | URL): boolean {
+  return isIpcServerUrl(value instanceof URL ? value.href : value) || isLoopbackUrl(value);
 }
 
 export type LoopbackUrlValidation =

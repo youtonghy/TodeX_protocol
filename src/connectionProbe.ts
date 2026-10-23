@@ -1,3 +1,4 @@
+import { isIpcServerUrl } from './ipcServerUrl';
 import { normalizeServerUrl } from './todex';
 import { jitteredBackoffMs } from './backoff';
 import { ConnectionError, isAuthenticationFailure, parseBackendErrorBody, type ConnectionFailureCode } from './connectionError';
@@ -45,6 +46,7 @@ export function inspectServerUrl(raw: string): { origin: string; error: Connecti
   }
   try {
     const origin = normalizeServerUrl(trimmed);
+    if (isIpcServerUrl(origin)) return { origin, error: null };
     const parsed = new URL(origin);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return { origin, error: ConnectionError.invalidServerUrl(`unsupported scheme ${parsed.protocol}`) };

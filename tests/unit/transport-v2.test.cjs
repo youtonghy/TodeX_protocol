@@ -877,6 +877,11 @@ test('REST tunnel end to end: signed inner request, streamed sealed response', a
   assert.equal(call.inner.headers['content-type'], 'application/json');
   assert.equal(call.inner.headers['x-todex-device-id'], device.deviceId);
   assert.ok(call.inner.headers['x-todex-auth-sig']);
+  // The signed body hash, so the backend can verify before reading the body.
+  assert.equal(
+    call.inner.headers['x-todex-content-sha256'],
+    Buffer.from(sha256(utf8('{"name":"demo"}'))).toString('base64url'),
+  );
   assert.equal(new TextDecoder().decode(call.inner.body), '{"name":"demo"}');
   assert.deepEqual(signed[0], { method: 'POST', path: '/v2/workspaces', query: 'x=1', body: utf8('{"name":"demo"}') });
   assert.equal(response.status, 202);

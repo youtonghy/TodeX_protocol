@@ -34,6 +34,9 @@ export type BackendConnectionProfile = {
   encryptionPublicKey: string;
   /** True once device pairing verified the pinned protocol and key; false for older profiles. */
   transportVerified: boolean;
+  /** Set while another profile serves the same backend (e.g. its IPC
+   * connection): the client neither connects nor syncs this one. */
+  disabled?: boolean;
   createdAt: number;
   updatedAt: number;
 };

@@ -35,6 +35,16 @@ test('server URL helpers keep IPC URLs intact', () => {
   assert.equal(normalizeBackendConnectionProfile({ id: 'a', serverUrl: 'todex-ipc://local' }).serverUrl, 'todex-ipc://local');
 });
 
+test('an invalid IPC address stays as written and fails as one', () => {
+  // Read as HTTP, `todex-ipc://` used to become the unreachable `http://todex-ipc`.
+  for (const value of ['todex-ipc://', 'todex-ipc://local_1', 'todex-ipc:local']) {
+    assert.equal(normalizeServerUrl(value), value);
+    assert.equal(normalizeBackendConnectionProfile({ id: 'a', serverUrl: value }).serverUrl, value);
+    assert.equal(inspectServerUrl(value).error?.code, 'invalid_server_url', value);
+  }
+  assert.equal(normalizeServerUrl('todex-ipc.example:7345'), 'http://todex-ipc.example:7345');
+});
+
 test('an unpaired IPC profile may use plaintext and opens sockets through the registered implementation', () => {
   const profile = { serverUrl: 'todex-ipc://local', encryptionProtocol: 'none', encryptionPublicKey: '' };
   const transport = createSecureTransport({ profile, fetchImpl: async () => new Response('{}') });

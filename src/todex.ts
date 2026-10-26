@@ -1,4 +1,4 @@
-import { ipcServerInstance, ipcServerUrl } from './ipcServerUrl';
+import { hasIpcScheme, ipcServerInstance, ipcServerUrl } from './ipcServerUrl';
 import { joinServerPath } from './serverUrl';
 export type AppTab = 'chat' | 'settings';
 
@@ -451,6 +451,7 @@ export function normalizeServerUrl(raw: string): string {
   }
   const ipcInstance = ipcServerInstance(value);
   if (ipcInstance) return ipcServerUrl(ipcInstance);
+  if (hasIpcScheme(value)) return value;
 
   let candidate = value;
   if (!/^https?:\/\//i.test(candidate) && !/^wss?:\/\//i.test(candidate)) {
@@ -2893,5 +2894,5 @@ export type {
 } from './mobileParity';
 
 export { joinServerPath } from './serverUrl';
-export { IPC_SERVER_PROTOCOL, ipcServerInstance, ipcServerUrl, isIpcServerUrl } from './ipcServerUrl';
+export { IPC_SERVER_PROTOCOL, ipcServerInstance, ipcServerUrl, isIpcServerUrl, hasIpcScheme } from './ipcServerUrl';
 export * from './conversationRuntime';

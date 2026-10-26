@@ -25,6 +25,13 @@ export function isIpcServerUrl(value: string | null | undefined): boolean {
   return ipcServerInstance(value) !== null;
 }
 
+/** Whether `value` uses the IPC scheme at all, valid instance or not.
+ * Normalizers keep such a value as written instead of reading it as an
+ * HTTP host, so an invalid IPC address fails as one. */
+export function hasIpcScheme(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^todex-ipc:/i.test(value.trim());
+}
+
 export function ipcServerUrl(instance: string): string {
   const normalized = instance.trim().toLowerCase();
   if (!IPC_INSTANCE.test(normalized)) throw new TypeError(`invalid IPC backend instance ${instance}`);

@@ -62,7 +62,16 @@ export type FtpSite = {
 
 export type FtpSiteInput = Omit<FtpSite, 'id' | 'port'> & { port?: number };
 
-export type SshHostsResponse = { hosts: SshHost[]; ftpSites: FtpSite[] };
+export type SshHostsResponse = {
+  hosts: SshHost[];
+  ftpSites: FtpSite[];
+  /**
+   * The backend runs on Linux or macOS and opens a terminal on
+   * `LOCAL_TERMINAL_HOST` (`ssh localhost`, needs its sshd). Absent on
+   * older backends.
+   */
+  localTerminal?: boolean;
+};
 
 export type SshHostImportResult = { hosts: ManagedHost[]; errors: string[] };
 
@@ -142,6 +151,18 @@ export function fitAgentOutputFilter(filter: AgentOutputFilter, target: AgentOut
 
 /** Alias of the backend-machine host agents get when the local terminal is on. */
 export const AGENT_LOCAL_HOST = 'Local';
+
+/**
+ * Terminal host that `terminal.start` with `ssh: { host }` opens on the
+ * backend's own machine over `ssh localhost`; it shadows an inventory host of
+ * the same name, as `AGENT_LOCAL_HOST` does for agents.
+ */
+export const LOCAL_TERMINAL_HOST = AGENT_LOCAL_HOST;
+
+/** Whether `alias` names the `LOCAL_TERMINAL_HOST` (in any case). */
+export function isLocalTerminalHost(alias: string): boolean {
+  return alias.toLowerCase() === LOCAL_TERMINAL_HOST.toLowerCase();
+}
 
 /**
  * Agent local terminal (`/v2/ssh/agent-local`). When enabled, agents' TodeX

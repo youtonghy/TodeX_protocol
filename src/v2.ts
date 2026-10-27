@@ -415,6 +415,47 @@ export type PiPluginConfigDocument = {
   parseError?: string;
 };
 
+/** A global `@tintinweb/pi-subagents` agent type: `<pi_dir>/agents/<file>.md`. */
+export type PiSubagentTemplateSummary = {
+  file: string;
+  /** The agent type: front matter `name`, else `file`. */
+  name: string;
+  displayName?: string;
+  description?: string;
+  color?: string;
+  model?: string;
+  enabled: boolean;
+  overridesBuiltIn: boolean;
+  parseError?: string;
+};
+
+export type PiBuiltInSubagent = {
+  name: string;
+  /** `disabled`: an `enabled: false` stub named after it; `overridden`: a template of the same type replaces it. */
+  state: 'enabled' | 'disabled' | 'overridden';
+  file?: string;
+};
+
+export type PiSubagentTemplateList = {
+  dir: string;
+  templates: PiSubagentTemplateSummary[];
+  builtIns: PiBuiltInSubagent[];
+};
+
+export type PiSubagentTemplateDocument = {
+  file: string;
+  path: string;
+  revision: string;
+  content: string;
+  /** `null` when the file does not parse. */
+  frontMatter: Record<string, unknown> | null;
+  body: string;
+  parseError?: string;
+};
+
+/** The raw file, or a front matter patch (`null` removes a key) plus the new body. */
+export type PiSubagentTemplateInput = { content: string } | { frontMatter: Record<string, unknown>; body: string };
+
 export type PiPackageOperation = {
   id: string;
   action: 'install' | 'remove';
@@ -1478,6 +1519,33 @@ export class V2ApiClient {
    */
   async patchPiPluginConfig(plugin: PiPluginConfigId, revision: string, patch: Record<string, unknown>, replace: string[][] = []): Promise<PiPluginConfigDocument> {
     return this.request(`/v2/providers/pi/plugin-config/${plugin}`, { method: 'PATCH', body: JSON.stringify({ revision, patch, replace }) });
+  }
+
+  async listPiSubagentTemplates(): Promise<PiSubagentTemplateList> {
+    return this.request('/v2/providers/pi/subagent-templates');
+  }
+
+  async getPiSubagentTemplate(file: string): Promise<PiSubagentTemplateDocument> {
+    return this.request(`/v2/providers/pi/subagent-templates/${encodeURIComponent(file)}`);
+  }
+
+  /** Creates `<file>.md`; an existing file is `409 CONFLICT`. */
+  async createPiSubagentTemplate(file: string, input: PiSubagentTemplateInput): Promise<PiSubagentTemplateDocument> {
+    return this.request('/v2/providers/pi/subagent-templates', { method: 'POST', body: JSON.stringify({ file, ...input }) });
+  }
+
+  /** A stale `revision` is `409 CONFLICT`; a form update of an unparseable file is `409` too. */
+  async updatePiSubagentTemplate(file: string, revision: string, input: PiSubagentTemplateInput): Promise<PiSubagentTemplateDocument> {
+    return this.request(`/v2/providers/pi/subagent-templates/${encodeURIComponent(file)}`, { method: 'PUT', body: JSON.stringify({ revision, ...input }) });
+  }
+
+  async deletePiSubagentTemplate(file: string): Promise<void> {
+    await this.request(`/v2/providers/pi/subagent-templates/${encodeURIComponent(file)}`, { method: 'DELETE' });
+  }
+
+  /** Switches a built-in agent through its `enabled: false` stub; an overridden one is `409 CONFLICT`. */
+  async setPiBuiltInSubagent(name: string, enabled: boolean): Promise<PiSubagentTemplateList> {
+    return this.request(`/v2/providers/pi/subagent-templates/built-ins/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ enabled }) });
   }
 
   async listDshPlugins(): Promise<DshPluginList> {

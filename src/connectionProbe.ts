@@ -107,13 +107,23 @@ function classifyHttp(status: number, endpoint: string, body?: Uint8Array): Conn
     // A permission refusal for a paired device: keep the server's message.
     return ConnectionError.apiRequestFailed(status, backendError?.code, backendError?.message);
   }
+  let error: ConnectionError;
   if (status === 404 && endpoint.includes('/v2/')) {
-    return ConnectionError.protocolMismatch(`${endpoint} returned ${status}`);
+    error = ConnectionError.protocolMismatch(`${endpoint} returned ${status}`);
+  } else if (status >= 500) {
+    error = ConnectionError.serverError(status);
+  } else {
+    error = ConnectionError.protocolError(status);
+    // A generic refusal: the server's own words beat "check the network".
+    const message = backendError?.message?.trim();
+    if (message) error.userMessage = error.message = message;
   }
-  if (status >= 500) {
-    return ConnectionError.serverError(status);
-  }
-  return ConnectionError.protocolError(status);
+  // Every other failure keeps what the server said, without changing its code.
+  error.httpStatus = status;
+  error.backendCode = backendError?.code;
+  error.technicalDetails = [error.technicalDetails, backendError?.code?.trim(), backendError?.message?.trim()]
+    .filter(Boolean).join(' · ');
+  return error;
 }
 
 const isOk = (response: SecureResponse) => response.status >= 200 && response.status < 300;

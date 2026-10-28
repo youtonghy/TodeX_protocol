@@ -101,3 +101,27 @@ test('probeBackendConnection separates 401 from 403', async () => {
   assert.equal(forbidden.error.userMessage, 'device revoked by admin');
   assert.equal(forbidden.error.httpStatus, 403);
 });
+
+test('probeBackendConnection keeps the server message for every non-OK status', async () => {
+  const { probeBackendConnection } = require(path.join(compiledDir, 'lib', 'connectionProbe.js'));
+  const probe = (status, body) => probeBackendConnection({
+    serverUrl: 'http://127.0.0.1:7345',
+    transport: fakeTransport({ '/v2/version': { status, body } }),
+  });
+  const rejected = await probe(400, { code: 'INVALID_REQUEST', message: 'bad header' });
+  assert.equal(rejected.code, 'backend_unreachable');
+  assert.equal(rejected.error.type, 'PROTOCOL_ERROR');
+  assert.equal(rejected.error.userMessage, 'bad header');
+  assert.equal(rejected.error.httpStatus, 400);
+  assert.equal(rejected.error.backendCode, 'INVALID_REQUEST');
+  const failed = await probe(500, { code: 'INTERNAL', message: 'disk full' });
+  assert.equal(failed.code, 'backend_unreachable');
+  assert.equal(failed.error.type, 'SERVER_ERROR');
+  assert.match(failed.error.technicalDetails, /HTTP 500 · INTERNAL · disk full/);
+  const missing = await probe(404, { code: 'NOT_FOUND', message: 'no such route' });
+  assert.equal(missing.error.type, 'PROTOCOL_MISMATCH');
+  assert.match(missing.error.technicalDetails, /no such route/);
+  assert.equal(missing.error.httpStatus, 404);
+  const bare = await probe(418, {});
+  assert.equal(bare.error.userMessage, '请求失败，请检查网络连接');
+});

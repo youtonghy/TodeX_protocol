@@ -380,6 +380,7 @@ function providerLabel(provider: string): string {
   if (id === 'opencode' || id === 'open-code' || id === 'open_code') return 'OpenCode';
   if (id === 'antigravity' || id === 'agy' || id === 'antigravity-cli') return 'Antigravity';
   if (id === 'deepseek-harness' || id === 'deepseek_harness' || id === 'dsh') return 'DeepSeek Harness';
+  if (id === 'omp' || id === 'oh-my-pi' || id === 'oh_my_pi') return 'omp';
   return provider.trim() || 'Agent';
 }
 
@@ -1842,6 +1843,15 @@ export const PROVIDER_ICON_METADATA: Readonly<Record<string, ProviderIconMetadat
     backgroundColor: '#e8ecff',
     accessibilityLabel: 'DeepSeek Harness',
   },
+  omp: {
+    id: 'omp',
+    label: 'omp',
+    icon: 'extension-puzzle-outline',
+    iconName: 'extension-puzzle-outline',
+    color: '#c2410c',
+    backgroundColor: '#fdebdd',
+    accessibilityLabel: 'omp',
+  },
 });
 
 function canonicalProviderId(value: string): string {
@@ -1855,6 +1865,7 @@ function canonicalProviderId(value: string): string {
   if (id === 'opencode' || id === 'open-code' || id === 'open_code') return 'opencode';
   if (id === 'antigravity' || id === 'agy' || id === 'antigravity-cli') return 'antigravity';
   if (id === 'deepseek-harness' || id === 'deepseek_harness' || id === 'dsh') return 'deepseek-harness';
+  if (id === 'omp' || id === 'oh-my-pi' || id === 'oh_my_pi') return 'omp';
   return id;
 }
 

@@ -55,7 +55,8 @@ export type ProviderKind =
   | 'devin'
   | 'opencode'
   | 'antigravity'
-  | 'deepseek-harness';
+  | 'deepseek-harness'
+  | 'omp';
 
 export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   acp: 'ACP',
@@ -67,6 +68,7 @@ export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   opencode: 'OpenCode',
   antigravity: 'Antigravity',
   'deepseek-harness': 'DeepSeek Harness',
+  omp: 'omp',
 };
 
 export function providerDisplayName(provider: ProviderKind | string, fallback?: string): string {
@@ -312,7 +314,8 @@ export type ManagedCliProvider =
   | 'devin'
   | 'opencode'
   | 'antigravity'
-  | 'deepseek-harness';
+  | 'deepseek-harness'
+  | 'omp';
 export type CliVersionStatus = 'upToDate' | 'updateAvailable' | 'ahead' | 'unknown' | 'notInstalled' | 'external';
 export type CliUpgradeStatus = 'running' | 'succeeded' | 'failed';
 export type CliOperationAction = 'install' | 'upgrade';

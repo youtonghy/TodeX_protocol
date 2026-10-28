@@ -2416,6 +2416,9 @@ export class V2ApiClient {
       }
 
       if (responseType === 'bytes') return response.body as T;
+      // `204 No Content` (e.g. deleting an instruction preset) or an empty
+      // 2xx body has nothing to parse.
+      if (response.status === 204 || response.body.length === 0) return undefined as T;
       return JSON.parse(new TextDecoder().decode(response.body)) as T;
     } catch (error: unknown) {
       if (error instanceof ConnectionError) {

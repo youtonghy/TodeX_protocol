@@ -295,7 +295,13 @@ export type RemoteEntry = {
   permissions?: string;
 };
 
-export type RemoteEntriesResponse = { path: string; parent?: string; entries: RemoteEntry[] };
+export type RemoteEntriesResponse = {
+  path: string;
+  parent?: string;
+  entries: RemoteEntry[];
+  /** Set when the backend cut the listing at its entry cap (5000). */
+  truncated?: boolean;
+};
 
 /** Same shape as `GET /v2/workspace/file`. */
 export type RemoteFile = {

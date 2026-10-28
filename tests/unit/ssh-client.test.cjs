@@ -354,3 +354,30 @@ test('maskSshExecOutput splits chunks around hidden values of their stream', () 
   assert.deepEqual(ssh.maskSshExecOutput(chunks.slice(2), undefined), [[{ text: 'clean\n' }]]);
   assert.equal(ssh.parseSshExecRedactedValues('x'), undefined);
 });
+
+test('remote listings pass the backend truncation flag through', async () => {
+  const { api } = recordingClient([
+    { status: 200, body: { path: '/big', entries: [{ name: 'a', path: '/big/a', kind: 'file' }], truncated: true } },
+    { status: 200, body: { path: '/small', entries: [] } },
+  ]);
+  const big = await api.listRemoteEntries('conn', '/big');
+  assert.equal(big.truncated, true);
+  assert.equal(big.entries.length, 1);
+  assert.equal((await api.listRemoteEntries('conn', '/small')).truncated, undefined);
+});
+
+test('a 204 or empty 2xx body resolves instead of failing to parse', async () => {
+  const calls = [];
+  const answers = [
+    () => new Response(null, { status: 204 }),
+    () => new Response('', { status: 200 }),
+  ];
+  const fetchImpl = async (url, init) => {
+    calls.push(`${init.method} ${new URL(url).pathname}`);
+    return answers.shift()();
+  };
+  const api = new V2ApiClient({ serverUrl: 'http://127.0.0.1:7345', fetchImpl });
+  assert.equal(await api.deleteInstructionPreset('p 1'), undefined);
+  assert.equal(await api.deleteConversation('c1'), undefined);
+  assert.deepEqual(calls, ['DELETE /v2/instruction-presets/p%201', 'DELETE /v2/conversations/c1']);
+});

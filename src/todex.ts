@@ -1566,6 +1566,8 @@ export function remapWorkspaceScopedRecords<T extends { workspaceId?: string }>(
       idMap.set(previous.id, next.id);
     }
   }
+  // Nothing moved: the same array, so callers' state updates can bail out.
+  if (!idMap.size) return records;
   return records.map((record) => {
     const workspaceId = record.workspaceId ? idMap.get(record.workspaceId) : undefined;
     return workspaceId ? { ...record, workspaceId } : record;

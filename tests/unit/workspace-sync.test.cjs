@@ -236,3 +236,9 @@ test('groupWorkspaceEntriesByTag places groups and workspaces under each tag', (
   assert.deepEqual(sections.map((section) => section.key), ['cli', 'rust', 'web', '']);
   assert.deepEqual(todex.collectWorkspaceTags(entries.flatMap((entry) => (entry.kind === 'group' ? entry.workspaces : [entry.workspace]))), ['CLI', 'Rust', 'web']);
 });
+
+test('remapWorkspaceScopedRecords returns the same array when no workspace id moved', () => {
+  const records = [{ workspaceId: 'ws_1' }, { workspaceId: 'ws_2' }];
+  const workspaces = [workspace()];
+  assert.equal(todex.remapWorkspaceScopedRecords(records, workspaces, workspaces), records);
+});

@@ -766,6 +766,113 @@ test('REST bodies over the limit are refused before anything is sent', async () 
   }
 });
 
+/** A response whose body never ends; records whether the reader cancelled it. */
+function endlessResponse(init = {}) {
+  const state = { cancelled: false, pulled: 0 };
+  const body = new ReadableStream({
+    pull(controller) {
+      state.pulled += 1;
+      controller.enqueue(new Uint8Array(1024).fill(0x20));
+    },
+    cancel() { state.cancelled = true; },
+  });
+  return { state, response: new Response(body, { status: 200, ...init }) };
+}
+
+test('REST response caps: sized to the largest documented answer, matching the sealed overhead', () => {
+  const { REMOTE_TRANSFER_MAX_BYTES } = require(path.join(compiledDir, 'ssh.js'));
+  assert.ok(channel.MAX_REST_RESPONSE_BYTES >= REMOTE_TRANSFER_MAX_BYTES + channel.TRANSPORT_V2_MAX_HEAD_BYTES);
+  const cipher = () => new RecordCipher(new Uint8Array(32), new Uint8Array(32), DOWN);
+  for (const size of [0, 1, 65535, 65536, 65537, 3 * 65536 + 5]) {
+    assert.equal(channel.sealedRecordStreamLength(size), sealRecordStream(cipher(), new Uint8Array(size)).length, String(size));
+  }
+  assert.equal(
+    channel.maxSealedRestResponseBytes(1000),
+    32 + channel.sealedRecordStreamLength(4 + channel.TRANSPORT_V2_MAX_HEAD_BYTES + 1000),
+  );
+});
+
+test('REST responses over the limit are cancelled while reading, plaintext and sealed', async () => {
+  const tooLarge = (error) => error.type === 'MESSAGE_TOO_LARGE' && error.code === 'request_failed' && !error.retryable;
+  const loopback = { serverUrl: 'http://127.0.0.1:7345', encryptionProtocol: 'none', encryptionPublicKey: '' };
+
+  // Plaintext: an endless body stops being read once past the limit.
+  const endless = endlessResponse();
+  await assert.rejects(
+    createSecureTransport({ profile: loopback, fetchImpl: async () => endless.response, maxResponseBytes: 4096 })
+      .fetch({ method: 'GET', path: '/v2/remote/connections/x/download' }),
+    tooLarge,
+  );
+  assert.ok(endless.state.cancelled);
+  assert.ok(endless.state.pulled < 16);
+  // A declared length over the limit is refused before reading.
+  const declared = endlessResponse({ headers: { 'content-length': '5000' } });
+  await assert.rejects(
+    createSecureTransport({ profile: loopback, fetchImpl: async () => declared.response, maxResponseBytes: 4096 })
+      .fetch({ method: 'GET', path: '/v2/providers' }),
+    tooLarge,
+  );
+  assert.ok(declared.state.cancelled);
+  // At the limit the body arrives whole, across chunks.
+  const exact = createSecureTransport({
+    profile: loopback,
+    fetchImpl: async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(utf8('ab'));
+        controller.enqueue(utf8('cd'));
+        controller.close();
+      },
+    }), { status: 200 }),
+    maxResponseBytes: 4,
+  });
+  assert.equal(new TextDecoder().decode((await exact.fetch({ method: 'GET', path: '/v2/providers' })).body), 'abcd');
+
+  // Sealed: the raw cap stops a huge answer; the inner body is capped exactly.
+  const body = (size) => ({ status: 200, headers: { 'content-type': 'application/octet-stream' }, body: new Uint8Array(size).fill(7) });
+  for (const [size, ok] of [[1000, true], [1001, false], [300_000, false]]) {
+    const server = fakeSealedServer({ chunkSize: 4096, respond: () => body(size) });
+    const transport = createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: server.fetchImpl, maxResponseBytes: 1000 });
+    const pending = transport.fetch({ method: 'GET', path: '/v2/remote/connections/x/download' });
+    if (ok) assert.equal((await pending).body.length, size);
+    else await assert.rejects(pending, tooLarge, String(size));
+    // Streaming reads are not capped.
+    const streamed = await transport.fetchStream({ method: 'GET', path: '/v2/remote/connections/x/download' });
+    let length = 0;
+    for await (const chunk of streamed.body) length += chunk.length;
+    assert.equal(length, size);
+  }
+  const sealedEndless = endlessResponse({ headers: { 'content-type': 'application/vnd.todex.sealed; r=2' } });
+  await assert.rejects(
+    createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: async () => sealedEndless.response, maxResponseBytes: 1000 })
+      .fetch({ method: 'GET', path: '/v2/providers' }),
+    tooLarge,
+  );
+  assert.ok(sealedEndless.state.cancelled);
+});
+
+test('verifyTransportPolicy and unsealed errors read only a bounded body', async () => {
+  const endless = endlessResponse({ headers: { 'content-type': 'application/json' } });
+  await assert.rejects(
+    verifyTransportPolicy(pinnedProfile('http://10.0.0.5:7345'), { fetchImpl: async () => endless.response }),
+    (error) => error instanceof TransportPolicyError && error.reason === 'invalid' && !error.retryable,
+  );
+  assert.ok(endless.state.cancelled);
+  assert.ok(endless.state.pulled < 8);
+  const padded = JSON.stringify({ requiredProtocol: 'x25519', transportVersion: 2, sealedRevision: 2, pad: 'x'.repeat(2100) });
+  await assert.rejects(
+    verifyTransportPolicy(pinnedProfile('http://10.0.0.5:7345'), { fetchImpl: async () => new Response(padded) }),
+    (error) => error.reason === 'invalid',
+  );
+
+  const unsealed = endlessResponse({ status: 502, headers: { 'content-type': 'text/html' } });
+  await assert.rejects(
+    createSecureTransport({ profile: pinnedProfile('http://10.0.0.5:7345'), fetchImpl: async () => unsealed.response })
+      .fetch({ method: 'GET', path: '/v2/providers' }),
+    (error) => error.httpStatus === 502 && error.backendCode === undefined,
+  );
+  assert.ok(unsealed.state.cancelled);
+});
+
 test('policy check: a different required protocol asks for re-pairing; a plaintext answer never downgrades', () => {
   const profile = pinnedProfile('http://10.0.0.5:7345');
   assert.throws(() => checkTransportPolicy(profile, { requiredProtocol: 'ml-kem-768', transportVersion: 2 }), TransportRepairRequiredError);

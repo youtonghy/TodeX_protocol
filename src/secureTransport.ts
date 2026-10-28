@@ -11,12 +11,14 @@ import {
   TRANSPORT_V2_WS_CLOSE_REASON,
   TRANSPORT_V2_VERSION,
   MAX_REST_BODY_BYTES,
+  MAX_REST_RESPONSE_BYTES,
   TransportCryptoError,
   assertPlaintextFits,
   assertWsPlaintextFits,
   clientHandshake,
   createWsChannel,
   iterateByteSource,
+  maxSealedRestResponseBytes,
   openRestResponse,
   openRestResponseStream,
   parseSecureTransportProtocol,
@@ -128,6 +130,12 @@ export type SecureTransportOptions = {
   maxFrameBytes?: number;
   /** REST request body limit for the pre-check (defaults to `MAX_REST_BODY_BYTES`). */
   maxBodyBytes?: number;
+  /**
+   * Largest response body `fetch` buffers (defaults to `MAX_REST_RESPONSE_BYTES`);
+   * a sealed answer is capped at the matching `maxSealedRestResponseBytes`.
+   * `fetchStream` bodies are not capped.
+   */
+  maxResponseBytes?: number;
 };
 
 export type SecureRequest = {
@@ -386,16 +394,16 @@ export async function verifyTransportPolicy(
     // A backend without the policy route predates transport v2.
     if (response.status === 404) throw new TransportPolicyError('outdated', false, 404);
     if (!response.ok) throw new TransportPolicyError('http', response.status >= 500, response.status);
-    let text: string;
+    let bytes: Uint8Array | null;
     try {
-      text = await response.text();
+      bytes = await readBodyCapped(response, POLICY_MAX_BYTES);
     } catch (error) {
       if (signal?.aborted) throw error;
       throw new TransportPolicyError(controller.signal.aborted ? 'timeout' : 'unreachable', true);
     }
-    if (text.length > POLICY_MAX_BYTES) throw new TransportPolicyError('invalid', false);
+    if (!bytes) throw new TransportPolicyError('invalid', false);
     try {
-      value = JSON.parse(text);
+      value = JSON.parse(decoder.decode(bytes));
     } catch {
       throw new TransportPolicyError('invalid', false);
     }
@@ -457,6 +465,50 @@ function parseContentType(value: string | null): { media: string; params: Map<st
 
 /** Error answers worth inspecting are small JSON; a larger body is passed through untouched. */
 const ERROR_BODY_PEEK_BYTES = 64 * 1024;
+
+/**
+ * Reads a whole response body, but at most `limit` bytes: a larger
+ * `Content-Length` is refused before reading, and the read is cancelled as
+ * soon as the body grows past the limit. Returns null when it is too large.
+ */
+async function readBodyCapped(response: Response, limit: number): Promise<Uint8Array | null> {
+  const declared = Number(response.headers.get('content-length') ?? '');
+  const reader = response.body?.getReader();
+  if (Number.isFinite(declared) && declared > limit) {
+    await reader?.cancel().catch(() => undefined);
+    return null;
+  }
+  if (!reader) {
+    // A body-less (or non-streaming) implementation: nothing to bound early.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return bytes.length > limit ? null : bytes;
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.length) continue;
+      size += value.length;
+      if (size > limit) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (chunks.length === 1) return chunks[0];
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
 /** Upper bound for honouring `Retry-After` on `TRANSPORT_BUSY`. */
 const BUSY_RETRY_MAX_DELAY_MS = 5000;
 const BUSY_RETRY_DEFAULT_DELAY_MS = 1000;
@@ -538,10 +590,15 @@ async function peekStreamBody(
 
 async function rejectUnsealed(response: Response): Promise<never> {
   // Never treat an unsealed answer to a sealed request as the inner response:
-  // it is unauthenticated. Surface it as a request failure instead.
-  const envelope = await response.json().catch(() => null) as
-    | { error?: { code?: unknown; message?: unknown }; code?: unknown; message?: unknown }
-    | null;
+  // it is unauthenticated. Surface it as a request failure instead. Only a
+  // small error envelope is worth reading.
+  const bytes = await readBodyCapped(response, ERROR_BODY_PEEK_BYTES).catch(() => null);
+  let envelope: { error?: { code?: unknown; message?: unknown }; code?: unknown; message?: unknown } | null = null;
+  try {
+    envelope = bytes ? JSON.parse(decoder.decode(bytes)) : null;
+  } catch {
+    envelope = null;
+  }
   const error = envelope?.error ?? envelope;
   const code = typeof error?.code === 'string' ? error.code : undefined;
   const message = typeof error?.message === 'string' ? error.message : undefined;
@@ -560,6 +617,8 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
   const signer = options.signer ?? null;
   const maxFrameBytes = options.maxFrameBytes ?? MAX_LEGACY_MESSAGE_BYTES;
   const maxBodyBytes = options.maxBodyBytes ?? MAX_REST_BODY_BYTES;
+  const maxResponseBytes = options.maxResponseBytes ?? MAX_REST_RESPONSE_BYTES;
+  const maxSealedResponseBytes = maxSealedRestResponseBytes(maxResponseBytes);
   const fetchImpl = (): typeof fetch => {
     if (options.fetchImpl) return options.fetchImpl;
     const ipc = ipcFetchImplFor(profile.serverUrl);
@@ -612,7 +671,8 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
       if (streaming && response.body) {
         return { status: response.status, headers, body: iterateByteSource(response.body) };
       }
-      const body = new Uint8Array(await response.arrayBuffer());
+      const body = await readBodyCapped(response, maxResponseBytes);
+      if (!body) throw ConnectionError.responseTooLarge(maxResponseBytes);
       return streaming
         ? { status: response.status, headers, body: iterateByteSource(body.length ? [body] : []) }
         : { status: response.status, headers, body };
@@ -654,15 +714,21 @@ export function createSecureTransport(options: SecureTransportOptions): SecureTr
     if (streaming && response.body) {
       return openRestResponseStream(sealed.context, response.body as ByteSource);
     }
-    let raw: Uint8Array;
+    let raw: Uint8Array | null;
     try {
-      raw = new Uint8Array(await response.arrayBuffer());
+      raw = await readBodyCapped(response, maxSealedResponseBytes);
     } catch (error) {
       sealed.context.dispose();
       throw error;
     }
+    if (!raw) {
+      sealed.context.dispose();
+      throw ConnectionError.responseTooLarge(maxResponseBytes);
+    }
     if (streaming) return openRestResponseStream(sealed.context, [raw]);
     const opened = openRestResponse(sealed.context, raw);
+    // The raw cap allows for the largest head; the inner body has its own.
+    if (opened.body.length > maxResponseBytes) throw ConnectionError.responseTooLarge(maxResponseBytes);
     return { status: opened.status, headers: opened.headers, body: opened.body };
   };
 

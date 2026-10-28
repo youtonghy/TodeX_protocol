@@ -120,6 +120,17 @@ export class ConnectionError extends Error {
     );
   }
 
+  /** A response body over the client's buffering limit; the read was cancelled. */
+  static responseTooLarge(max: number): ConnectionError {
+    return new ConnectionError(
+      ConnectionErrorType.MESSAGE_TOO_LARGE,
+      '响应过大，无法读取',
+      `Response body exceeds limit ${max}`,
+      false,
+      'request_failed',
+    );
+  }
+
   static heartbeatTimeout(): ConnectionError {
     return new ConnectionError(
       ConnectionErrorType.HEARTBEAT_TIMEOUT,

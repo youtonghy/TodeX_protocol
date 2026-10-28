@@ -45,6 +45,14 @@ export const TRANSPORT_V2_MAX_HEAD_BYTES = 65536;
  * as an opaque 400, so clients check it before sending.
  */
 export const MAX_REST_BODY_BYTES = 32 * 1024 * 1024;
+/**
+ * Largest inner body a client buffers for a one-shot (non-streaming) REST
+ * response. The largest documented one-shot answer is a remote file download
+ * (at most 100 MiB, `REMOTE_TRANSFER_MAX_BYTES`); JSON answers such as
+ * history replay pages stay in the tens of MiB. Responses that may be larger
+ * (preview proxying) are read with `fetchStream`, which is not capped.
+ */
+export const MAX_REST_RESPONSE_BYTES = 128 * 1024 * 1024;
 export const TRANSPORT_V2_SEALED_CONTENT_TYPE = 'application/vnd.todex.sealed';
 /**
  * Sealed REST revision (spec: "REST response nonce"): requests carry
@@ -611,6 +619,21 @@ export function sealRecordStream(cipher: RecordCipher, plaintext: Uint8Array): U
   return concat(...parts);
 }
 
+/** Byte length of the record stream that `sealRecordStream` produces for `plaintextLength` bytes. */
+export function sealedRecordStreamLength(plaintextLength: number): number {
+  const records = Math.max(1, Math.ceil(plaintextLength / TRANSPORT_V2_RECORD_PLAINTEXT_MAX));
+  return plaintextLength + records * (4 + TRANSPORT_V2_TAG_LENGTH);
+}
+
+/**
+ * Largest raw `/v2/sealed` response body (response nonce and records) that
+ * carries an inner response with a head of at most `TRANSPORT_V2_MAX_HEAD_BYTES`
+ * and a body of at most `maxBodyBytes`.
+ */
+export function maxSealedRestResponseBytes(maxBodyBytes: number = MAX_REST_RESPONSE_BYTES): number {
+  return TRANSPORT_V2_RESPONSE_NONCE_LENGTH + sealedRecordStreamLength(4 + TRANSPORT_V2_MAX_HEAD_BYTES + maxBodyBytes);
+}
+
 /**
  * Incremental decoder for a sealed REST record stream. `push` returns the
  * plaintext of every record completed by the chunk; `finish` asserts that the
@@ -629,29 +652,38 @@ export class RecordStreamDecoder {
   push(chunk: Uint8Array): Uint8Array[] {
     if (chunk.length === 0) return [];
     if (this.sawFinal) throw new TransportCryptoError('bytes after final record');
-    this.buffer = this.buffer.length ? concat(this.buffer, chunk) : Uint8Array.from(chunk);
+    // Records are opened in place from the caller's chunk; only a partial
+    // record left at the end is copied, so the decoder never keeps (or later
+    // wipes) a view of memory it does not own.
+    const buffer = this.buffer.length ? concat(this.buffer, chunk) : chunk;
     const out: Uint8Array[] = [];
     let offset = 0;
-    while (this.buffer.length - offset >= 4) {
-      const length = readU32be(this.buffer, offset);
-      if (length < TRANSPORT_V2_TAG_LENGTH || length > RECORD_CIPHERTEXT_MAX) {
-        throw new TransportCryptoError('record length');
-      }
-      if (this.buffer.length - offset - 4 < length) break;
-      const ciphertext = this.buffer.subarray(offset + 4, offset + 4 + length);
-      offset += 4 + length;
-      // The final flag is authenticated, and a streaming reader cannot know
-      // whether more bytes follow, so `openEither` learns it from the tag.
-      const plaintext = this.openEither(ciphertext);
-      out.push(plaintext.plaintext);
-      if (plaintext.final) {
-        this.sawFinal = true;
-        if (offset !== this.buffer.length) {
-          throw new TransportCryptoError('bytes after final record');
+    try {
+      while (buffer.length - offset >= 4) {
+        const length = readU32be(buffer, offset);
+        if (length < TRANSPORT_V2_TAG_LENGTH || length > RECORD_CIPHERTEXT_MAX) {
+          throw new TransportCryptoError('record length');
+        }
+        if (buffer.length - offset - 4 < length) break;
+        const ciphertext = buffer.subarray(offset + 4, offset + 4 + length);
+        offset += 4 + length;
+        // The final flag is authenticated, and a streaming reader cannot know
+        // whether more bytes follow, so `openEither` learns it from the tag.
+        const plaintext = this.openEither(ciphertext);
+        out.push(plaintext.plaintext);
+        if (plaintext.final) {
+          this.sawFinal = true;
+          if (offset !== buffer.length) {
+            throw new TransportCryptoError('bytes after final record');
+          }
         }
       }
+    } catch (error) {
+      // Keep an owned concatenation so `dispose` wipes it; never the caller's chunk.
+      if (buffer !== chunk) this.buffer = buffer;
+      throw error;
     }
-    this.buffer = this.buffer.slice(offset);
+    this.buffer = offset === buffer.length ? new Uint8Array(0) : buffer.slice(offset);
     return out;
   }
 
@@ -685,7 +717,8 @@ export function openRecordStream(cipher: RecordCipher, stream: Uint8Array): Uint
   const decoder = new RecordStreamDecoder(cipher);
   const parts = decoder.push(stream);
   decoder.finish();
-  return concat(...parts);
+  // Each record's plaintext is a fresh array: a single record needs no copy.
+  return parts.length === 1 ? parts[0] : concat(...parts);
 }
 
 // ---------------------------------------------------------------------------
@@ -817,7 +850,8 @@ function splitHead(plaintext: Uint8Array): { head: unknown; body: Uint8Array } {
   if (plaintext.length < 4 + length) throw new TransportCryptoError('inner head truncated');
   return {
     head: parseHeadJson(plaintext.subarray(4, 4 + length)),
-    body: plaintext.slice(4 + length),
+    // A view, not a copy: callers own the decoded plaintext and never reuse it.
+    body: plaintext.subarray(4 + length),
   };
 }
 

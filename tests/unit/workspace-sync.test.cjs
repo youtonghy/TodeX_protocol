@@ -181,3 +181,58 @@ test('suggestWorkspaceGroupName uses the shared prefix', () => {
   assert.equal(todex.suggestWorkspaceGroupName('blog', 'notes', 'N'), 'N');
   assert.match(todex.newWorkspaceGroupId(), /^wsg_[0-9a-f-]{36}$/);
 });
+
+test('normalizeWorkspaceTags trims, caps and dedupes case-insensitively', () => {
+  assert.deepEqual(
+    todex.normalizeWorkspaceTags([' Rust ', 'rust', '', 'a\u0001b', 'y'.repeat(40), 7]),
+    ['Rust', 'ab', 'y'.repeat(todex.WORKSPACE_TAG_MAX)],
+  );
+  assert.equal(todex.normalizeWorkspaceTags(Array.from({ length: 30 }, (_, i) => `t${i}`)).length, todex.WORKSPACE_TAGS_MAX);
+  assert.equal(todex.normalizeWorkspaceTags([' ']), undefined);
+  assert.equal(todex.normalizeWorkspaceTags('Rust'), undefined);
+  const record = todex.normalizeWorkspaceRecord(workspace({ tags: ['Web', 'web'], group_tags: ['Team'] }));
+  assert.deepEqual(record.tags, ['Web']);
+  assert.deepEqual(record.groupTags, ['Team']);
+});
+
+test('mergeWorkspaceRecords lets a newer record clear its tags', () => {
+  const [merged] = todex.mergeWorkspaceRecords([workspace({ tags: ['Web'], groupTags: ['Team'], updatedAt: 20 })], [workspace({ updatedAt: 30 })]);
+  assert.equal(merged.tags, undefined);
+  assert.equal(merged.groupTags, undefined);
+});
+
+test('group tags ride the layout patches', () => {
+  const tagged = todex.setWorkspaceGroupTags(sample(), 'g1', [' Core ', 'core', 'Infra']);
+  assert.deepEqual(tagged[1].tags, ['Core', 'Infra']);
+  const patches = todex.workspaceLayoutPatches(tagged);
+  assert.deepEqual(patches.filter((item) => item.patch.groupId === 'g1').map((item) => item.patch.groupTags), [['Core', 'Infra'], ['Core', 'Infra']]);
+  const regrouped = todex.groupWorkspaceEntries([
+    workspace({ id: 'b', path: '/b', sortOrder: 0, groupId: 'g1', groupTags: ['Core'], updatedAt: 10 }),
+    workspace({ id: 'd', path: '/d', sortOrder: 1, groupId: 'g1', groupTags: ['New'], updatedAt: 50 }),
+  ]);
+  assert.deepEqual(regrouped[0].tags, ['New']);
+  // Leaving the group drops the group tags.
+  const left = todex.workspaceLayoutPatches(todex.removeWorkspaceFromGroup(tagged, 'b'));
+  assert.equal(left.find((item) => item.id === 'b').patch.groupTags, undefined);
+});
+
+test('groupWorkspaceEntriesByTag places groups and workspaces under each tag', () => {
+  const entries = todex.groupWorkspaceEntries([
+    workspace({ id: 'a', path: '/a', tags: ['web', 'Rust'] }),
+    workspace({ id: 'b', path: '/b', groupId: 'g1', groupName: 'Core', groupTags: ['Rust'], tags: ['rust', 'CLI'] }),
+    workspace({ id: 'c', path: '/c', groupId: 'g1', groupName: 'Core', groupTags: ['Rust'] }),
+    workspace({ id: 'd', path: '/d' }),
+    workspace({ id: 'e', path: '/e', groupId: 'g2', groupName: 'Misc', tags: ['Web'] }),
+    workspace({ id: 'f', path: '/f', groupId: 'g2', groupName: 'Misc' }),
+    workspace({ id: 'g', path: '/g', groupId: 'g2', groupName: 'Misc' }),
+  ]);
+  const sections = todex.groupWorkspaceEntriesByTag(entries);
+  assert.deepEqual(sections.map((section) => [section.tag, layout(section.entries)]), [
+    ['CLI', ['b']],
+    ['Rust', ['a', 'Core[b,c]']],
+    ['web', ['a', 'e']],
+    [null, ['d', 'Misc[f,g]']],
+  ]);
+  assert.deepEqual(sections.map((section) => section.key), ['cli', 'rust', 'web', '']);
+  assert.deepEqual(todex.collectWorkspaceTags(entries.flatMap((entry) => (entry.kind === 'group' ? entry.workspaces : [entry.workspace]))), ['CLI', 'Rust', 'web']);
+});

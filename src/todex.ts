@@ -164,6 +164,10 @@ export type WorkspaceRecord = {
   groupId?: string;
   /** Display name of the group, copied onto every member. */
   groupName?: string;
+  /** Tags of the group, copied onto every member like `groupName`. */
+  groupTags?: string[];
+  /** The workspace's own tags. */
+  tags?: string[];
 };
 
 /** A workspace record the backend refused to sync (for example because its
@@ -863,6 +867,8 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     sortOrder: Number.isFinite(sortOrder) ? sortOrder : undefined,
     groupId: normalizeWorkspaceGroupField(stringField(value, ['groupId', 'group_id'])),
     groupName: normalizeWorkspaceGroupField(stringField(value, ['groupName', 'group_name'])),
+    groupTags: normalizeWorkspaceTags(value.groupTags ?? value.group_tags),
+    tags: normalizeWorkspaceTags(value.tags),
   };
 }
 
@@ -949,6 +955,8 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
         // leaving a group (fields cleared) survives the merge.
         groupId: base.groupId,
         groupName: base.groupName,
+        groupTags: base.groupTags,
+        tags: base.tags,
       };
     }
   };
@@ -1232,10 +1240,14 @@ export function nextWorkspaceSortOrder(workspaces: WorkspaceRecord[]): number {
 /** Max length kept for workspace `groupId` / `groupName`. */
 export const WORKSPACE_GROUP_FIELD_MAX = 64;
 
+/** Max length kept per workspace tag, and tags kept per list. */
+export const WORKSPACE_TAG_MAX = 32;
+export const WORKSPACE_TAGS_MAX = 16;
+
 /** A top-level sidebar row: a lone workspace or a group of two or more. */
 export type WorkspaceSidebarEntry =
   | { kind: 'workspace'; workspace: WorkspaceRecord }
-  | { kind: 'group'; id: string; name: string; workspaces: WorkspaceRecord[] };
+  | { kind: 'group'; id: string; name: string; tags: string[]; workspaces: WorkspaceRecord[] };
 
 export type WorkspaceDragSource = { kind: 'workspace' | 'group'; id: string };
 
@@ -1246,13 +1258,52 @@ export type WorkspaceDropTarget =
 
 export type WorkspaceLayoutPatch = {
   id: string;
-  patch: { sortOrder: number; groupId: string | undefined; groupName: string | undefined };
+  patch: { sortOrder: number; groupId: string | undefined; groupName: string | undefined; groupTags: string[] | undefined };
 };
 
 /** Trims and caps a group field to `WORKSPACE_GROUP_FIELD_MAX` code points
  * (the backend applies the same rule); empty means ungrouped. */
 function normalizeWorkspaceGroupField(value: string): string | undefined {
   return Array.from(value.trim()).slice(0, WORKSPACE_GROUP_FIELD_MAX).join('') || undefined;
+}
+
+/** Trims each tag (dropping control characters) and caps it to
+ * `WORKSPACE_TAG_MAX` code points, drops empties and case-insensitive
+ * duplicates (the first spelling wins) and keeps at most `WORKSPACE_TAGS_MAX`;
+ * the backend applies the same rule. Non-arrays and empty lists give undefined. */
+export function normalizeWorkspaceTags(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    // eslint-disable-next-line no-control-regex
+    const tag = Array.from(item.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim()).slice(0, WORKSPACE_TAG_MAX).join('').trimEnd();
+    const key = tag.toLowerCase();
+    if (!tag || seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+    if (tags.length === WORKSPACE_TAGS_MAX) break;
+  }
+  return tags.length > 0 ? tags : undefined;
+}
+
+function sameTags(left: string[] | undefined, right: string[] | undefined): boolean {
+  const a = left ?? [];
+  const b = right ?? [];
+  return a.length === b.length && a.every((tag, index) => tag === b[index]);
+}
+
+/** Every distinct tag (own and group) across `workspaces`, sorted. */
+export function collectWorkspaceTags(workspaces: WorkspaceRecord[]): string[] {
+  const byKey = new Map<string, string>();
+  for (const workspace of workspaces) {
+    for (const tag of [...(workspace.groupTags ?? []), ...(workspace.tags ?? [])]) {
+      const key = tag.toLowerCase();
+      if (!byKey.has(key)) byKey.set(key, tag);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
 }
 
 export function newWorkspaceGroupId(): string {
@@ -1275,7 +1326,8 @@ export function suggestWorkspaceGroupName(left: string, right: string, fallback:
 /** Folds an already ordered workspace list into sidebar entries. A group takes
  * the position of its first member; groups left with a single member render
  * as plain workspaces. The group name comes from the most recently updated
- * member that carries one. */
+ * member that carries one, the group tags from the most recently updated
+ * member. */
 export function groupWorkspaceEntries(ordered: WorkspaceRecord[]): WorkspaceSidebarEntry[] {
   const members = new Map<string, WorkspaceRecord[]>();
   for (const workspace of ordered) {
@@ -1298,7 +1350,8 @@ export function groupWorkspaceEntries(ordered: WorkspaceRecord[]): WorkspaceSide
     const named = group
       .filter((member) => member.groupName)
       .sort((left, right) => right.updatedAt - left.updatedAt)[0];
-    entries.push({ kind: 'group', id: groupId, name: named?.groupName ?? '', workspaces: group });
+    const latest = group.reduce((newest, member) => (member.updatedAt > newest.updatedAt ? member : newest));
+    entries.push({ kind: 'group', id: groupId, name: named?.groupName ?? '', tags: latest.groupTags ?? [], workspaces: group });
   }
   return entries;
 }
@@ -1376,6 +1429,7 @@ export function moveWorkspaceEntry(
           kind: 'group',
           id: newGroup.id,
           name: suggestWorkspaceGroupName(entry.workspace.name, moving.name, newGroup.fallbackName),
+          tags: [],
           workspaces: [entry.workspace, moving],
         };
       } else {
@@ -1438,22 +1492,66 @@ export function renameWorkspaceGroup(entries: WorkspaceSidebarEntry[], groupId: 
   return entries.map((entry) => (entry.kind === 'group' && entry.id === groupId ? { ...entry, name: trimmed } : entry));
 }
 
-/** Flattens `entries` back into per-workspace `sortOrder`/`groupId`/`groupName`
- * and returns patches only for workspaces whose stored layout differs. */
+/** Replaces a group's tags (normalized; an empty list clears them). */
+export function setWorkspaceGroupTags(entries: WorkspaceSidebarEntry[], groupId: string, tags: string[]): WorkspaceSidebarEntry[] {
+  const normalized = normalizeWorkspaceTags(tags) ?? [];
+  return entries.map((entry) => (entry.kind === 'group' && entry.id === groupId ? { ...entry, tags: normalized } : entry));
+}
+
+/** Flattens `entries` back into per-workspace `sortOrder`/`groupId`/`groupName`/
+ * `groupTags` and returns patches only for workspaces whose stored layout differs. */
 export function workspaceLayoutPatches(entries: WorkspaceSidebarEntry[]): WorkspaceLayoutPatch[] {
   const patches: WorkspaceLayoutPatch[] = [];
   let sortOrder = 0;
-  const visit = (workspace: WorkspaceRecord, groupId: string | undefined, groupName: string | undefined) => {
-    const patch = { sortOrder: sortOrder++, groupId, groupName };
-    if (workspace.sortOrder !== patch.sortOrder || workspace.groupId !== groupId || workspace.groupName !== groupName) {
+  const visit = (workspace: WorkspaceRecord, groupId: string | undefined, groupName: string | undefined, groupTags: string[] | undefined) => {
+    const patch = { sortOrder: sortOrder++, groupId, groupName, groupTags };
+    if (workspace.sortOrder !== patch.sortOrder || workspace.groupId !== groupId || workspace.groupName !== groupName || !sameTags(workspace.groupTags, groupTags)) {
       patches.push({ id: workspace.id, patch });
     }
   };
   for (const entry of entries) {
-    if (entry.kind === 'workspace') visit(entry.workspace, undefined, undefined);
-    else entry.workspaces.forEach((workspace) => visit(workspace, entry.id, entry.name || undefined));
+    if (entry.kind === 'workspace') visit(entry.workspace, undefined, undefined, undefined);
+    else entry.workspaces.forEach((workspace) => visit(workspace, entry.id, entry.name || undefined, entry.tags.length > 0 ? entry.tags : undefined));
   }
   return patches;
+}
+
+/** One tag of the by-tag sidebar view; `tag` is null for the untagged rest. */
+export type WorkspaceTagSection = { key: string; tag: string | null; entries: WorkspaceSidebarEntry[] };
+
+/** Regroups ordered sidebar `entries` by tag. A tagged group appears whole
+ * under each of its tags; a workspace appears under each of its own tags
+ * (those its group already carries are left to the group). Rows with no tag
+ * at all keep their group in the trailing untagged section. Sections sort by
+ * tag name; rows keep their order within a section. */
+export function groupWorkspaceEntriesByTag(entries: WorkspaceSidebarEntry[]): WorkspaceTagSection[] {
+  const sections = new Map<string, WorkspaceTagSection>();
+  const untagged: WorkspaceSidebarEntry[] = [];
+  const add = (tag: string, entry: WorkspaceSidebarEntry) => {
+    const key = tag.toLowerCase();
+    const section = sections.get(key);
+    if (section) section.entries.push(entry);
+    else sections.set(key, { key, tag, entries: [entry] });
+  };
+  for (const entry of entries) {
+    if (entry.kind === 'workspace') {
+      const tags = entry.workspace.tags ?? [];
+      if (tags.length === 0) untagged.push(entry);
+      else tags.forEach((tag) => add(tag, entry));
+      continue;
+    }
+    entry.tags.forEach((tag) => add(tag, entry));
+    const groupKeys = new Set(entry.tags.map((tag) => tag.toLowerCase()));
+    const loose: WorkspaceRecord[] = [];
+    for (const workspace of entry.workspaces) {
+      const own = (workspace.tags ?? []).filter((tag) => !groupKeys.has(tag.toLowerCase()));
+      own.forEach((tag) => add(tag, { kind: 'workspace', workspace }));
+      if (entry.tags.length === 0 && own.length === 0) loose.push(workspace);
+    }
+    if (loose.length > 0) untagged.push(...workspaceGroupOrSingles(entry, loose));
+  }
+  const sorted = [...sections.values()].sort((a, b) => a.tag!.localeCompare(b.tag!, undefined, { sensitivity: 'base', numeric: true }));
+  return untagged.length > 0 ? [...sorted, { key: '', tag: null, entries: untagged }] : sorted;
 }
 
 export function remapWorkspaceScopedRecords<T extends { workspaceId?: string }>(

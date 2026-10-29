@@ -24,6 +24,10 @@ function reportedSubagentStatus(value: unknown): SubagentStatus | undefined {
 const number = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
 export type RuntimePermission = { id: string; turnId: string; scope?: ExtensionScope; runtimeId?: string; event: ConversationEvent; payload: RecordValue };
 export type RuntimeCompaction = ContextCompactionState & { recommended: boolean };
+/** The goal the agent pursues on its own across turns (`goal.updated`, Codex
+ * `thread/goal/*`). `status`: active, paused, blocked, usageLimited,
+ * budgetLimited or complete. */
+export type RuntimeGoal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number; tokenBudget: number | null; updatedAt: string };
 export type NativeQueueItem = { id: string; text: string; status: string };
 /** One prompt waiting in the daemon's follow-up queue (`followups.updated`). */
 export type FollowUpQueueItem = { id: string; text: string; status: string; queuedAt: string; contentCount: number; skills: string[] };
@@ -99,6 +103,8 @@ export type ConversationRuntime = {
    * newest actions (`desktop.computer.*`). History pages do not extend it. */
   desktopComputer: DesktopComputerState;
   compaction: RuntimeCompaction;
+  /** `null` when none is set, or none was seen in the loaded history. */
+  goal: RuntimeGoal | null;
   memoryEntries: MemoryEntry[];
   pendingPermissions: RuntimePermission[];
   extensionUi: ExtensionUiState;
@@ -153,7 +159,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
   return {
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
-    subagents: [], agentCalls: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
+    subagents: [], agentCalls: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, goal: null, memoryEntries: [],
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false, followUps: EMPTY_FOLLOW_UP_QUEUE,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
@@ -712,6 +718,12 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
         updatedAt: event.time, summary: string(payload.summary) || undefined,
         error: phase === 'failed' ? string(payload.error ?? payload.message) || '上下文压缩失败' : undefined };
     }
+  }
+  if (type === 'goal.updated') {
+    const goal = object(payload.goal);
+    state.goal = string(goal.objective) ? { objective: string(goal.objective), status: string(goal.status) || 'active',
+      tokensUsed: Number(goal.tokensUsed) || 0, timeUsedSeconds: Number(goal.timeUsedSeconds) || 0,
+      tokenBudget: typeof goal.tokenBudget === 'number' ? goal.tokenBudget : null, updatedAt: event.time } : null;
   }
   if (type.startsWith('subagent.')) {
     const id = string(payload.subagentId ?? payload.agentId ?? payload.id);

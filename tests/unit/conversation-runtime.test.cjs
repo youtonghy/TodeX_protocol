@@ -1046,3 +1046,12 @@ test('a tool row keeps the time of its first event while later updates advance a
   assert.equal(hydrated.detailStub, undefined);
   assert.equal(hydrated.firstAt, Date.parse(at(5)));
 });
+
+test('goal.updated sets and clears the conversation goal', () => {
+  let update = apply(empty(), event(1, 'goal.updated', { provider: 'codex', goal: { objective: 'ship it', status: 'active', tokensUsed: 12, timeUsedSeconds: 3, tokenBudget: null } }));
+  assert.deepEqual(update.state.goal, { objective: 'ship it', status: 'active', tokensUsed: 12, timeUsedSeconds: 3, tokenBudget: null, updatedAt: '2026-09-06T00:00:00.000Z' });
+  update = apply(update.state, event(2, 'goal.updated', { provider: 'codex', goal: { objective: 'ship it', status: 'paused' } }));
+  assert.equal(update.state.goal.status, 'paused');
+  update = apply(update.state, event(3, 'goal.updated', { provider: 'codex', goal: null }));
+  assert.equal(update.state.goal, null);
+});

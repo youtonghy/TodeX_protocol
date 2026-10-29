@@ -120,6 +120,8 @@ export type ProviderCapabilities = {
   extensionUi?: string[];
   extensionMessages?: boolean;
   controlActions?: ConversationControlAction[];
+  /** `conversation.compact` accepts `instructions` for the summary. */
+  compactInstructions?: boolean;
   permissionConfig?: {
     /** Modes supported by the adapter; runtime policy may still reject a mode. */
     modes?: PermissionMode[];
@@ -149,7 +151,7 @@ export function resolveConfigValue<T>(
 }
 
 export type AgentCompletionReason = 'completed' | 'cancelled' | 'interrupted' | 'failed' | 'approvalRequired' | 'contextExhausted' | 'rateLimited' | 'connectionLost' | 'providerShutdown';
-export type ConversationControlAction = 'cancel' | 'interrupt' | 'steer' | 'followUp' | 'retry' | 'resume' | 'fork' | 'compact' | 'stop' | 'queue';
+export type ConversationControlAction = 'cancel' | 'interrupt' | 'steer' | 'followUp' | 'retry' | 'resume' | 'fork' | 'compact' | 'goal' | 'stop' | 'queue';
 export function conversationControlMethod(action: ConversationControlAction): string {
   return action.replace(/[A-Z]/g, (letter) => `.${letter.toLowerCase()}`);
 }
@@ -1240,7 +1242,7 @@ export function canonicalConversationEventType(event: Pick<ConversationEvent, 't
     'tool.created': 'tool.started', 'tool.result': 'tool.completed', 'tool.error': 'tool.failed',
   };
   if (aliases[event.type]) return aliases[event.type];
-  if (/^(?:message|turn|permission|usage|subagent|compaction|memory|extension|agent\.call)\./.test(event.type) || event.type === 'provider.runtime') return event.type;
+  if (/^(?:message|turn|permission|usage|subagent|compaction|goal|memory|extension|agent\.call)\./.test(event.type) || event.type === 'provider.runtime') return event.type;
   return event.normalizedType || event.type;
 }
 

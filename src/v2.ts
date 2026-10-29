@@ -151,7 +151,7 @@ export function resolveConfigValue<T>(
 }
 
 export type AgentCompletionReason = 'completed' | 'cancelled' | 'interrupted' | 'failed' | 'approvalRequired' | 'contextExhausted' | 'rateLimited' | 'connectionLost' | 'providerShutdown';
-export type ConversationControlAction = 'cancel' | 'interrupt' | 'steer' | 'followUp' | 'retry' | 'resume' | 'fork' | 'compact' | 'goal' | 'stop' | 'queue';
+export type ConversationControlAction = 'cancel' | 'interrupt' | 'steer' | 'followUp' | 'retry' | 'resume' | 'fork' | 'forkAt' | 'compact' | 'goal' | 'stop' | 'queue';
 export function conversationControlMethod(action: ConversationControlAction): string {
   return action.replace(/[A-Z]/g, (letter) => `.${letter.toLowerCase()}`);
 }

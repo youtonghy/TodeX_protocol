@@ -469,6 +469,39 @@ export type PiPackageOperation = {
   error?: string;
 };
 
+/** An npm/git plugin from `omp plugin list --json`. */
+export type OmpPlugin = {
+  name: string;
+  version: string;
+  enabled: boolean;
+  description?: string;
+  /** Optional features the plugin's manifest offers. */
+  features: string[];
+  /** Enabled features; absent means the manifest defaults. */
+  enabledFeatures?: string[];
+};
+
+/** A marketplace install, listed read-only (managed in omp). */
+export type OmpMarketplacePlugin = { id: string; version?: string; scope: string };
+
+export type OmpPluginList = {
+  plugins: OmpPlugin[];
+  marketplace: OmpMarketplacePlugin[];
+  /** Why omp could not list its plugins. */
+  error?: string;
+};
+
+export type OmpPluginOperation = {
+  id: string;
+  action: 'install' | 'uninstall' | 'upgrade';
+  /** An npm spec or git URL to install, or an installed plugin's name. */
+  spec: string;
+  status: 'running' | 'succeeded' | 'failed';
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+};
+
 /** How Pi offers an MCP server's tools to the model. */
 export type PiMcpExposure = 'codemode' | 'deferred' | 'direct' | 'hidden';
 
@@ -716,9 +749,9 @@ export type ProviderCommandsResponse = {
 
 // --- Managed agent provider accounts (cc-switch model) ---
 
-export type ManagedProviderAgent = 'codex' | 'claude-code' | 'grok-build' | 'pi' | 'opencode' | 'deepseek-harness';
+export type ManagedProviderAgent = 'codex' | 'claude-code' | 'grok-build' | 'pi' | 'opencode' | 'deepseek-harness' | 'omp';
 
-export const MANAGED_PROVIDER_AGENTS: ManagedProviderAgent[] = ['codex', 'claude-code', 'grok-build', 'pi', 'opencode', 'deepseek-harness'];
+export const MANAGED_PROVIDER_AGENTS: ManagedProviderAgent[] = ['codex', 'claude-code', 'grok-build', 'pi', 'opencode', 'deepseek-harness', 'omp'];
 
 export type AgentProviderProfile = {
   id: string;
@@ -1052,7 +1085,7 @@ export type HistoryCleanupPolicyResponse = {
 };
 
 /** Agents whose own session history the daemon can manage. */
-export type NativeHistoryProvider = 'claude-code' | 'pi' | 'codex' | 'grok-build' | 'devin';
+export type NativeHistoryProvider = 'claude-code' | 'pi' | 'codex' | 'grok-build' | 'devin' | 'omp';
 
 export type NativeHistoryProviderInfo = {
   provider: NativeHistoryProvider;
@@ -1510,6 +1543,24 @@ export class V2ApiClient {
 
   async getPiPackageOperation(operationId: string): Promise<PiPackageOperation> {
     return this.request(`/v2/providers/pi/plugins/operations/${encodeURIComponent(operationId)}`);
+  }
+
+  async listOmpPlugins(): Promise<OmpPluginList> {
+    return this.request('/v2/providers/omp/plugins');
+  }
+
+  /** Runs `omp plugin enable|disable <name>` and returns the new list. */
+  async setOmpPluginEnabled(name: string, enabled: boolean): Promise<OmpPluginList> {
+    return this.request('/v2/providers/omp/plugins/state', { method: 'PUT', body: JSON.stringify({ name, enabled }) });
+  }
+
+  /** Starts `omp plugin install|uninstall|upgrade` in the background; poll `getOmpPluginOperation`. */
+  async startOmpPluginOperation(action: OmpPluginOperation['action'], spec: string): Promise<OmpPluginOperation> {
+    return this.request('/v2/providers/omp/plugins/operations', { method: 'POST', body: JSON.stringify({ action, spec }) });
+  }
+
+  async getOmpPluginOperation(operationId: string): Promise<OmpPluginOperation> {
+    return this.request(`/v2/providers/omp/plugins/operations/${encodeURIComponent(operationId)}`);
   }
 
   async getPiPluginConfig(plugin: PiPluginConfigId): Promise<PiPluginConfigDocument> {

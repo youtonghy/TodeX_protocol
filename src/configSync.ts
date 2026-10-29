@@ -141,6 +141,7 @@ export const CONFIG_SYNC_CATALOG_PROVIDERS: ProviderKind[] = [
   'devin',
   'antigravity',
   'deepseek-harness',
+  'omp',
 ];
 
 /** CLIs whose settings file and global instructions are synced. DeepSeek Harness's

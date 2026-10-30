@@ -114,6 +114,11 @@ export type ProviderCapabilities = {
   /** `conversation.schedule`: the daemon holds the conversation's queue until
    * a set time (pause reason `scheduled`) and then sends it. */
   scheduledConversations?: boolean;
+  /** Private (RAM-only) conversations: `ephemeral: true` on create keeps the
+   * conversation in daemon memory and starts the agent without on-disk
+   * sessions. `native`: the CLI writes nothing; `scrubbed`: the CLI writes
+   * into a private temp folder the daemon deletes. Absent: unsupported. */
+  privateConversations?: 'native' | 'scrubbed';
   /** Session-owned Pi surfaces require explicit support from the connected backend. */
   runtimeStop?: boolean;
   sessionCommands?: boolean;
@@ -282,6 +287,7 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     backendQueue: capabilities.backendQueue === true,
     backendQueueControl: capabilities.backendQueueControl === true,
     scheduledConversations: capabilities.scheduledConversations === true,
+    privateConversations: capabilities.privateConversations ?? null,
     runtimeStop: capabilities.runtimeStop === true,
     sessionCommands: capabilities.sessionCommands === true,
     extensionUi: capabilities.extensionUi ?? [],
@@ -936,6 +942,11 @@ export type ConversationManifest = {
    * memory only, so a daemon restart loses them and marks the schedule
    * `interrupted` until the client re-arms or cancels it. */
   schedule?: ConversationSchedule;
+  /** Private conversation: it lives only in daemon memory and is gone after
+   * a daemon restart; fork, compaction and schedules are refused. Omitted
+   * when false. Clients must only treat a conversation as private when the
+   * manifest echoes this (older daemons ignore the create field). */
+  ephemeral?: boolean;
 };
 
 // ---- Agent Calling (`/v2/agent-calling`, `/v2/api-keys`) -------------------
@@ -1347,6 +1358,9 @@ export type CreateConversationInput = {
   scratchWorkspace?: boolean;
   title?: string;
   providerProfile?: string;
+  /** Private (RAM-only) conversation; needs a `workspace` and a provider
+   * whose capabilities list `privateConversations`. */
+  ephemeral?: boolean;
 };
 
 export type GitAction = 'initial' | 'commit' | 'commit-push' | 'push';
@@ -2397,6 +2411,8 @@ export class V2ApiClient {
    * Writes one chunk of a prompt attachment (`PUT /v2/uploads`). The first
    * chunk (offset 0, no `uploadId`) starts a new upload; later chunks pass
    * the returned `uploadId` and start where the stored file ends.
+   * `conversationId` of a private conversation stores the file in that
+   * conversation's private folder, deleted with the conversation.
    */
   async uploadPromptChunk(
     name: string,
@@ -2404,9 +2420,11 @@ export class V2ApiClient {
     bytes: Uint8Array,
     uploadId?: string,
     timeoutMs = 10 * 60_000,
+    conversationId?: string,
   ): Promise<PromptUploadChunkResult> {
     const query = new URLSearchParams({ name, offset: String(offset) });
     if (uploadId) query.set('uploadId', uploadId);
+    if (conversationId) query.set('conversationId', conversationId);
     return this.request(`/v2/uploads?${query}`, {
       method: 'PUT', body: bytes as Uint8Array<ArrayBuffer>,
     }, timeoutMs);

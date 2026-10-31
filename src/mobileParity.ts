@@ -19,7 +19,7 @@ import type {
   ProviderKind,
 } from './v2';
 import { canonicalConversationEventType, normalizeConversationEvent, toAgentEventEnvelope } from './v2';
-import { isLoopbackHostname } from './loopback';
+import { isLoopbackHostname, isLoopbackUrl } from './loopback';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1697,26 +1697,8 @@ export function workspaceLinkTarget(
   return { kind: 'file', filePath: candidate };
 }
 
-export { isLoopbackHostname };
+export { isLoopbackHostname, isLoopbackUrl, isLocalBackendUrl } from './loopback';
 
-export function isLoopbackUrl(value: string | URL): boolean {
-  let parsed: URL;
-  try {
-    parsed = value instanceof URL ? value : new URL(value);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  if (parsed.username || parsed.password) return false;
-  return isLoopbackHostname(parsed.hostname);
-}
-
-/** Whether a backend server URL names this machine: a loopback HTTP(S)
- * origin or a local IPC backend (`todex-ipc://…`). Preview and other web
- * URLs keep using `isLoopbackUrl`, which never accepts IPC URLs. */
-export function isLocalBackendUrl(value: string | URL): boolean {
-  return isIpcServerUrl(value instanceof URL ? value.href : value) || isLoopbackUrl(value);
-}
 
 export type LoopbackUrlValidation =
   | { ok: true; url: string }

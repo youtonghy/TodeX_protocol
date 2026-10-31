@@ -1,4 +1,5 @@
-import { isObject, utf8ByteLength, type ServerEvent } from './todex';
+import { isObject, utf8ByteLength } from './primitives';
+import type { ServerEvent } from './todex';
 
 /**
  * Must stay in sync with MAX_WS_MESSAGE_BYTES on the backend's unified

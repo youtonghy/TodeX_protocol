@@ -1,8 +1,10 @@
 /**
  * Loopback classification shared by every protocol helper (transport policy,
- * server URL normalization, local preview URLs). Kept dependency-free so both
- * `todex.ts` and `mobileParity.ts` can import it without a cycle.
+ * server URL normalization, local preview URLs). It imports only the
+ * dependency-free `ipcServerUrl.ts`, so `todex.ts`, `mobileParity.ts` and
+ * `secureTransport.ts` can all import it without a runtime cycle.
  */
+import { isIpcServerUrl } from './ipcServerUrl';
 
 /** One canonical dotted-decimal octet: 1–3 digits, no leading zero, ≤ 255. */
 function isCanonicalOctet(part: string): boolean {
@@ -33,4 +35,23 @@ export function isLoopbackHostname(hostname: string | null | undefined): boolean
     return isLoopbackHostname(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`);
   }
   return false;
+}
+
+export function isLoopbackUrl(value: string | URL): boolean {
+  let parsed: URL;
+  try {
+    parsed = value instanceof URL ? value : new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password) return false;
+  return isLoopbackHostname(parsed.hostname);
+}
+
+/** Whether a backend server URL names this machine: a loopback HTTP(S)
+ * origin or a local IPC backend (`todex-ipc://…`). Preview and other web
+ * URLs keep using `isLoopbackUrl`, which never accepts IPC URLs. */
+export function isLocalBackendUrl(value: string | URL): boolean {
+  return isIpcServerUrl(value instanceof URL ? value.href : value) || isLoopbackUrl(value);
 }

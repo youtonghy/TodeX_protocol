@@ -1,6 +1,6 @@
 import { ConnectionError, ConnectionErrorType } from './connectionError';
 import { deviceAuthHeaders, deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
-import { isLocalBackendUrl } from './mobileParity';
+import { isLocalBackendUrl } from './loopback';
 import { ipcFetchImplFor, isIpcServerUrl, ipcWebSocketImpl } from './ipcServerUrl';
 import { joinServerPath } from './serverUrl';
 import {

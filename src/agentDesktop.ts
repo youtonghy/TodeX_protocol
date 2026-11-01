@@ -48,6 +48,31 @@ export type ComputerHostStatus = {
   permissions: { screen: boolean; accessibility: boolean };
 };
 
+/**
+ * Computer Use engine (`PUT /v2/agent-desktop { computerEngine }`):
+ * `native` is the built-in one; `agentDesktop` reads trees and performs ref
+ * actions through vercel-labs/agent-desktop, which the daemon downloads, and
+ * adds the `set_value`, `select`, `toggle`, `expand`, `collapse` and
+ * `scroll_to` actions. Policy, screenshots and typing stay built in.
+ */
+export type AgentComputerEngine = 'native' | 'agentDesktop';
+
+/** The daemon's pinned agent-desktop release. */
+export type AgentDesktopEngineStatus = {
+  version: string;
+  installed: boolean;
+  downloading: boolean;
+  /** 0..1 while downloading. */
+  progress?: number;
+  error?: string;
+  /** `TODEX_AGENT_DESKTOP_PATH` points at another build. */
+  overridden: boolean;
+  /** Installed and ready. */
+  available: boolean;
+  /** Why it is not available. */
+  reason?: string;
+};
+
 /** One OS permission of {@link AgentComputerStatus.permissions}. */
 export type AgentComputerPermission = 'screen' | 'accessibility';
 
@@ -80,6 +105,10 @@ export type AgentDesktopSettings = {
   computerEnabled: boolean;
   /** Absent from daemons where Computer Use still ran on desktops. */
   computer?: ComputerHostStatus;
+  /** Which engine Computer Use runs on. Absent from daemons with only the built-in one. */
+  computerEngine?: AgentComputerEngine;
+  /** Optional engines' install state (with {@link computerEngine}). */
+  computerEngines?: { agentDesktop: AgentDesktopEngineStatus };
   /** Absent from daemons where the browser still ran on desktops. */
   browser?: AgentBrowserStatus;
 };

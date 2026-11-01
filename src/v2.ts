@@ -32,7 +32,7 @@ import type {
   SshLoginAnswerInput,
   SshTestResult,
 } from './ssh';
-import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
+import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
 import type { AgentCallEventType } from './agentCalling';
 import type { PromptUploadChunkResult } from './promptUploads';
 
@@ -2095,6 +2095,11 @@ export class V2ApiClient {
   /** Computer Use tools; needs desktop tools on. */
   async setAgentComputerEnabled(computerEnabled: boolean): Promise<AgentDesktopSettings> {
     return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ computerEnabled }) });
+  }
+
+  /** The engine Computer Use runs on; `agentDesktop` starts its download on the daemon. */
+  async setAgentComputerEngine(computerEngine: AgentComputerEngine): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ computerEngine }) });
   }
 
   /**

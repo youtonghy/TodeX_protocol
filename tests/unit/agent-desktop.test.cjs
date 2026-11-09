@@ -52,6 +52,11 @@ test('permission summaries expose the full command and why the provider asked', 
     input: { command, description: 'Run checks' },
   })), { tool: 'Bash', command, cwd: undefined, description: 'Run checks', reason: 'Dangerous rm operation', safetyCheck: true });
   assert.equal(permissionRequestSummary(request({ command: ['git', 'status'], cwd: '/repo' })).command, 'git status');
+  assert.deepEqual(permissionRequestSummary(request({
+    tool_name: 'mcp__todex_ssh__ssh_exec',
+    server: 'todex_ssh',
+    input: { host: 'web', command: 'df -h', cwd: '/srv', stdinPreview: 'y\n' },
+  })), { tool: 'mcp__todex_ssh__ssh_exec', command: 'df -h', cwd: '/srv', host: 'web', stdin: 'y\n', description: undefined, reason: undefined, safetyCheck: false });
   assert.deepEqual(permissionRequestSummary({ ...request(undefined), data: {} }), {
     tool: undefined, command: undefined, cwd: undefined, description: undefined, reason: undefined, safetyCheck: false,
   });

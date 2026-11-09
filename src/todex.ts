@@ -337,6 +337,10 @@ export type PermissionRequestSummary = {
   /** Full command line to run, never truncated. */
   command?: string;
   cwd?: string;
+  /** Host a TodeX `ssh_exec` call runs on. */
+  host?: string;
+  /** Start of the standard input a TodeX `ssh_exec` call writes (secrets redacted by the backend). */
+  stdin?: string;
   /** The agent's own description of what the action is for. */
   description?: string;
   /** Why the provider asked, e.g. a Claude safety check that ignores bypass. */
@@ -350,6 +354,9 @@ export type PermissionRequestSummary = {
  * `details.command` / `details.cwd` / `details.reason` keys (Codex native,
  * lifted by the daemon for Claude) plus Claude's own descriptive fields.
  */
+/** The tool name TodeX's `ssh_exec` approvals carry (`details.tool_name`). */
+export const SSH_EXEC_TOOL_NAME = 'mcp__todex_ssh__ssh_exec';
+
 export function permissionRequestSummary(request: PendingRequest): PermissionRequestSummary {
   const details = isObject(request.data.details) ? request.data.details : {};
   const input = isObject(details.input) ? details.input : {};
@@ -357,10 +364,13 @@ export function permissionRequestSummary(request: PendingRequest): PermissionReq
   const command = Array.isArray(details.command)
     ? details.command.filter((part): part is string => typeof part === 'string').join(' ') || undefined
     : text(details.command);
+  // TodeX's own `ssh_exec` approvals carry the call in `input`.
+  const sshExec = details.tool_name === SSH_EXEC_TOOL_NAME;
   return {
     tool: text(details.tool_name),
-    command,
-    cwd: text(details.cwd),
+    command: command ?? (sshExec ? text(input.command) : undefined),
+    cwd: text(details.cwd) ?? (sshExec ? text(input.cwd) : undefined),
+    ...(sshExec ? { host: text(input.host), stdin: text(input.stdinPreview) } : {}),
     description: text(details.description) ?? text(input.description),
     reason: text(details.reason) ?? text(details.decision_reason),
     safetyCheck: details.decision_reason_type === 'safetyCheck',

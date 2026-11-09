@@ -6,6 +6,7 @@ import type { TransportEncryptionProtocol } from './transportCrypto';
 import type {
   AgentLocalTerminal,
   AgentOutputFilter,
+  AgentSshApproval,
   FtpSite,
   FtpSiteInput,
   ManagedHost,
@@ -2246,6 +2247,16 @@ export class V2ApiClient {
   /** Takes the full setting (unknown fields are rejected); enabling applies from the next conversation start. */
   async setAgentLocal(settings: AgentLocalTerminal): Promise<AgentLocalTerminal> {
     return this.request('/v2/ssh/agent-local', { method: 'PUT', body: JSON.stringify(settings) });
+  }
+
+  /** Older backends answer 404 (see `isNotFoundError`). */
+  async getAgentSshApproval(): Promise<AgentSshApproval> {
+    return this.request('/v2/ssh/agent-approval');
+  }
+
+  /** Takes the full setting (unknown fields are rejected); applies from the next `ssh_exec`. */
+  async setAgentSshApproval(settings: AgentSshApproval): Promise<AgentSshApproval> {
+    return this.request('/v2/ssh/agent-approval', { method: 'PUT', body: JSON.stringify(settings) });
   }
 
   /** Closes the shared OpenSSH master connection for the host. */

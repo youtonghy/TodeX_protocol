@@ -88,6 +88,19 @@ test('agent local terminal round-trips through /v2/ssh/agent-local', async () =>
   assert.equal(ssh.AGENT_LOCAL_HOST, 'Local');
 });
 
+test('agent SSH approval round-trips through /v2/ssh/agent-approval', async () => {
+  const settings = { enabled: true, scope: 'command' };
+  const { api, calls } = recordingClient([{ status: 200, body: settings }, { status: 200, body: settings }]);
+  assert.deepEqual(await api.getAgentSshApproval(), settings);
+  assert.deepEqual(await api.setAgentSshApproval(settings), settings);
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url.pathname}`), [
+    'GET /v2/ssh/agent-approval',
+    'PUT /v2/ssh/agent-approval',
+  ]);
+  assert.deepEqual(calls[1].body, settings);
+  assert.equal(ssh.AGENT_SSH_HOST_GRANT_KIND, 'ssh_host');
+});
+
 test('FTP site and key routes match the contract', async () => {
   const { api, calls } = recordingClient();
   const site = { name: 'Files', protocol: 'ftps', host: 'ftp.example.com', port: 990, user: 'me' };

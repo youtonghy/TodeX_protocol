@@ -177,6 +177,25 @@ export type AgentLocalTerminal = {
   enabled: boolean;
 };
 
+/** How often `AgentSshApproval` asks: once per host and conversation, or every command. */
+export type AgentSshApprovalScope = 'host' | 'command';
+
+/**
+ * Agent SSH connection approval (`/v2/ssh/agent-approval`). While enabled,
+ * the user approves an agent's `ssh_exec` before it connects, whatever the
+ * conversation's permission mode: `host` asks once per host and conversation
+ * (a `permission.requested` of kind `AGENT_SSH_HOST_GRANT_KIND`), `command`
+ * asks every call with no "always" option. Defaults to `{ enabled: true,
+ * scope: 'host' }`; applies from the next call.
+ */
+export type AgentSshApproval = {
+  enabled: boolean;
+  scope: AgentSshApprovalScope;
+};
+
+/** `permission.requested` kind of the per-host connection approval; details `{ host, local }`. */
+export const AGENT_SSH_HOST_GRANT_KIND = 'ssh_host';
+
 /** Values hidden from the agent per category; only counts above zero. */
 export type AgentOutputRedactions = Partial<Record<AgentOutputFilterCategory, number>>;
 

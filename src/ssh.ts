@@ -66,9 +66,9 @@ export type SshHostsResponse = {
   hosts: SshHost[];
   ftpSites: FtpSite[];
   /**
-   * The backend runs on Linux or macOS and opens a terminal on
-   * `LOCAL_TERMINAL_HOST` (`ssh localhost`, needs its sshd). Absent on
-   * older backends.
+   * The backend opens a terminal on `LOCAL_TERMINAL_HOST` (its login
+   * shell; every platform on current backends, Linux/macOS on older ones,
+   * which ran `ssh localhost`). Absent on even older backends.
    */
   localTerminal?: boolean;
 };
@@ -154,8 +154,9 @@ export const AGENT_LOCAL_HOST = 'Local';
 
 /**
  * Terminal host that `terminal.start` with `ssh: { host }` opens on the
- * backend's own machine over `ssh localhost`; it shadows an inventory host of
- * the same name, as `AGENT_LOCAL_HOST` does for agents.
+ * backend's own machine: the backend user's login shell, started directly
+ * (older backends ran `ssh localhost`). It shadows an inventory host of the
+ * same name, as `AGENT_LOCAL_HOST` does for agents.
  */
 export const LOCAL_TERMINAL_HOST = AGENT_LOCAL_HOST;
 

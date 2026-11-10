@@ -5,7 +5,7 @@
  * re-exported by the legacy protocol module without introducing a runtime
  * dependency cycle in the React Native bundle.
  */
-import { hasIpcScheme, ipcServerInstance, ipcServerUrl, isIpcServerUrl } from './ipcServerUrl';
+import { hasIpcScheme, ipcServerInstance, ipcServerUrl, isIpcServerUrl, repairedIpcServerUrl } from './ipcServerUrl';
 import type {
   BackendConnectionProfile,
   ConnectionSettings,
@@ -144,6 +144,8 @@ function normalizeProfileServerUrl(raw: string): string {
   const ipcInstance = ipcServerInstance(value);
   if (ipcInstance) return ipcServerUrl(ipcInstance);
   if (hasIpcScheme(value)) return value;
+  const repaired = repairedIpcServerUrl(value);
+  if (repaired) return repaired;
 
   let candidate = value;
   if (!/^https?:\/\//i.test(candidate) && !/^wss?:\/\//i.test(candidate)) {

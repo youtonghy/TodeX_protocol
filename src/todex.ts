@@ -1,5 +1,5 @@
 import { isObject, utf8ByteLength } from './primitives';
-import { hasIpcScheme, ipcServerInstance, ipcServerUrl } from './ipcServerUrl';
+import { hasIpcScheme, ipcServerInstance, ipcServerUrl, repairedIpcServerUrl } from './ipcServerUrl';
 import { joinServerPath } from './serverUrl';
 export type AppTab = 'chat' | 'settings';
 
@@ -434,6 +434,8 @@ export function normalizeServerUrl(raw: string): string {
   const ipcInstance = ipcServerInstance(value);
   if (ipcInstance) return ipcServerUrl(ipcInstance);
   if (hasIpcScheme(value)) return value;
+  const repaired = repairedIpcServerUrl(value);
+  if (repaired) return repaired;
 
   let candidate = value;
   if (!/^https?:\/\//i.test(candidate) && !/^wss?:\/\//i.test(candidate)) {
@@ -2973,5 +2975,5 @@ export type {
 
 export { joinServerPath } from './serverUrl';
 export { isObject, utf8ByteLength };
-export { IPC_SERVER_PROTOCOL, ipcServerInstance, ipcServerUrl, isIpcServerUrl, hasIpcScheme } from './ipcServerUrl';
+export { IPC_SERVER_PROTOCOL, ipcServerInstance, ipcServerUrl, isIpcServerUrl, hasIpcScheme, repairedIpcServerUrl } from './ipcServerUrl';
 export * from './conversationRuntime';

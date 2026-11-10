@@ -45,6 +45,31 @@ test('an invalid IPC address stays as written and fails as one', () => {
   assert.equal(normalizeServerUrl('todex-ipc.example:7345'), 'http://todex-ipc.example:7345');
 });
 
+test('an IPC address mangled into an HTTP host is restored', () => {
+  // Builds without IPC support stored `todex-ipc://local` as `http://todex-ipc//local`.
+  for (const [value, expected] of [
+    ['http://todex-ipc//local', 'todex-ipc://local'],
+    ['HTTP://TODEX-IPC//Local/', 'todex-ipc://local'],
+    ['todex-ipc//local', 'todex-ipc://local'],
+    [' http://todex-ipc//container-dev ', 'todex-ipc://container-dev'],
+  ]) {
+    assert.equal(normalizeServerUrl(value), expected, value);
+    assert.equal(normalizeBackendConnectionProfile({ id: 'a', serverUrl: value }).serverUrl, expected, value);
+    assert.deepEqual(inspectServerUrl(value), { origin: expected, error: null });
+  }
+  // Anything else keeps its HTTP reading.
+  for (const value of [
+    'http://todex-ipc',
+    'http://todex-ipc:7345//local',
+    'https://todex-ipc//local',
+    'http://todex-ipc//local/v2',
+    'http://todex-ipc//local_1',
+    'http://todex-ipc.example//local',
+  ]) {
+    assert.equal(normalizeServerUrl(value).startsWith('todex-ipc:'), false, value);
+  }
+});
+
 test('an unpaired IPC profile may use plaintext and opens sockets through the registered implementation', () => {
   const profile = { serverUrl: 'todex-ipc://local', encryptionProtocol: 'none', encryptionPublicKey: '' };
   const transport = createSecureTransport({ profile, fetchImpl: async () => new Response('{}') });

@@ -32,6 +32,19 @@ export function hasIpcScheme(value: string | null | undefined): boolean {
   return typeof value === 'string' && /^todex-ipc:/i.test(value.trim());
 }
 
+/** The IPC URL a mangled `todex-ipc://<instance>` stands for, else null.
+ * Clients without IPC support read `todex-ipc://local` as an HTTP host and
+ * stored `http://todex-ipc//local`; the same shape typed without the colon
+ * (`todex-ipc//local`) is read the same way. Only that exact shape, with a
+ * valid instance and nothing after it, is recognized. */
+export function repairedIpcServerUrl(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const match = value.trim().match(/^(?:http:\/\/)?todex-ipc\/\/([^/?#]+)\/?$/i);
+  if (!match) return null;
+  const instance = ipcServerInstance(`todex-ipc://${match[1]}`);
+  return instance ? ipcServerUrl(instance) : null;
+}
+
 export function ipcServerUrl(instance: string): string {
   const normalized = instance.trim().toLowerCase();
   if (!IPC_INSTANCE.test(normalized)) throw new TypeError(`invalid IPC backend instance ${instance}`);

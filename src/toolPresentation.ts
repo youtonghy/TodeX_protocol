@@ -30,8 +30,17 @@ const SUMMARY_MAX_CHARS = 160;
 /** Expanded bodies are previews: full file reads or diffs would stall the
  * highlighter, and the raw event stays available through the event log. */
 const DETAIL_MAX_CHARS = 8000;
-/** Argument keys that best identify a call, in priority order. */
-const SUMMARY_KEYS = ['command', 'cmd', 'file_path', 'filePath', 'path', 'notebook_path', 'pattern', 'query', 'url', 'description', 'prompt'];
+/** Argument keys that best identify a call, in priority order. Antigravity
+ * (agy) names its arguments in PascalCase (`run_command` sends
+ * `CommandLine`, file tools `TargetFile`/`AbsolutePath`). */
+const SUMMARY_KEYS = [
+  'command', 'cmd', 'CommandLine',
+  'file_path', 'filePath', 'TargetFile', 'AbsolutePath',
+  'path', 'notebook_path', 'DirectoryPath', 'SearchPath', 'SearchDirectory',
+  'pattern', 'Pattern', 'query', 'Query', 'url', 'Url',
+  'description', 'prompt',
+];
+const COMMAND_KEYS = new Set(['command', 'cmd', 'CommandLine']);
 
 const CODEX_ITEM_KINDS: Record<string, ToolCallKind> = {
   commandExecution: 'command',
@@ -85,7 +94,7 @@ function argsSummary(args: unknown): string {
     if (questions.length) return oneLine(questions.join(' / '));
   }
   for (const key of SUMMARY_KEYS) {
-    const text = key === 'command' || key === 'cmd' ? commandText(record[key]) : nonEmptyString(record[key]);
+    const text = COMMAND_KEYS.has(key) ? commandText(record[key]) : nonEmptyString(record[key]);
     if (text.trim()) return oneLine(text);
   }
   return '';

@@ -38,6 +38,17 @@ test('claude tool_use blocks read the nested tool record', () => {
   assert.equal(question.summary, 'Which color? / Which fruits?');
 });
 
+test('antigravity snapshots read its PascalCase arguments', () => {
+  const command = describe({ provider: 'antigravity', toolCallId: 'step-2', toolName: 'run_command', arguments: { CommandLine: 'git status --short', Cwd: '/repo' }, result: 'M a.ts', isError: false });
+  assert.equal(command.name, 'run_command');
+  assert.equal(command.summary, 'git status --short');
+  assert.equal(command.status, 'completed');
+
+  assert.equal(describe({ toolName: 'view_file', arguments: { AbsolutePath: '/repo/a.ts' } }).summary, '/repo/a.ts');
+  assert.equal(describe({ toolName: 'write_to_file', arguments: { TargetFile: '/repo/b.ts', CodeContent: 'x' } }).summary, '/repo/b.ts');
+  assert.equal(describe({ toolName: 'list_dir', arguments: { DirectoryPath: '/repo/src' } }).summary, '/repo/src');
+});
+
 test('codex items map to kinds with their identifying field', () => {
   const command = describe({ type: 'commandExecution', id: 'i1', command: 'pnpm test', cwd: '/repo', status: 'completed', exitCode: 1, aggregatedOutput: 'fail' });
   assert.equal(command.kind, 'command');

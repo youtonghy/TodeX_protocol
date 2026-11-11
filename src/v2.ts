@@ -115,6 +115,9 @@ export type ProviderCapabilities = {
   /** `conversation.schedule`: the daemon holds the conversation's queue until
    * a set time (pause reason `scheduled`) and then sends it. */
   scheduledConversations?: boolean;
+  /** `conversation.backgroundTasks.stop`: stop the background tasks a
+   * session still runs between turns. Absent on older backends. */
+  backgroundTaskStop?: boolean;
   /** Private (RAM-only) conversations: `ephemeral: true` on create keeps the
    * conversation in daemon memory and starts the agent without on-disk
    * sessions. `native`: the CLI writes nothing; `scrubbed`: the CLI writes
@@ -288,6 +291,7 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     backendQueue: capabilities.backendQueue === true,
     backendQueueControl: capabilities.backendQueueControl === true,
     scheduledConversations: capabilities.scheduledConversations === true,
+    backgroundTaskStop: capabilities.backgroundTaskStop === true,
     privateConversations: capabilities.privateConversations ?? null,
     runtimeStop: capabilities.runtimeStop === true,
     sessionCommands: capabilities.sessionCommands === true,
@@ -1175,6 +1179,8 @@ export type ExtensionMessagePayload = {
 };
 export type ConversationRuntimeStopPayload = { conversationId: string };
 export const CONVERSATION_RUNTIME_STOP = 'conversation.runtime.stop' as const;
+/** Payload `{ conversationId }`; answers `{ conversationId, stoppedTaskIds }`. */
+export const CONVERSATION_BACKGROUND_TASKS_STOP = 'conversation.backgroundTasks.stop' as const;
 
 export type ConversationEvent = {
   schemaVersion: number;

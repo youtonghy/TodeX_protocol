@@ -46,6 +46,12 @@ export type ComputerHostStatus = {
   platform: string;
   /** OS permissions granted to the TodeX backend on the host. */
   permissions: { screen: boolean; accessibility: boolean };
+  /**
+   * The permission the person at the host is being guided to grant right
+   * now (macOS: a panel beside System Settings offers the backend to drag
+   * into the list). Poll the settings while it is set.
+   */
+  permissionRequest?: AgentComputerPermission;
 };
 
 /**

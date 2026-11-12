@@ -16,6 +16,14 @@ import {
   type DevicePairingV3Material,
 } from './secureChannel';
 import { buildHttpUrl } from './todex';
+import {
+  meshHistoryKeySignature,
+  meshJoinCodeKey,
+  meshNodeIdForPublicKey,
+  meshNodeJoinClientProof,
+  meshNodeJoinServerProof,
+  parseMeshSigningKey,
+} from './mesh';
 
 /**
  * Device pairing v3 over HTTP (`/v2/device-pairing/*`), shared by every
@@ -25,7 +33,20 @@ import { buildHttpUrl } from './todex';
 
 export type DevicePairingResult =
   | { status: 'pending' | 'rejected' | 'expired' }
-  | { status: 'approved'; deviceId: string; pin: DevicePairingPin };
+  | { status: 'approved'; deviceId: string; pin: DevicePairingPin; mesh?: DevicePairingMeshResult };
+
+/**
+ * Joining a device group over pairing v3 (TodeX_backend docs/mesh-v1.md):
+ * `deviceJoin` asks the group's devices to let this device in;
+ * `nodeJoin` adds the backend to the group with its join code.
+ */
+export type DevicePairingMesh =
+  | { kind: 'deviceJoin'; groupId: string; historyKey: Uint8Array }
+  | { kind: 'nodeJoin'; groupId: string; joinCode: string };
+
+/** What an approved group join adds; `nodeId`/`nodePublicKey` only for a
+ * node join, after its `joinProof` verified. */
+export type DevicePairingMeshResult = { groupId: string; nodeId?: string; nodePublicKey?: string };
 
 export type DevicePairingRequest = {
   requestId: string;
@@ -67,6 +88,8 @@ export type DevicePairingMessage = (code: DevicePairingErrorCode, params: { stat
 export type DevicePairingOptions = {
   /** Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
+  /** Join a device group instead of pairing with this backend. */
+  mesh?: DevicePairingMesh;
   /** Defaults to the code itself. */
   message?: DevicePairingMessage;
 };
@@ -366,12 +389,20 @@ export async function beginDevicePairing(
   try {
     const meta: { serverTime?: number } = {};
     const sentAt = Date.now();
+    const mesh = options.mesh;
+    const meshRequest = !mesh ? undefined : mesh.kind === 'deviceJoin'
+      ? {
+        kind: 'deviceJoin', groupId: mesh.groupId, historyKey: encodeBase64Url(mesh.historyKey),
+        historyKeySignature: meshHistoryKeySignature(decodeBase64Url(device.secretKey), mesh.groupId, mesh.historyKey),
+      }
+      : { kind: 'nodeJoin', groupId: mesh.groupId };
     const response = await post(serverUrl, 'create', {
       transportBinding: 1,
       deviceNameBinding: 1,
       clientCommitment: encodeBase64Url(devicePairingV3Commitment(keys.publicKey, clientNonce)),
       devicePublicKey: device.publicKey,
       deviceName: boundName,
+      ...(meshRequest ? { mesh: meshRequest } : {}),
     }, context, signal, meta);
     const { requestId, expiresAt: serverExpiresAt } = response;
     if (typeof requestId !== 'string' || !uuidPattern.test(requestId)
@@ -388,6 +419,17 @@ export async function beginDevicePairing(
       : PAIRING_POLL_INTERVAL_MS;
     const serverKey = decode(response.serverPublicKey, err, 32);
     const transport = pairingTransport(response, serverUrl, err);
+    // A node join names the node; its key is trusted only once the
+    // credential's joinProof shows the node knows the join code.
+    let nodePublicKey: Uint8Array | undefined;
+    if (mesh?.kind === 'nodeJoin') {
+      try {
+        nodePublicKey = parseMeshSigningKey(response.nodePublicKey);
+      } catch {
+        throw err.fail('invalidResponse');
+      }
+      if (response.nodeId !== meshNodeIdForPublicKey(nodePublicKey)) throw err.fail('invalidResponse');
+    }
     try {
       material = deriveDevicePairingV3Material({
         requestId,
@@ -404,18 +446,21 @@ export async function beginDevicePairing(
     }
     // The server shows the verification code only after the reveal opened
     // the commitment.
+    const codeKey = mesh?.kind === 'nodeJoin' ? meshJoinCodeKey(mesh.joinCode) : undefined;
     const revealed = await post(serverUrl, 'reveal', {
       requestId,
       clientPublicKey: encodeBase64Url(keys.publicKey),
       clientNonce: encodeBase64Url(clientNonce),
+      ...(codeKey ? { joinCodeProof: meshNodeJoinClientProof(codeKey, material.transcriptHash) } : {}),
     }, context, signal);
     if (revealed.status !== 'pending') throw err.fail('invalidStatus');
-    const { transcript, wrapKey, pollProof, cancelProof } = material;
+    const { transcript, transcriptHash, wrapKey, pollProof, cancelProof } = material;
     let finished = false;
     let polling = false;
     const dispose = () => {
       finished = true;
       wipe();
+      codeKey?.fill(0);
     };
     return {
       requestId,
@@ -448,7 +493,20 @@ export async function beginDevicePairing(
               // The device id and the transport key must equal this device
               // and the create response byte for byte; otherwise pin nothing.
               const pin = verifyDevicePairingCredential(payload, { deviceId: device.deviceId, transport });
-              return { status: 'approved', deviceId: payload.deviceId, pin };
+              if (!mesh) return { status: 'approved', deviceId: payload.deviceId, pin };
+              if (payload.groupId !== mesh.groupId) throw new Error('Wrong group');
+              if (mesh.kind === 'deviceJoin') return { status: 'approved', deviceId: payload.deviceId, pin, mesh: { groupId: mesh.groupId } };
+              // The node proves it knows the join code over this transcript
+              // and its key: only then are the node and transport keys trusted.
+              const expected = meshNodeJoinServerProof(codeKey!, transcriptHash, nodePublicKey!);
+              if (payload.joinProof !== expected || payload.nodePublicKey !== encodeBase64Url(nodePublicKey!)
+                || payload.nodeId !== meshNodeIdForPublicKey(nodePublicKey!)) {
+                throw new Error('Join proof does not verify');
+              }
+              return {
+                status: 'approved', deviceId: payload.deviceId, pin,
+                mesh: { groupId: mesh.groupId, nodeId: payload.nodeId as string, nodePublicKey: payload.nodePublicKey as string },
+              };
             } finally {
               plaintext.fill(0);
             }

@@ -24,6 +24,9 @@ const {
 } = require(path.join(compiledDir, 'secureChannel.js'));
 
 const SERVER_URL = 'http://192.168.1.20:7345';
+const mesh = require(path.join(compiledDir, 'mesh.js'));
+const { ed25519 } = require('@noble/curves/ed25519.js');
+const { historyRecipientKeyPairFromSeed } = require(path.join(compiledDir, 'historyCrypto.js'));
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' }, ...init });
@@ -46,7 +49,7 @@ function bodyless(response) {
  * and answers `poll` with `steps` (each `pending`, `approved`, `rejected`,
  * an HTTP status, or a function returning a Response).
  */
-function fakeBackend({ steps = ['approved'], transport, wrap = (response) => response } = {}) {
+function fakeBackend({ steps = ['approved'], transport, wrap = (response) => response, node } = {}) {
   const serverKeys = x25519.keygen();
   const transportKeys = x25519.keygen();
   const transportProtocol = transport?.protocol ?? 'x25519';
@@ -67,6 +70,7 @@ function fakeBackend({ steps = ['approved'], transport, wrap = (response) => res
         pollIntervalMs: 1000,
         transportProtocol,
         transportPublicKey,
+        ...(node ? { nodeId: node.nodeId, nodePublicKey: node.publicKey } : {}),
       }));
     }
     if (action === 'reveal') {
@@ -87,6 +91,7 @@ function fakeBackend({ steps = ['approved'], transport, wrap = (response) => res
       const prk = extract(sha256, shared, sha256(state.transcript));
       state.wrapKey = expand(sha256, prk, new TextEncoder().encode(DEVICE_PAIRING_V3_WRAP_INFO), 32);
       state.pollProof = encodeBase64Url(expand(sha256, prk, new TextEncoder().encode(DEVICE_PAIRING_V3_POLL_INFO), 32));
+      state.reveal = body;
       return wrap(json({ status: 'pending' }));
     }
     if (action === 'poll') {
@@ -97,10 +102,19 @@ function fakeBackend({ steps = ['approved'], transport, wrap = (response) => res
       if (step !== 'approved') return wrap(json({ status: step }));
       const deviceId = state.deviceId ?? `dev_${createHash('sha256').update(decodeBase64Url(state.create.devicePublicKey)).digest().subarray(0, 12).toString('base64url')}`;
       const nonce = new Uint8Array(24).fill(7);
+      const extra = state.create.mesh ? { groupId: state.create.mesh.groupId } : {};
+      if (node) {
+        const codeKey = mesh.meshJoinCodeKey(node.code);
+        Object.assign(extra, {
+          nodeId: node.nodeId, nodePublicKey: node.publicKey,
+          joinProof: node.joinProof ?? mesh.meshNodeJoinServerProof(codeKey, sha256(state.transcript), decodeBase64Url(node.publicKey)),
+        });
+      }
       const plaintext = new TextEncoder().encode(JSON.stringify({
         deviceId,
         transportProtocol: state.credentialProtocol ?? transportProtocol,
         transportPublicKey,
+        ...extra,
       }));
       const ciphertext = xchacha20poly1305(state.wrapKey, nonce, state.transcript).encrypt(plaintext);
       return wrap(json({ status: 'approved', nonce: encodeBase64Url(nonce), ciphertext: encodeBase64Url(ciphertext) }));
@@ -176,4 +190,46 @@ test('a rejected request ends; cancel withdraws it once', async () => {
   await second.cancel();
   await second.cancel();
   assert.equal(pending.state.calls.filter((call) => call === 'cancel').length, 1);
+});
+
+function meshNode(code, joinProof) {
+  const publicKey = ed25519.getPublicKey(new Uint8Array(32).fill(9));
+  return { code, joinProof, publicKey: encodeBase64Url(publicKey), nodeId: mesh.meshNodeIdForPublicKey(publicKey) };
+}
+
+test('a node join proves the code both ways and returns the node key', async () => {
+  const code = 'ABCD-EFGH-IJKL-MNOP';
+  const node = meshNode(code);
+  const backend = fakeBackend({ node });
+  const request = await beginDevicePairing(SERVER_URL, 'Mac', generateDeviceIdentity(), undefined, {
+    fetchImpl: backend.fetchImpl, mesh: { kind: 'nodeJoin', groupId: 'grp_AAAAAAAAAAAAAAAAAAAAAA', joinCode: code.toLowerCase() },
+  });
+  assert.deepEqual(backend.state.create.mesh, { kind: 'nodeJoin', groupId: 'grp_AAAAAAAAAAAAAAAAAAAAAA' });
+  assert.equal(backend.state.reveal.joinCodeProof, mesh.meshNodeJoinClientProof(mesh.meshJoinCodeKey(code), sha256(backend.state.transcript)));
+  const result = await request.poll();
+  assert.equal(result.status, 'approved');
+  assert.deepEqual(result.mesh, { groupId: 'grp_AAAAAAAAAAAAAAAAAAAAAA', nodeId: node.nodeId, nodePublicKey: node.publicKey });
+});
+
+test('a node that does not know the code is not trusted', async () => {
+  const backend = fakeBackend({ node: meshNode('ABCD-EFGH-IJKL-MNOP', encodeBase64Url(new Uint8Array(32))) });
+  const request = await beginDevicePairing(SERVER_URL, 'Mac', generateDeviceIdentity(), undefined, {
+    fetchImpl: backend.fetchImpl, mesh: { kind: 'nodeJoin', groupId: 'grp_AAAAAAAAAAAAAAAAAAAAAA', joinCode: 'ABCD-EFGH-IJKL-MNOP' },
+  });
+  await assert.rejects(request.poll(), (error) => error.code === 'checksum');
+});
+
+test('a device join signs its history key for the group', async () => {
+  const device = generateDeviceIdentity();
+  const historyKey = historyRecipientKeyPairFromSeed(new Uint8Array(32).fill(3)).publicKey;
+  const backend = fakeBackend();
+  const groupId = 'grp_AAAAAAAAAAAAAAAAAAAAAA';
+  const request = await beginDevicePairing(SERVER_URL, 'Phone', device, undefined, {
+    fetchImpl: backend.fetchImpl, mesh: { kind: 'deviceJoin', groupId, historyKey },
+  });
+  const sent = backend.state.create.mesh;
+  assert.equal(sent.historyKey, encodeBase64Url(historyKey));
+  assert.ok(mesh.verifyMeshHistoryKeySignature(decodeBase64Url(device.publicKey), groupId, historyKey, sent.historyKeySignature));
+  const result = await request.poll();
+  assert.deepEqual(result.mesh, { groupId });
 });

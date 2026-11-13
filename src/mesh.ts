@@ -41,7 +41,20 @@ export type MeshMember = {
   historyKey?: string;
   addedAt: number;
   addedBy: string;
+  /** Nodes: addresses a user pinned (http(s) URLs). */
+  addresses?: string[];
+  /** Nodes: whether the node relays for its group; `allowed` when absent. */
+  relay?: MeshRelayRole;
+  /** Nodes: `false` when no member may reach the node through a relay. */
+  relayTarget?: boolean;
 };
+export type MeshRelayRole = 'preferred' | 'allowed' | 'denied';
+export const MESH_MAX_PINNED_ADDRESSES = 16;
+
+/** An `http(s)://` address a node may be pinned at. */
+export function isMeshAddress(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 512 && /^https?:\/\/[^\s]+$/.test(value);
+}
 export type MeshRecovery = { signingKey: string; historyKey: string };
 export type MeshRosterBody = {
   type: typeof MESH_ROSTER_TYPE;
@@ -185,10 +198,22 @@ function readRoster(value: Record<string, unknown>): MeshRosterBody {
     if (kind === 'device') parseHistoryKey(member.historyKey);
     else if (member.historyKey !== undefined) fail('node members carry no history key');
     if (typeof member.addedAt !== 'number' || typeof member.addedBy !== 'string') fail('malformed member');
+    const addresses = member.addresses ?? [];
+    const relay = member.relay;
+    const relayTarget = member.relayTarget;
+    if (kind === 'device' && (member.addresses !== undefined || relay !== undefined || relayTarget !== undefined)) {
+      fail('only nodes carry addresses and relay settings');
+    }
+    if (!Array.isArray(addresses) || addresses.length > MESH_MAX_PINNED_ADDRESSES || !addresses.every(isMeshAddress)) fail('invalid pinned address');
+    if (relay !== undefined && relay !== 'preferred' && relay !== 'allowed' && relay !== 'denied') fail('invalid relay role');
+    if (relayTarget !== undefined && typeof relayTarget !== 'boolean') fail('invalid relay target');
     return {
       id: member.id as string, kind, name: member.name as string, publicKey: member.publicKey as string,
       ...(kind === 'device' ? { historyKey: member.historyKey as string } : {}),
       addedAt: member.addedAt as number, addedBy: member.addedBy as string,
+      ...((addresses as string[]).length ? { addresses: addresses as string[] } : {}),
+      ...(relay !== undefined ? { relay: relay as MeshRelayRole } : {}),
+      ...(relayTarget !== undefined ? { relayTarget: relayTarget as boolean } : {}),
     };
   });
   if (!members.some((member) => member.kind === 'device')) fail('roster must list a device');
@@ -428,10 +453,37 @@ export function parseMeshInvite(text: string): MeshInvite {
   return { kind: 'todex-mesh-invite', version: 1, groupId: value.groupId as string, name: typeof value.name === 'string' ? value.name : '', nodes };
 }
 
+/** Path prefix a node relays under (docs/mesh-v1.md "Relay"). */
+export const MESH_RELAY_PREFIX = '/v2/mesh/relay';
+
+/**
+ * A relay ticket: `deviceId.expiresAt.b64u(sig)`, the device's signature
+ * over `"todex.mesh.v1/relay-ticket\0" || deviceId || "\0" || relayNodeId
+ * || "\0" || targetNodeId || "\0" || expiresAt`.
+ */
+export function meshRelayTicket(input: {
+  deviceSecretKey: Uint8Array; deviceId: string; relayNodeId: string; targetNodeId: string; expiresAt: number;
+}): string {
+  const message = encoder.encode(`todex.mesh.v1/relay-ticket\0${input.deviceId}\0${input.relayNodeId}\0${input.targetNodeId}\0${input.expiresAt}`);
+  return `${input.deviceId}.${input.expiresAt}.${encodeBase64Url(ed25519.sign(message, input.deviceSecretKey))}`;
+}
+
+/** The address of `targetNodeId` through the node at `relayBaseUrl`. */
+export function meshRelayUrl(relayBaseUrl: string, targetNodeId: string, ticket: string): string {
+  return `${relayBaseUrl.replace(/\/+$/, '')}${MESH_RELAY_PREFIX}/${encodeURIComponent(targetNodeId)}/${encodeURIComponent(ticket)}`;
+}
+
+/** The ticket's expiry when `url` is a relay address, else `null`. */
+export function meshRelayExpiry(url: string): number | null {
+  const match = /\/v2\/mesh\/relay\/[^/]+\/[^/.]+\.(\d+)\./.exec(url);
+  return match ? Number(match[1]) : null;
+}
+
 export type MeshCommandFrame = { type: string; payload: Record<string, unknown> };
 
 export const meshCommands = {
   nodeGet: (): MeshCommandFrame => ({ type: 'mesh.node.get', payload: {} }),
+  presenceGet: (groupId: string): MeshCommandFrame => ({ type: 'mesh.presence.get', payload: { groupId } }),
   stateGet: (groupId?: string): MeshCommandFrame => ({ type: 'mesh.state.get', payload: groupId ? { groupId } : {} }),
   statePush: (chain: readonly MeshSignedDoc[], nodeInfos: readonly MeshSignedDoc[] = []): MeshCommandFrame => ({
     type: 'mesh.state.push', payload: { chain, ...(nodeInfos.length ? { nodeInfos } : {}) },
@@ -468,6 +520,25 @@ export function parseMeshNodeState(response: Record<string, unknown>): MeshNodeS
         nodeInfos: Array.isArray(group.nodeInfos) ? (group.nodeInfos as unknown[]).filter(isDoc) : [],
       };
     }),
+  };
+}
+
+export type MeshPresence = {
+  nodeId: string;
+  /** Group devices connected to that node, with their open connections. */
+  connected: { deviceId: string; connections: number; connectedAt: number }[];
+  /** When the others last disconnected from it (since it started). */
+  lastSeen: Record<string, number>;
+};
+
+export function parseMeshPresence(response: Record<string, unknown>): MeshPresence {
+  const connected = Array.isArray(response.connected) ? response.connected as Record<string, unknown>[] : [];
+  const lastSeen = response.lastSeen && typeof response.lastSeen === 'object' ? response.lastSeen as Record<string, unknown> : {};
+  return {
+    nodeId: typeof response.nodeId === 'string' ? response.nodeId : '',
+    connected: connected.flatMap((item) => (item && typeof item.deviceId === 'string'
+      ? [{ deviceId: item.deviceId, connections: Number(item.connections) || 0, connectedAt: Number(item.connectedAt) || 0 }] : [])),
+    lastSeen: Object.fromEntries(Object.entries(lastSeen).filter((entry): entry is [string, number] => typeof entry[1] === 'number')),
   };
 }
 

@@ -94,3 +94,16 @@ test('approving a join request checks its keys', () => {
   assert.equal(mesh.meshMemberForJoinRequest(request, 'dev_x').id, second.id);
   assert.throws(() => mesh.meshMemberForJoinRequest({ ...request, deviceId: fixture.memberIds.creator }, 'dev_x'), mesh.MeshError);
 });
+
+test('node entries keep pinned addresses and relay settings; relay tickets match the vector', () => {
+  const chain = mesh.verifyMeshChain(fixture.chain);
+  const node = chain.head.members.find((member) => member.kind === 'node');
+  assert.deepEqual(node.addresses, ['https://nas.example.net:7345']);
+  assert.equal(node.relay, 'preferred');
+  assert.equal(node.relayTarget, false);
+  const ticket = fixture.relayTicket;
+  assert.equal(mesh.meshRelayExpiry(mesh.meshRelayUrl('http://10.0.0.2:7345', ticket.targetNodeId, ticket.ticket)), ticket.expiresAt);
+  assert.equal(mesh.meshRelayExpiry('http://10.0.0.2:7345'), null);
+  assert.ok(mesh.isMeshAddress('http://[fe80::1]:7345'));
+  assert.ok(!mesh.isMeshAddress('ftp://x'));
+});

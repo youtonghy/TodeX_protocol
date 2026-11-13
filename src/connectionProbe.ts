@@ -20,6 +20,8 @@ export type ServerVersionInfo = {
   deployment: BackendDeployment;
   /** Host ↔ backend folder pairs (trusted part); empty when none. */
   pathMappings: PathMapping[];
+  /** `1` when the backend can join device groups (mesh v1). */
+  mesh?: number;
 };
 
 export type BackendProbeResult = {
@@ -173,6 +175,7 @@ export async function probeBackendConnection(options: {
       historyEncryption: typeof versionJson.historyEncryption === 'number' ? versionJson.historyEncryption : undefined,
       deployment: parseBackendDeployment(versionJson.deployment),
       pathMappings: parsePathMappings(versionJson.pathMappings),
+      ...(typeof versionJson.mesh === 'number' ? { mesh: versionJson.mesh } : {}),
     };
     if (version.name && version.name !== 'todex-agentd') {
       const error = ConnectionError.protocolMismatch(`unexpected server name ${version.name}`);

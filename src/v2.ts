@@ -868,6 +868,10 @@ export type SkillCatalogDescriptor = {
   error?: string;
   /** Shipped and managed by the CLI itself (Codex's `skills/.system`); absent when false or on old daemons. */
   builtIn?: boolean;
+  /** Installed as a symbolic link at the top of its skill root: listed and
+   * readable, but never edited or deleted through TodeX; absent when false
+   * or on old daemons. */
+  linked?: boolean;
 };
 
 export type SkillCatalog = {

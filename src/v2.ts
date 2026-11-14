@@ -47,6 +47,27 @@ export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 export type PermissionMode = 'ask' | 'accept-edits' | 'auto' | 'full-access';
 export type WorkMode = 'plan' | 'implement';
 
+/** Optional `afterPlan` of a Claude Code plan-mode prompt (`conversation.prompt`,
+ * `POST …/prompt`, `conversation.queue.add`): once the user approves the plan,
+ * the backend switches the conversation to implement with this model, effort
+ * and permission mode and emits a `provider.event` `plan_handoff`. Backends
+ * reject it unless the provider is `claude-code` and `workMode` is `plan`;
+ * older backends ignore it. */
+export type PromptAfterPlan = {
+  model: string;
+  reasoningEffort?: string | null;
+  permissionMode: PermissionMode;
+};
+
+/** `conversation.prompt` / queue-add fields that pick how a turn runs. */
+export type PromptRunFields = {
+  permissionMode?: PermissionMode;
+  workMode?: WorkMode;
+  model?: string;
+  reasoningEffort?: string;
+  afterPlan?: PromptAfterPlan;
+};
+
 export type ProviderKind =
   | 'acp'
   | 'codex'
@@ -2032,12 +2053,16 @@ export class V2ApiClient {
     skills?: PromptSkillRef[],
     reasoningEffort?: string,
     content?: PromptContentRef[],
+    run?: Pick<PromptRunFields, 'permissionMode' | 'workMode' | 'afterPlan'>,
   ): Promise<{ conversationId: string; turnId: string }> {
     const body: Record<string, unknown> = { text };
     if (model) body.model = model;
     if (skills?.length) body.skills = skills;
     if (reasoningEffort?.trim()) body.reasoningEffort = reasoningEffort.trim();
     if (content?.length) body.content = content;
+    if (run?.permissionMode) body.permissionMode = run.permissionMode;
+    if (run?.workMode) body.workMode = run.workMode;
+    if (run?.afterPlan) body.afterPlan = run.afterPlan;
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/prompt`, {
       method: 'POST', body: JSON.stringify(body),
     });

@@ -679,6 +679,34 @@ test('permission notices carry the settings layer that caused them', () => {
   assert.equal(bypass.subtitle, 'disableBypassPermissionsMode');
 });
 
+test('an approved plan handoff shows one notice carrying the execute model', () => {
+  const handoff = (sequence, metadata) => event({
+    eventId: `evt-h${sequence}`, sequence, type: 'provider.event',
+    payload: { turnId: 'turn-3', provider: 'claude-code', providerMethod: 'plan_handoff', metadata },
+  });
+  const metadata = { workMode: 'implement', model: 'claude-opus-5-5', reasoningEffort: 'medium', permissionMode: 'auto', applied: 'now', reason: 'plan_approved' };
+  const entry = parity.classifyV2ConversationEvent(handoff(5, metadata), 'ws');
+  assert.equal(entry.kind, 'system');
+  assert.equal(entry.providerNotice, 'plan_handoff');
+  assert.equal(entry.providerNoticeModel, 'claude-opus-5-5');
+  assert.equal(entry.providerNoticeApplied, 'now');
+  assert.equal(entry.turnId, 'turn-3');
+
+  const next = parity.classifyV2ConversationEvent(handoff(6, { ...metadata, applied: 'next_turn' }), 'ws');
+  assert.equal(next.providerNoticeApplied, 'next_turn');
+  const bare = parity.classifyV2ConversationEvent(handoff(7, { applied: 'later' }), 'ws');
+  assert.equal(bare.providerNotice, 'plan_handoff');
+  assert.equal(bare.providerNoticeModel, undefined);
+  assert.equal(bare.providerNoticeApplied, undefined);
+  // Other notices never carry the handoff fields.
+  const auto = parity.classifyV2ConversationEvent(event({
+    eventId: 'evt-a', sequence: 8, type: 'provider.event',
+    payload: { turnId: 'turn-4', providerMethod: 'auto_mode_unavailable', metadata: { model: 'x', applied: 'now' } },
+  }), 'ws');
+  assert.equal(auto.providerNoticeModel, undefined);
+  assert.equal(auto.providerNoticeApplied, undefined);
+});
+
 test('background work lost with its process shows a notice carrying the reason', () => {
   const entry = parity.classifyV2ConversationEvent(event({
     eventId: 'evt-3', sequence: 3, type: 'provider.event',

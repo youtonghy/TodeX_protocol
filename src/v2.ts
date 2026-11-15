@@ -33,7 +33,7 @@ import type {
   SshLoginAnswerInput,
   SshTestResult,
 } from './ssh';
-import type { AgentBrowserEngine, AgentBrowserHosts, AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
+import type { AgentBrowserEngine, AgentBrowserHostApproval, AgentBrowserHosts, AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
 import type { AgentCallEventType } from './agentCalling';
 import type { PromptUploadChunkResult } from './promptUploads';
 
@@ -2174,6 +2174,11 @@ export class V2ApiClient {
    */
   async setAgentBrowserEngine(browserEngine: AgentBrowserEngine): Promise<AgentDesktopSettings> {
     return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ browserEngine }) });
+  }
+
+  /** Whether the agent browser asks before opening hosts beyond the daemon's computer. */
+  async setAgentBrowserHostApproval(browserHostApproval: AgentBrowserHostApproval): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ browserHostApproval }) });
   }
 
   /**

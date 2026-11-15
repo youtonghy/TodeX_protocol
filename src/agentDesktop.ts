@@ -124,7 +124,16 @@ export type AgentBrowserStatus = {
   engine?: AgentBrowserEngine;
   /** Optional engines' state (with {@link engine}). */
   engines?: { kitesurf: AgentBrowserKitesurfStatus };
+  /** Whether hosts beyond {@link host} are asked about; absent from older daemons. */
+  hostApproval?: AgentBrowserHostApproval;
 };
+
+/**
+ * `ask`: each host beyond the daemon's computer once (allow once, always,
+ * deny). `auto`: every host, once the conversation may use the browser.
+ * Metadata addresses and the daemon's port stay refused either way.
+ */
+export type AgentBrowserHostApproval = 'ask' | 'auto';
 
 /** `GET|PUT /v2/agent-desktop`. A 404 means the daemon predates desktop tools. */
 export type AgentDesktopSettings = {

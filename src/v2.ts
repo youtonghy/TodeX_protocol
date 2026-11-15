@@ -33,7 +33,7 @@ import type {
   SshLoginAnswerInput,
   SshTestResult,
 } from './ssh';
-import type { AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
+import type { AgentBrowserEngine, AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
 import type { AgentCallEventType } from './agentCalling';
 import type { PromptUploadChunkResult } from './promptUploads';
 
@@ -2168,7 +2168,18 @@ export class V2ApiClient {
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop/frame?capability=browser`);
   }
 
-  /** Starts downloading the daemon's pinned Chromium; progress shows in `browser.chromium`. */
+  /**
+   * The engine the agent browser runs on. Switching closes every open agent tab; `kitesurf`
+   * starts its download on the daemon. Daemons without `browser.engine` reject it.
+   */
+  async setAgentBrowserEngine(browserEngine: AgentBrowserEngine): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop', { method: 'PUT', body: JSON.stringify({ browserEngine }) });
+  }
+
+  /**
+   * Starts downloading the chosen engine (`browser.engine`, Chromium on older daemons); progress
+   * shows in `browser.chromium` or `browser.engines.kitesurf`.
+   */
   async installAgentBrowser(): Promise<AgentDesktopSettings> {
     return this.request('/v2/agent-browser/install', { method: 'POST' });
   }

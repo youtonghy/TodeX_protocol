@@ -94,13 +94,36 @@ export type AgentBrowserInstall = {
   overridden: boolean;
 };
 
+/**
+ * The engine the agent browser runs on. `chromium` is the pinned Chrome for Testing (headed, or
+ * headless without a display) with a profile per workspace. `kitesurf` is experimental:
+ * Cloudflare's Kitesurf on a local `workerd`, headless, one fresh browser context per tab, no
+ * profiles; rendering and scripting are incomplete and unbundled dev-server pages may not load.
+ */
+export type AgentBrowserEngine = 'chromium' | 'kitesurf';
+
+/** The daemon's pinned Kitesurf engine and its `workerd`. */
+export type AgentBrowserKitesurfStatus = AgentBrowserInstall & {
+  /** This host's OS and architecture can run it (not Windows yet). */
+  supported: boolean;
+  /** Supported on this host and installed. */
+  available: boolean;
+  /** Why it is not available (unsupported OS, not installed yet). */
+  reason?: string;
+};
+
 /** Whether the daemon's host can run the agent browser. */
 export type AgentBrowserStatus = {
+  /** The chosen {@link engine} can run. */
   available: boolean;
   reason?: string;
   /** The computer the browser runs on (its `localhost`). */
   host: string;
   chromium: AgentBrowserInstall;
+  /** The chosen engine; absent from daemons with only Chromium. */
+  engine?: AgentBrowserEngine;
+  /** Optional engines' state (with {@link engine}). */
+  engines?: { kitesurf: AgentBrowserKitesurfStatus };
 };
 
 /** `GET|PUT /v2/agent-desktop`. A 404 means the daemon predates desktop tools. */

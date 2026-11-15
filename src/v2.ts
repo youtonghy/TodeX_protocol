@@ -59,6 +59,18 @@ export type PromptAfterPlan = {
   permissionMode: PermissionMode;
 };
 
+/** Optional `replan` of a Claude Code implement prompt (same commands as
+ * `afterPlan`): if Claude enters Plan mode on its own during the turn, the
+ * backend switches it to this model and effort, emits a `provider.event`
+ * `plan_reentered`, and hands an approved plan back to the prompt's own
+ * model, effort and permission mode (`plan_handoff`). Only send it when the
+ * provider's `permissionConfig.supportsReplan` is true: older backends
+ * reject unknown fields. */
+export type PromptReplan = {
+  model: string;
+  reasoningEffort?: string | null;
+};
+
 /** `conversation.prompt` / queue-add fields that pick how a turn runs. */
 export type PromptRunFields = {
   permissionMode?: PermissionMode;
@@ -66,6 +78,7 @@ export type PromptRunFields = {
   model?: string;
   reasoningEffort?: string;
   afterPlan?: PromptAfterPlan;
+  replan?: PromptReplan;
 };
 
 export type ProviderKind =
@@ -157,6 +170,8 @@ export type ProviderCapabilities = {
     modes?: PermissionMode[];
     defaultMode?: PermissionMode;
     supportsPlan?: boolean;
+    /** Implement prompts accept `replan` (Claude Code smart work mode). */
+    supportsReplan?: boolean;
     sandboxModes?: string[];
     approvalPolicies?: string[];
     permissionProfiles?: string[];
@@ -2057,7 +2072,7 @@ export class V2ApiClient {
     skills?: PromptSkillRef[],
     reasoningEffort?: string,
     content?: PromptContentRef[],
-    run?: Pick<PromptRunFields, 'permissionMode' | 'workMode' | 'afterPlan'>,
+    run?: Pick<PromptRunFields, 'permissionMode' | 'workMode' | 'afterPlan' | 'replan'>,
   ): Promise<{ conversationId: string; turnId: string }> {
     const body: Record<string, unknown> = { text };
     if (model) body.model = model;
@@ -2067,6 +2082,7 @@ export class V2ApiClient {
     if (run?.permissionMode) body.permissionMode = run.permissionMode;
     if (run?.workMode) body.workMode = run.workMode;
     if (run?.afterPlan) body.afterPlan = run.afterPlan;
+    if (run?.replan) body.replan = run.replan;
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/prompt`, {
       method: 'POST', body: JSON.stringify(body),
     });

@@ -679,6 +679,18 @@ test('permission notices carry the settings layer that caused them', () => {
   assert.equal(bypass.subtitle, 'disableBypassPermissionsMode');
 });
 
+test('Claude re-entering planning shows one notice carrying the plan model', () => {
+  const entry = parity.classifyV2ConversationEvent(event({
+    eventId: 'evt-r1', sequence: 4, type: 'provider.event',
+    payload: { turnId: 'turn-3', provider: 'claude-code', providerMethod: 'plan_reentered', metadata: { workMode: 'plan', model: 'claude-fable-5-2', reasoningEffort: 'high' } },
+  }), 'ws');
+  assert.equal(entry.kind, 'system');
+  assert.equal(entry.providerNotice, 'plan_reentered');
+  assert.equal(entry.providerNoticeModel, 'claude-fable-5-2');
+  assert.equal(entry.providerNoticeApplied, undefined);
+  assert.equal(entry.turnId, 'turn-3');
+});
+
 test('an approved plan handoff shows one notice carrying the execute model', () => {
   const handoff = (sequence, metadata) => event({
     eventId: `evt-h${sequence}`, sequence, type: 'provider.event',

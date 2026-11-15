@@ -747,9 +747,11 @@ export type ProviderTurnTrigger = 'background_task' | 'wakeup' | 'cron' | 'goal'
 /** `context_lost`: a private conversation's agent process restarted, so its
  * earlier context (never stored on disk) could not be restored.
  * `plan_handoff`: Claude Code's plan was approved and the conversation
- * switched to implement with the prompt's `afterPlan` model (smart work mode). */
-export type ProviderNotice = 'auto_mode_unavailable' | 'background_tasks_ended' | 'bypass_mode_disabled' | 'context_lost' | 'plan_handoff';
-const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable', 'background_tasks_ended', 'bypass_mode_disabled', 'context_lost', 'plan_handoff']);
+ * switched to implement with the prompt's `afterPlan` model (smart work mode).
+ * `plan_reentered`: Claude Code entered Plan mode on its own during an
+ * implement turn and switched to the prompt's `replan` model (smart work mode). */
+export type ProviderNotice = 'auto_mode_unavailable' | 'background_tasks_ended' | 'bypass_mode_disabled' | 'context_lost' | 'plan_handoff' | 'plan_reentered';
+const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable', 'background_tasks_ended', 'bypass_mode_disabled', 'context_lost', 'plan_handoff', 'plan_reentered']);
 
 const PROVIDER_TURN_TRIGGERS: ReadonlySet<string> = new Set(['background_task', 'wakeup', 'cron', 'goal']);
 
@@ -804,8 +806,8 @@ export type TimelineEntry = {
    * userSettings, projectSettings, localSettings, policySettings,
    * flagSettings), when the provider reported one. */
   providerNoticeSettingsSource?: string;
-  /** `plan_handoff`: the model implementation continues with
-   * (`metadata.model`). */
+  /** `plan_handoff`: the model implementation continues with;
+   * `plan_reentered`: the model planning continues with (`metadata.model`). */
   providerNoticeModel?: string;
   /** `plan_handoff`: `next_turn` when the switch applies from the next
    * message instead of the running turn (`metadata.applied`). */
@@ -1254,7 +1256,7 @@ export function classifyV2ConversationEvent(
     const metadata = asRecord(payload.metadata);
     const cause = readString(metadata, ['cause']);
     const settingsSource = readString(metadata, ['settingsSource']);
-    const model = providerMethod === 'plan_handoff' ? readString(metadata, ['model']) : '';
+    const model = providerMethod === 'plan_handoff' || providerMethod === 'plan_reentered' ? readString(metadata, ['model']) : '';
     const applied = providerMethod === 'plan_handoff' ? readString(metadata, ['applied']) : '';
     return {
       ...base,

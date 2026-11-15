@@ -391,6 +391,12 @@ export type DesktopBrowserTabEvent = {
 export const DESKTOP_BROWSER_GRANT_KIND = 'desktop_browser';
 /** `permission.requested.kind` of a single sensitive action. */
 export const DESKTOP_BROWSER_ACTION_KIND = 'desktop_browser_action';
+/**
+ * `permission.requested.kind` of opening a host beyond the daemon's computer
+ * (a public site or the local network); any device. Options: `once` (this
+ * conversation), `always` (saved; see `getAgentBrowserHosts`), `reject`.
+ */
+export const DESKTOP_BROWSER_HOST_KIND = 'desktop_browser_host';
 /** First action in an app during a conversation; any device. */
 export const DESKTOP_COMPUTER_APP_KIND = 'desktop_computer_app';
 /** A sensitive Computer Use action (password field); any device. */
@@ -445,6 +451,17 @@ export type DesktopBrowserGrantDetails = {
   /** The computer the browser runs on. */
   host: string;
 };
+
+/** `details` of a {@link DESKTOP_BROWSER_HOST_KIND} permission. */
+export type DesktopBrowserHostDetails = {
+  /** Host name or address, lowercase, without port. */
+  host: string;
+  /** The host is (or resolves to) an address on the local network. */
+  localNetwork: boolean;
+};
+
+/** `GET /v2/agent-browser/hosts`: hosts always allowed beyond the daemon's computer. */
+export type AgentBrowserHosts = { hosts: string[] };
 
 /** `GET /v2/conversations/{id}/agent-shots/{shotId}`. */
 export type AgentShot = { shotId: string; mimeType: string; dataUrl: string };

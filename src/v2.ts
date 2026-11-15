@@ -33,7 +33,7 @@ import type {
   SshLoginAnswerInput,
   SshTestResult,
 } from './ssh';
-import type { AgentBrowserEngine, AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
+import type { AgentBrowserEngine, AgentBrowserHosts, AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
 import type { AgentCallEventType } from './agentCalling';
 import type { PromptUploadChunkResult } from './promptUploads';
 
@@ -2204,6 +2204,16 @@ export class V2ApiClient {
   /** `workspace`: workspace id (path for workspaces without one). Its open tabs close. */
   async assignAgentBrowserProfile(workspace: string, profileId: string): Promise<AgentBrowserProfiles> {
     return this.request('/v2/agent-browser/workspaces', { method: 'PUT', body: JSON.stringify({ workspace, profileId }) });
+  }
+
+  /** Hosts beyond the daemon's computer the user always allows the agent browser to open. */
+  async getAgentBrowserHosts(): Promise<AgentBrowserHosts> {
+    return this.request('/v2/agent-browser/hosts');
+  }
+
+  /** Takes a host off the always-allowed list; the agent asks again next time. */
+  async removeAgentBrowserHost(host: string): Promise<AgentBrowserHosts> {
+    return this.request(`/v2/agent-browser/hosts/${encodeURIComponent(host)}`, { method: 'DELETE' });
   }
 
   /** Stops the agent's desktop browser and/or Computer Use for one conversation; its next tool call asks again. */

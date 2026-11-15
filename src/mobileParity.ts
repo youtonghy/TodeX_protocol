@@ -20,6 +20,7 @@ import type {
 } from './v2';
 import { canonicalConversationEventType, normalizeConversationEvent, toAgentEventEnvelope } from './v2';
 import { isLoopbackHostname, isLoopbackUrl } from './loopback';
+import { planReviewText } from './planReview';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -809,6 +810,11 @@ export type TimelineEntry = {
   /** `plan_handoff`: `next_turn` when the switch applies from the next
    * message instead of the running turn (`metadata.applied`). */
   providerNoticeApplied?: 'now' | 'next_turn';
+  /** A plan review (`permission.requested` with a plan, e.g. Claude's
+   * `ExitPlanMode`): the plan text. The row stands on its own instead of
+   * folding into the work steps, so the plan stays readable after it is
+   * answered; `requestId` links it to the pending approval. */
+  plan?: string;
   /** The subtitle holds only streamed deltas, so text projected from earlier
    * history for the same row precedes it instead of being replaced. */
   streamedText?: boolean;
@@ -1491,6 +1497,18 @@ export function classifyV2ConversationEvent(
     return null;
   }
   if (type === 'permission.requested') {
+    const plan = planReviewText(payload.kind, payload.details);
+    if (plan) {
+      return {
+        id: eventId,
+        kind: 'system',
+        title: '计划',
+        subtitle: plan,
+        plan,
+        requestId: readString(payload, ['permissionId', 'requestId', 'providerRequestId']) || undefined,
+        ...base,
+      };
+    }
     return {
       id: eventId,
       kind: 'system',
@@ -1557,7 +1575,7 @@ export function isVisibleConversationEntry(entry: TimelineEntry): boolean {
 }
 
 export function isStepProgressEntry(entry: TimelineEntry): boolean {
-  if (entry.kind !== 'system') return false;
+  if (entry.kind !== 'system' || entry.plan) return false;
   if (entry.category) {
     return ['reasoning', 'assistant_progress', 'tool', 'approval', 'status'].includes(entry.category);
   }

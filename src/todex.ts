@@ -1,6 +1,7 @@
 import { isObject, utf8ByteLength } from './primitives';
 import { hasIpcScheme, ipcServerInstance, ipcServerUrl, repairedIpcServerUrl } from './ipcServerUrl';
 import { joinServerPath } from './serverUrl';
+import { planReviewText } from './planReview';
 export type AppTab = 'chat' | 'settings';
 
 export type ConnectionSettings = {
@@ -375,6 +376,11 @@ export function permissionRequestSummary(request: PendingRequest): PermissionReq
     reason: text(details.reason) ?? text(details.decision_reason),
     safetyCheck: details.decision_reason_type === 'safetyCheck',
   };
+}
+
+/** The plan a plan-review request asks to approve (see `planReviewText`). */
+export function permissionPlanText(request: PendingRequest): string | undefined {
+  return planReviewText(request.data.kind, request.data.details);
 }
 
 export function permissionActions(request: PendingRequest): Array<boolean | PermissionOption> {
@@ -2977,3 +2983,4 @@ export { joinServerPath } from './serverUrl';
 export { isObject, utf8ByteLength };
 export { IPC_SERVER_PROTOCOL, ipcServerInstance, ipcServerUrl, isIpcServerUrl, hasIpcScheme, repairedIpcServerUrl } from './ipcServerUrl';
 export * from './conversationRuntime';
+export { EXIT_PLAN_MODE_TOOL, planReviewText } from './planReview';

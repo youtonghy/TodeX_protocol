@@ -85,3 +85,9 @@ test('summaries stay single-line and details stay bounded', () => {
   assert.ok(long.summary.length <= 161);
   assert.ok(long.argsText.length <= 8001);
 });
+
+test('a submitted plan is summarized by its first line', () => {
+  const plan = describe({ provider: 'claude-code', tool: { type: 'tool_use', id: 't2', name: 'ExitPlanMode', input: { plan: '## 拆分构建脚本\n1. 拆出 color.ts' } } });
+  assert.equal(plan.name, 'ExitPlanMode');
+  assert.equal(plan.summary, '拆分构建脚本');
+});

@@ -715,3 +715,29 @@ test('background work lost with its process shows a notice carrying the reason',
   assert.equal(entry.providerNotice, 'background_tasks_ended');
   assert.equal(entry.subtitle, 'settings_changed');
 });
+
+test('a plan review stands on its own row with the plan text', () => {
+  const review = (payload) => parity.classifyV2ConversationEvent(event({
+    eventId: 'evt-plan', type: 'permission.requested', payload: { turnId: 't', permissionId: 'perm-plan', ...payload },
+  }));
+  const plan = '# 计划\n1. 拆分\n2. 测试';
+  const current = review({ kind: 'plan', title: "Approve Claude's plan?", details: { tool_name: 'ExitPlanMode', plan, input: { plan } } });
+  assert.equal(current.plan, plan);
+  assert.equal(current.requestId, 'perm-plan');
+  assert.equal(parity.isStepProgressEntry(current), false);
+  // Older backends sent ExitPlanMode as a plain tool approval.
+  const legacy = review({ kind: 'tool', details: { tool_name: 'ExitPlanMode', input: { plan } } });
+  assert.equal(legacy.plan, plan);
+  const tool = review({ kind: 'tool', details: { tool_name: 'Bash', input: { command: 'ls' } } });
+  assert.equal(tool.plan, undefined);
+  assert.equal(parity.isStepProgressEntry(tool), true);
+
+  const step = (id) => ({ id, kind: 'system', title: '工具调用', subtitle: '', raw: '', at: 0, category: 'tool', turnId: 't' });
+  const items = parity.buildConversationRenderItems([step('a'), current, step('b')]);
+  assert.deepEqual(items.map((item) => item.type), ['executionGroup', 'entry', 'executionGroup']);
+
+  const request = (data) => ({ requestId: 'p', requestType: 'permission', title: '', event: {}, data });
+  assert.equal(todex.permissionPlanText(request({ kind: 'plan', details: { plan: 'p' } })), 'p');
+  assert.equal(todex.permissionPlanText(request({ kind: 'plan', details: { plan: '  ' } })), undefined);
+  assert.equal(todex.permissionPlanText(request({ kind: 'tool', details: { tool_name: 'Read', input: { plan: 'p' } } })), undefined);
+});

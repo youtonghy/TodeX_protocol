@@ -93,6 +93,9 @@ function argsSummary(args: unknown): string {
     const questions = record.questions.map((question) => nonEmptyString(asRecord(question)?.question)).filter(Boolean);
     if (questions.length) return oneLine(questions.join(' / '));
   }
+  // A plan handed in for approval (Claude `ExitPlanMode`): its first line,
+  // without Markdown heading marks.
+  if (typeof record.plan === 'string' && record.plan.trim()) return oneLine(record.plan.replace(/^\s*#+\s*/gm, ''));
   for (const key of SUMMARY_KEYS) {
     const text = COMMAND_KEYS.has(key) ? commandText(record[key]) : nonEmptyString(record[key]);
     if (text.trim()) return oneLine(text);

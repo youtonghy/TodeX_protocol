@@ -1,12 +1,13 @@
-// Minimal QR Code encoder (ISO/IEC 18004) for short secrets shown on screen:
-// byte mode, error correction level M, versions 1-9 (up to 182 bytes). The
-// apps only ship a decoder (jsQR); a recovery key must never be sent to a
-// third-party QR service, so it is encoded locally.
+// Minimal QR Code encoder (ISO/IEC 18004) for short texts shown on screen
+// (recovery keys, pairing links, group invites): byte mode, error correction
+// level M, versions 1-20 (up to MAX_QR_BYTES bytes). The apps only ship a
+// decoder (jsQR); a recovery key must never be sent to a third-party QR
+// service, so it is encoded locally.
 
-const MAX_VERSION = 9;
+const MAX_VERSION = 20;
 /** Level M, indexed by version. */
-const ECC_CODEWORDS_PER_BLOCK = [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22];
-const ERROR_CORRECTION_BLOCKS = [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5];
+const ECC_CODEWORDS_PER_BLOCK = [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26];
+const ERROR_CORRECTION_BLOCKS = [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16];
 /** Format-information bits of level M. */
 const LEVEL_M_FORMAT_BITS = 0;
 
@@ -16,11 +17,23 @@ export type QrMatrix = {
   modules: boolean[][];
 };
 
+/** Byte-mode character count bits: 8 up to version 9, 16 from version 10. */
+function countBits(version: number): number {
+  return version < 10 ? 8 : 16;
+}
+
+function byteCapacity(version: number): number {
+  return Math.floor((dataCodewordCount(version) * 8 - 4 - countBits(version)) / 8);
+}
+
+/** The most UTF-8 bytes `encodeQrCode` takes (666, version 20). */
+export const MAX_QR_BYTES = byteCapacity(MAX_VERSION);
+
 export function encodeQrCode(text: string): QrMatrix {
   const data = new TextEncoder().encode(text);
   let version = 1;
   for (; version <= MAX_VERSION; version++) {
-    if (4 + 8 + data.length * 8 <= dataCodewordCount(version) * 8) break;
+    if (data.length <= byteCapacity(version)) break;
   }
   if (version > MAX_VERSION) throw new Error('二维码内容过长');
 
@@ -30,7 +43,7 @@ export function encodeQrCode(text: string): QrMatrix {
     for (let index = length - 1; index >= 0; index--) bits.push((value >>> index) & 1);
   };
   append(0b0100, 4);
-  append(data.length, 8);
+  append(data.length, countBits(version));
   for (const byte of data) append(byte, 8);
   append(0, Math.min(4, capacityBits - bits.length));
   append(0, (8 - (bits.length % 8)) % 8);

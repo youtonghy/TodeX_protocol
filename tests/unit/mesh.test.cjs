@@ -84,6 +84,31 @@ test('invites carry only addresses and parse strictly', () => {
   assert.throws(() => mesh.parseMeshInvite(mesh.encodeMeshInvite({ groupId: fixture.groupId, name: 'x', nodes: [] })), mesh.MeshError);
 });
 
+test('a QR invite keeps every node\'s best address first and fits the code', () => {
+  const { encodeQrCode, MAX_QR_BYTES } = require(path.join(lib, 'qrCode.js'));
+  const node = (index, urls) => ({ nodeId: `node_${String(index).padStart(16, 'A')}`, name: `node ${index}`, urls });
+  const small = { groupId: fixture.groupId, name: 'Home', nodes: [node(1, ['http://192.168.1.20:7345'])] };
+  assert.deepEqual(mesh.encodeMeshInviteForQr(small), { text: mesh.encodeMeshInvite(small), trimmed: false });
+
+  const many = {
+    groupId: fixture.groupId, name: 'Home',
+    nodes: Array.from({ length: 6 }, (_, index) => node(index, Array.from({ length: 4 }, (__, at) => `http://192.168.${index}.${at + 10}:7345`))),
+  };
+  const qr = mesh.encodeMeshInviteForQr(many);
+  assert.equal(qr.trimmed, true);
+  assert.ok(Buffer.byteLength(qr.text) <= MAX_QR_BYTES);
+  const parsed = mesh.parseMeshInvite(qr.text);
+  assert.equal(parsed.nodes.length, 6);
+  parsed.nodes.forEach((entry, index) => assert.equal(entry.urls[0], many.nodes[index].urls[0]));
+  const counts = parsed.nodes.map((entry) => entry.urls.length);
+  assert.ok(Math.max(...counts) - Math.min(...counts) <= 1);
+  assert.doesNotThrow(() => encodeQrCode(qr.text));
+
+  const tight = mesh.encodeMeshInviteForQr(many, Buffer.byteLength(mesh.encodeMeshInvite({ ...many, nodes: [node(0, [many.nodes[0].urls[0]])] })));
+  assert.equal(mesh.parseMeshInvite(tight.text).nodes.length, 1);
+  assert.equal(mesh.encodeMeshInviteForQr(many, 50), null);
+});
+
 test('approving a join request checks its keys', () => {
   const chain = mesh.verifyMeshChain(fixture.chain);
   const second = chain.head.members.find((member) => member.kind === 'device');

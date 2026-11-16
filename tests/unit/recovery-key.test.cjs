@@ -11,7 +11,7 @@ const {
   recoverySeedFromWords,
   recoveryWordsFromSeed,
 } = require(path.join(lib, 'recoveryKey.js'));
-const { encodeQrCode } = require(path.join(lib, 'qrCode.js'));
+const { encodeQrCode, MAX_QR_BYTES } = require(path.join(lib, 'qrCode.js'));
 
 // Official BIP39 vectors (trezor/python-mnemonic vectors.json, English,
 // 256-bit entropy).
@@ -68,5 +68,13 @@ test('the QR payload round-trips and parseRecoveryKey accepts both forms', () =>
   assert.equal(qr.size, 33);
   // Finder pattern corners and the always-dark module.
   for (const [x, y] of [[0, 0], [qr.size - 1, 0], [0, qr.size - 1], [8, qr.size - 8]]) assert.equal(qr.modules[y][x], true);
-  assert.throws(() => encodeQrCode('x'.repeat(200)), /过长/);
+  assert.throws(() => encodeQrCode('x'.repeat(MAX_QR_BYTES + 1)), /过长/);
+});
+
+test('larger QR versions use a 16-bit length and grow by four modules', () => {
+  assert.equal(MAX_QR_BYTES, 666);
+  // Level M byte capacities at the version boundaries (ISO/IEC 18004 table 7).
+  for (const [bytes, size] of [[180, 53], [181, 57], [213, 57], [214, 61], [666, 97]]) {
+    assert.equal(encodeQrCode('x'.repeat(bytes)).size, size, `${bytes} bytes`);
+  }
 });

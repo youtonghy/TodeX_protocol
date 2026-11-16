@@ -4,6 +4,7 @@ import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { decodeBase64Url, deviceIdForPublicKey, encodeBase64Url } from './deviceAuth';
 import { HISTORY_PUBLIC_KEY_LENGTH, historyRecipientKeyPairFromSeed } from './historyCrypto';
+import { MAX_QR_BYTES } from './qrCode';
 import { devicePairingNameFailure } from './secureChannel';
 
 /**
@@ -429,6 +430,47 @@ export type MeshInvite = { kind: 'todex-mesh-invite'; version: 1; groupId: strin
 
 export function encodeMeshInvite(invite: Omit<MeshInvite, 'kind' | 'version'>): string {
   return JSON.stringify({ kind: 'todex-mesh-invite', version: 1, groupId: invite.groupId, name: invite.name, nodes: invite.nodes });
+}
+
+/**
+ * The invite to draw as a QR code: the whole invite when it fits in
+ * `maxBytes`, else as many addresses as fit, taken in rounds (every node's
+ * first address, then every node's second, …) so each node it can carry keeps
+ * its best address. A device joins through any one node and learns the rest
+ * from the roster. `trimmed` says some were left out; `null` when not even one
+ * node's first address fits.
+ */
+export function encodeMeshInviteForQr(
+  invite: Omit<MeshInvite, 'kind' | 'version'>,
+  maxBytes: number = MAX_QR_BYTES,
+): { text: string; trimmed: boolean } | null {
+  const fits = (text: string) => encoder.encode(text).length <= maxBytes;
+  const full = encodeMeshInvite(invite);
+  if (fits(full)) return { text: full, trimmed: false };
+  const build = (picked: { node: MeshInviteNode; count: number }[]) => encodeMeshInvite({
+    groupId: invite.groupId, name: invite.name,
+    nodes: picked.map(({ node, count }) => ({ nodeId: node.nodeId, name: node.name, urls: node.urls.slice(0, count) })),
+  });
+  let picked: { node: MeshInviteNode; count: number }[] = [];
+  for (const node of invite.nodes) {
+    if (!node.urls.length) continue;
+    const next = [...picked, { node, count: 1 }];
+    if (fits(build(next))) picked = next;
+  }
+  if (!picked.length) return null;
+  for (let grew = true; grew;) {
+    grew = false;
+    for (let index = 0; index < picked.length; index++) {
+      const entry = picked[index];
+      if (entry.count >= entry.node.urls.length) continue;
+      const next = picked.map((item, at) => (at === index ? { ...item, count: item.count + 1 } : item));
+      if (fits(build(next))) {
+        picked = next;
+        grew = true;
+      }
+    }
+  }
+  return { text: build(picked), trimmed: true };
 }
 
 /** Parses an invite (its JSON, as a QR code or link carries it). */

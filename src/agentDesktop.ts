@@ -449,6 +449,12 @@ export type DesktopComputerActionEvent = {
   app?: string;
   windowTitle?: string;
   path?: ComputerActResult['path'];
+  /**
+   * Where the action landed, as fractions of the display the live view
+   * shows (0 at its top-left, 1 at its bottom-right). Absent when the action
+   * has no point or it lies on another display.
+   */
+  point?: { x: number; y: number };
   error?: ExecutorFailure;
   shotId?: string;
   deviceId: string;

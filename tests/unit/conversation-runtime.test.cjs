@@ -998,6 +998,15 @@ test('background tasks keep the turn open until the model resumes or the turn en
   assert.deepEqual(apply(done, lost).state.backgroundTasks, []);
   // Any other ending drops the tasks with the turn.
   assert.deepEqual(apply(waiting, event(4, 'turn.failed', { turnId: 't' })).state.backgroundTasks, []);
+
+  // One of two tasks finishes: the provider's follow-up turn re-announces the
+  // other before it completes, so the conversation keeps waiting on it.
+  const followUp = apply(done, notified(5, 'a'),
+    event(6, 'turn.started', { turnId: 'u', trigger: 'provider', triggerDetail: { kind: 'background_task', taskIds: ['a'] } }),
+    event(7, 'message.delta', { text: 'a passed.', turnId: 'u' }), pending(8, ['b']),
+    event(9, 'turn.completed', { turnId: 'u' })).state;
+  assert.deepEqual(followUp.backgroundTasks, [{ taskId: 'b' }]);
+  assert.equal(followUp.activeTurnId, '');
 });
 
 test('background tasks older than the provider hold are no longer awaited', () => {

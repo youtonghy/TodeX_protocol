@@ -750,8 +750,21 @@ export type ProviderTurnTrigger = 'background_task' | 'wakeup' | 'cron' | 'goal'
  * switched to implement with the prompt's `afterPlan` model (smart work mode).
  * `plan_reentered`: Claude Code entered Plan mode on its own during an
  * implement turn and switched to the prompt's `replan` model (smart work mode). */
-export type ProviderNotice = 'auto_mode_unavailable' | 'background_tasks_ended' | 'bypass_mode_disabled' | 'context_lost' | 'plan_handoff' | 'plan_reentered';
-const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable', 'background_tasks_ended', 'bypass_mode_disabled', 'context_lost', 'plan_handoff', 'plan_reentered']);
+/** `provider_warning`: the agent reported a warning, e.g. Codex ignoring a
+ * setting in its config file (the subtitle is its own text).
+ * `auto_review`: the agent's own automatic approval review (Codex's
+ * `auto_review` reviewer) decided an action, or asked for a person. */
+export type ProviderNotice = 'auto_mode_unavailable' | 'auto_review' | 'background_tasks_ended' | 'bypass_mode_disabled' | 'context_lost' | 'plan_handoff' | 'plan_reentered' | 'provider_warning';
+const PROVIDER_NOTICES = new Set<string>(['auto_mode_unavailable', 'auto_review', 'background_tasks_ended', 'bypass_mode_disabled', 'context_lost', 'plan_handoff', 'plan_reentered', 'provider_warning']);
+/** Notices the agent can send several times in one turn: one row each. */
+const REPEATABLE_PROVIDER_NOTICES = new Set<string>(['auto_review', 'provider_warning']);
+/** `provider_warning`'s `metadata.kind`. */
+export type ProviderWarningKind = 'config' | 'deprecation' | 'warning' | 'guardian';
+const PROVIDER_WARNING_KINDS = new Set<string>(['config', 'deprecation', 'warning', 'guardian']);
+/** `auto_review`'s `metadata.status`: the review's outcome, or
+ * `strictReviewRequired` when it handed the decision to a person. */
+export type AutoReviewStatus = 'approved' | 'denied' | 'timedOut' | 'aborted' | 'strictReviewRequired';
+const AUTO_REVIEW_STATUSES = new Set<string>(['approved', 'denied', 'timedOut', 'aborted', 'strictReviewRequired']);
 
 const PROVIDER_TURN_TRIGGERS: ReadonlySet<string> = new Set(['background_task', 'wakeup', 'cron', 'goal']);
 
@@ -812,6 +825,13 @@ export type TimelineEntry = {
   /** `plan_handoff`: `next_turn` when the switch applies from the next
    * message instead of the running turn (`metadata.applied`). */
   providerNoticeApplied?: 'now' | 'next_turn';
+  /** `provider_warning`: what kind of warning it is (`metadata.kind`). */
+  providerNoticeWarningKind?: ProviderWarningKind;
+  /** `auto_review`: the review's outcome (`metadata.status`). */
+  providerNoticeReviewStatus?: AutoReviewStatus;
+  /** Extra text under the notice: a warning's details or config file, an
+   * auto-review's rationale. */
+  providerNoticeDetail?: string;
   /** A plan review (`permission.requested` with a plan, e.g. Claude's
    * `ExitPlanMode`): the plan text. The row stands on its own instead of
    * folding into the work steps, so the plan stays readable after it is
@@ -1258,9 +1278,16 @@ export function classifyV2ConversationEvent(
     const settingsSource = readString(metadata, ['settingsSource']);
     const model = providerMethod === 'plan_handoff' || providerMethod === 'plan_reentered' ? readString(metadata, ['model']) : '';
     const applied = providerMethod === 'plan_handoff' ? readString(metadata, ['applied']) : '';
+    const warningKind = providerMethod === 'provider_warning' ? readString(metadata, ['kind']) : '';
+    const reviewStatus = providerMethod === 'auto_review' ? readString(metadata, ['status']) : '';
+    if (providerMethod === 'auto_review' && !AUTO_REVIEW_STATUSES.has(reviewStatus)) return null;
+    const detail = providerMethod === 'provider_warning'
+      ? [readString(metadata, ['details']), readString(metadata, ['path'])].filter(Boolean).join(' · ')
+      : providerMethod === 'auto_review' ? readString(metadata, ['rationale']) : '';
+    const repeatable = REPEATABLE_PROVIDER_NOTICES.has(providerMethod);
     return {
       ...base,
-      id: `v2-provider-notice-${conversationId}-${providerMethod}-${turnId || eventId}`,
+      id: `v2-provider-notice-${conversationId}-${providerMethod}-${repeatable ? eventId : turnId || eventId}`,
       kind: 'system',
       title: type,
       subtitle: previewText(readString(metadata, ['reason'])),
@@ -1269,6 +1296,11 @@ export function classifyV2ConversationEvent(
       ...(settingsSource ? { providerNoticeSettingsSource: settingsSource } : {}),
       ...(model ? { providerNoticeModel: model } : {}),
       ...(applied === 'now' || applied === 'next_turn' ? { providerNoticeApplied: applied } : {}),
+      ...(providerMethod === 'provider_warning'
+        ? { providerNoticeWarningKind: (PROVIDER_WARNING_KINDS.has(warningKind) ? warningKind : 'warning') as ProviderWarningKind }
+        : {}),
+      ...(reviewStatus ? { providerNoticeReviewStatus: reviewStatus as AutoReviewStatus } : {}),
+      ...(detail ? { providerNoticeDetail: previewText(detail) } : {}),
     };
   }
 

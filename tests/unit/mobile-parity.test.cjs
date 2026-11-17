@@ -753,3 +753,38 @@ test('a plan review stands on its own row with the plan text', () => {
   assert.equal(todex.permissionPlanText(request({ kind: 'plan', details: { plan: '  ' } })), undefined);
   assert.equal(todex.permissionPlanText(request({ kind: 'tool', details: { tool_name: 'Read', input: { plan: 'p' } } })), undefined);
 });
+
+test('Codex warnings and auto-review outcomes show one notice per event', () => {
+  const notice = (sequence, providerMethod, metadata) => event({
+    eventId: `evt-${sequence}`, sequence, type: 'provider.event',
+    payload: { turnId: 'turn-1', provider: 'codex', providerMethod, metadata },
+  });
+  const warning = parity.classifyV2ConversationEvent(notice(1, 'provider_warning', {
+    kind: 'config', reason: '`mcp_servers.x.type` is ignored.', path: '/home/u/.codex/config.toml',
+  }), 'ws');
+  assert.equal(warning.kind, 'system');
+  assert.equal(warning.providerNotice, 'provider_warning');
+  assert.equal(warning.providerNoticeWarningKind, 'config');
+  assert.equal(warning.subtitle, '`mcp_servers.x.type` is ignored.');
+  assert.equal(warning.providerNoticeDetail, '/home/u/.codex/config.toml');
+  const unknownKind = parity.classifyV2ConversationEvent(notice(2, 'provider_warning', { kind: 'new', reason: 'x' }), 'ws');
+  assert.equal(unknownKind.providerNoticeWarningKind, 'warning');
+
+  const denied = parity.classifyV2ConversationEvent(notice(3, 'auto_review', {
+    status: 'denied', reason: 'rm -rf build', riskLevel: 'high', rationale: 'deletes files',
+  }), 'ws');
+  assert.equal(denied.providerNotice, 'auto_review');
+  assert.equal(denied.providerNoticeReviewStatus, 'denied');
+  assert.equal(denied.subtitle, 'rm -rf build');
+  assert.equal(denied.providerNoticeDetail, 'deletes files');
+  assert.equal(parity.classifyV2ConversationEvent(notice(4, 'auto_review', { status: 'inProgress' }), 'ws'), null);
+
+  // Several reviews (and warnings) in one turn each keep their row.
+  const timeline = parity.reduceConversationEvents([
+    notice(5, 'auto_review', { status: 'approved', reason: 'ls' }),
+    notice(6, 'auto_review', { status: 'approved', reason: 'pwd' }),
+    notice(7, 'provider_warning', { kind: 'warning', reason: 'a' }),
+    notice(8, 'provider_warning', { kind: 'warning', reason: 'b' }),
+  ], 'ws').timeline;
+  assert.equal(timeline.length, 4);
+});

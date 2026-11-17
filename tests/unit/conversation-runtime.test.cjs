@@ -1056,6 +1056,34 @@ test('a tool row keeps the time of its first event while later updates advance a
   assert.equal(hydrated.firstAt, Date.parse(at(5)));
 });
 
+test('plan.updated keeps the latest plan of the current turn out of the timeline', () => {
+  let update = apply(empty(), event(1, 'turn.started', { turnId: 't1' }),
+    event(2, 'plan.updated', { provider: 'codex', turnId: 't1', explanation: ' Fix it ', steps: [
+      { text: 'Read', status: 'completed' }, { text: 'Patch', status: 'in_progress' }, { text: '', status: 'pending' }, { text: 'Test', status: 'weird' }] }));
+  assert.deepEqual(update.state.plan, { turnId: 't1', explanation: 'Fix it', updatedAt: '2026-09-06T00:00:00.000Z', steps: [
+    { text: 'Read', status: 'completed' }, { text: 'Patch', status: 'in_progress' }, { text: 'Test', status: 'pending' }] });
+  assert.equal(update.state.timeline.length, 0);
+  update = apply(update.state, event(3, 'plan.updated', { provider: 'claude-code', turnId: 't1', steps: [{ text: 'Read', status: 'completed' }] }));
+  assert.deepEqual(update.state.plan.steps, [{ text: 'Read', status: 'completed' }]);
+  assert.equal(update.state.plan.explanation, undefined);
+  // The plan outlives its turn until another turn starts.
+  update = apply(update.state, event(4, 'turn.completed', { turnId: 't1' }));
+  assert.equal(update.state.plan.turnId, 't1');
+  update = apply(update.state, event(5, 'turn.started', { turnId: 't2' }));
+  assert.equal(update.state.plan, null);
+  update = apply(update.state, event(6, 'plan.updated', { turnId: 't2', steps: [] }));
+  assert.equal(update.state.plan, null);
+});
+
+test('plan.updated from older backends reads the raw Codex and ACP plan', () => {
+  let state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'plan.updated', { provider: 'codex', plan: [{ step: 'One', status: 'inProgress' }, { step: 'Two', status: 'pending' }] })).state;
+  assert.deepEqual(state.plan.steps, [{ text: 'One', status: 'in_progress' }, { text: 'Two', status: 'pending' }]);
+  assert.equal(state.plan.turnId, 't');
+  state = apply(state, event(3, 'plan.updated', { provider: 'opencode', plan: { sessionUpdate: 'plan', entries: [{ content: 'Scan', status: 'completed', priority: 'high' }] } })).state;
+  assert.deepEqual(state.plan.steps, [{ text: 'Scan', status: 'completed' }]);
+});
+
 test('goal.updated sets and clears the conversation goal', () => {
   let update = apply(empty(), event(1, 'goal.updated', { provider: 'codex', goal: { objective: 'ship it', status: 'active', tokensUsed: 12, timeUsedSeconds: 3, tokenBudget: null } }));
   assert.deepEqual(update.state.goal, { objective: 'ship it', status: 'active', tokensUsed: 12, timeUsedSeconds: 3, tokenBudget: null, updatedAt: '2026-09-06T00:00:00.000Z' });

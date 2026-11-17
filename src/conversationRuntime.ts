@@ -28,6 +28,12 @@ export type RuntimeCompaction = ContextCompactionState & { recommended: boolean 
  * `thread/goal/*`). `status`: active, paused, blocked, usageLimited,
  * budgetLimited or complete. */
 export type RuntimeGoal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number; tokenBudget: number | null; updatedAt: string };
+/** One step of the agent's working plan; `status` is normalized. */
+export type RuntimePlanStep = { text: string; status: 'pending' | 'in_progress' | 'completed' };
+/** The agent's latest working plan for the current turn (`plan.updated`:
+ * Codex `turn/plan/updated`, ACP `plan`, Claude Code `TodoWrite`). Each update
+ * is a full snapshot; a new turn clears it. Never part of the timeline. */
+export type RuntimePlan = { turnId: string; explanation?: string; steps: RuntimePlanStep[]; updatedAt: string };
 export type NativeQueueItem = { id: string; text: string; status: string };
 /** One prompt waiting in the daemon's follow-up queue (`followups.updated`). */
 export type FollowUpQueueItem = { id: string; text: string; status: string; queuedAt: string; contentCount: number; skills: string[] };
@@ -105,6 +111,8 @@ export type ConversationRuntime = {
   compaction: RuntimeCompaction;
   /** `null` when none is set, or none was seen in the loaded history. */
   goal: RuntimeGoal | null;
+  /** The current turn's latest plan; `null` when none was reported. */
+  plan: RuntimePlan | null;
   memoryEntries: MemoryEntry[];
   pendingPermissions: RuntimePermission[];
   extensionUi: ExtensionUiState;
@@ -159,7 +167,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
   return {
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
-    subagents: [], agentCalls: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, goal: null, memoryEntries: [],
+    subagents: [], agentCalls: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, goal: null, plan: null, memoryEntries: [],
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false, followUps: EMPTY_FOLLOW_UP_QUEUE,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
@@ -246,6 +254,30 @@ function usageProjection(state: ConversationRuntime, event: ConversationEvent, t
 }
 
 const MODEL_ACTIVITY_EVENT = /^(?:message|assistant|reasoning|tool|permission|turn)\./;
+function planStepStatus(value: unknown): RuntimePlanStep['status'] {
+  return value === 'completed' ? 'completed' : value === 'in_progress' || value === 'inProgress' ? 'in_progress' : 'pending';
+}
+/** Steps from a normalized `plan.updated` (`steps`), or from the raw `plan`
+ * older backends sent (Codex `[{ step, status }]`, ACP `{ entries }`). */
+function planSteps(payload: RecordValue): RuntimePlanStep[] {
+  const raw = Array.isArray(payload.steps) ? payload.steps
+    : Array.isArray(payload.plan) ? payload.plan : object(payload.plan).entries;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap(item => {
+    const step = object(item);
+    const text = string(step.text ?? step.step ?? step.content).trim();
+    return text ? [{ text, status: planStepStatus(step.status) }] : [];
+  });
+}
+function projectPlan(state: ConversationRuntime, type: string, payload: RecordValue, turnId: string, time: string): void {
+  if (type === 'turn.started') {
+    if (state.plan && state.plan.turnId !== turnId) state.plan = null;
+  } else if (type === 'plan.updated') {
+    const steps = planSteps(payload);
+    const explanation = string(payload.explanation).trim();
+    state.plan = steps.length > 0 ? { turnId, ...(explanation ? { explanation } : {}), steps, updatedAt: time } : null;
+  }
+}
 function projectBackgroundTasks(state: ConversationRuntime, type: string, payload: RecordValue): void {
   if (type === 'provider.event') {
     const metadata = object(payload.metadata);
@@ -709,6 +741,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
     }
   }
   projectBackgroundTasks(state, type, payload);
+  projectPlan(state, type, payload, turnId, event.time);
   usageProjection(state, event, turnId);
   if (type.startsWith('compaction.')) {
     const phase = type.slice('compaction.'.length);

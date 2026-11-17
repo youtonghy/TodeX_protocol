@@ -32,11 +32,11 @@ const SUMMARY_MAX_CHARS = 160;
 const DETAIL_MAX_CHARS = 8000;
 /** Argument keys that best identify a call, in priority order. Antigravity
  * (agy) names its arguments in PascalCase (`run_command` sends
- * `CommandLine`, file tools `TargetFile`/`AbsolutePath`). */
+ * `CommandLine`, file tools `Path`/`TargetFile`/`AbsolutePath`). */
 const SUMMARY_KEYS = [
   'command', 'cmd', 'CommandLine',
   'file_path', 'filePath', 'TargetFile', 'AbsolutePath',
-  'path', 'notebook_path', 'DirectoryPath', 'SearchPath', 'SearchDirectory',
+  'path', 'Path', 'notebook_path', 'DirectoryPath', 'SearchPath', 'SearchDirectory',
   'pattern', 'Pattern', 'query', 'Query', 'url', 'Url',
   'description', 'prompt',
 ];

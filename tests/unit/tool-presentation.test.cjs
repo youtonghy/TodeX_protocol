@@ -39,10 +39,14 @@ test('claude tool_use blocks read the nested tool record', () => {
 });
 
 test('antigravity snapshots read its PascalCase arguments', () => {
-  const command = describe({ provider: 'antigravity', toolCallId: 'step-2', toolName: 'run_command', arguments: { CommandLine: 'git status --short', Cwd: '/repo' }, result: 'M a.ts', isError: false });
+  const command = describe({ provider: 'antigravity', toolCallId: 'call_3737294271069237793', toolName: 'run_command', arguments: { CommandLine: 'git status --short', WaitMsBeforeAsync: 5000 }, result: { output: 'M a.ts', exit_code: 0 }, status: 'completed', isError: false });
   assert.equal(command.name, 'run_command');
   assert.equal(command.summary, 'git status --short');
   assert.equal(command.status, 'completed');
+
+  const write = describe({ provider: 'antigravity', toolCallId: 'call_1', toolName: 'write_file', arguments: { Content: 'hi', Path: '/repo/hello.txt' }, status: 'failed', isError: true });
+  assert.equal(write.summary, '/repo/hello.txt');
+  assert.equal(write.status, 'failed');
 
   assert.equal(describe({ toolName: 'view_file', arguments: { AbsolutePath: '/repo/a.ts' } }).summary, '/repo/a.ts');
   assert.equal(describe({ toolName: 'write_to_file', arguments: { TargetFile: '/repo/b.ts', CodeContent: 'x' } }).summary, '/repo/b.ts');

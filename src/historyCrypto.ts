@@ -100,16 +100,23 @@ export function wrapHistoryKey(key: HistorySegmentKey, recipientPublicKey: Uint8
   }
 }
 
-/** Device-side unwrap with the recipient's 32-byte X-Wing seed. */
+/**
+ * Device-side unwrap with the recipient's 32-byte X-Wing seed.
+ * `recipientId` is the seed's rid when the caller already holds it: deriving
+ * it takes a full X-Wing key generation, which costs about as much as the
+ * decapsulation itself in plain JavaScript (a phone unwraps one key per
+ * conversation title).
+ */
 export function unwrapHistoryKey(
   secretKey: Uint8Array,
   wrapped: HistoryWrappedKey,
   kid: Uint8Array,
+  recipientId?: Uint8Array,
 ): HistorySegmentKey {
   requireLength(kid, HISTORY_KID_LENGTH, '历史记录密钥编号长度无效');
   requireWrappedKey(wrapped);
-  const { publicKey } = historyRecipientKeyPairFromSeed(secretKey);
-  const rid = historyRecipientId(publicKey);
+  if (recipientId) requireLength(recipientId, HISTORY_RECIPIENT_ID_LENGTH, '历史记录接收方编号长度无效');
+  const rid = recipientId ?? historyRecipientId(historyRecipientKeyPairFromSeed(secretKey).publicKey);
   if (!equalBytes(rid, wrapped.rid)) {
     throw new Error('历史记录密钥不属于当前设备');
   }

@@ -625,7 +625,7 @@ export class HistoryDecryptor {
         const batch = remaining.slice(offset, offset + HISTORY_BATCH_LIMIT);
         const wraps = await this.fetchWraps({ conversationId: scope, kids: batch, rid });
         for (const kid of batch) {
-          const key = wraps[kid] ? unwrapWith(seed, wraps[kid], kid) : null;
+          const key = wraps[kid] ? unwrapWith(seed, wraps[kid], kid, rid) : null;
           if (key) this.remember(scope, kid, { key });
           else unresolved.push(kid);
         }
@@ -656,9 +656,10 @@ function isKidText(kid: string): boolean {
   }
 }
 
-function unwrapWith(seed: Uint8Array, wrapped: HistoryWrappedKeyJson, kid: string): HistorySegmentKey | null {
+/** `rid`: the seed's recipient id (base64url), known to every caller. */
+function unwrapWith(seed: Uint8Array, wrapped: HistoryWrappedKeyJson, kid: string, rid: string): HistorySegmentKey | null {
   try {
-    return unwrapHistoryKey(seed, decodeHistoryWrappedKey(wrapped), decodeBase64UrlBytes(kid));
+    return unwrapHistoryKey(seed, decodeHistoryWrappedKey(wrapped), decodeBase64UrlBytes(kid), decodeBase64UrlBytes(rid));
   } catch {
     return null;
   }
@@ -777,7 +778,7 @@ export async function rewrapHistoryKeys(options: HistoryRewrapOptions): Promise<
         checkAbort();
         const wraps = parseWraps(await options.send(historyCommands.wraps(conversationId, kids, sourceRid)));
         for (const kid of kids) {
-          const key = wraps[kid] ? unwrapWith(source.secretKey, wraps[kid], kid) : null;
+          const key = wraps[kid] ? unwrapWith(source.secretKey, wraps[kid], kid, sourceRid) : null;
           if (!key) { progress.skipped++; continue; }
           try {
             rewrapped.push({ conversationId, kid, wrapped: encodeHistoryWrappedKey(wrapHistoryKey(key, options.targetPublicKey)) });

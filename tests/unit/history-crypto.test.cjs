@@ -110,3 +110,12 @@ test('inputs are validated', () => {
   assert.throws(() => wrapHistoryKey(key, new Uint8Array(1216).fill(255)), /公钥无效/);
   assert.throws(() => decodeHistoryWrappedKey({ rid: 'AA', kemCt: 'AA', wrapped: 'AA' }), /格式无效/);
 });
+
+test('a known recipient id skips deriving it and unwraps the same key; a wrong one is refused', () => {
+  const wrapped = decodeHistoryWrappedKey(vector.wrap.json);
+  const key = unwrapHistoryKey(hex(vector.seed), wrapped, hex(vector.kid), hex(vector.rid));
+  assert.equal(toHex(key.dek), vector.dek);
+  const other = historyRecipientId(generateHistoryRecipientKeyPair().publicKey);
+  assert.throws(() => unwrapHistoryKey(hex(vector.seed), wrapped, hex(vector.kid), other));
+  assert.throws(() => unwrapHistoryKey(hex(vector.seed), wrapped, hex(vector.kid), new Uint8Array(3)));
+});

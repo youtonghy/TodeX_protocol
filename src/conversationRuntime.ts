@@ -31,8 +31,10 @@ export type RuntimeGoal = { objective: string; status: string; tokensUsed: numbe
 /** One step of the agent's working plan; `status` is normalized. */
 export type RuntimePlanStep = { text: string; status: 'pending' | 'in_progress' | 'completed' };
 /** The agent's latest working plan for the current turn (`plan.updated`:
- * Codex `turn/plan/updated`, ACP `plan`, Claude Code `TodoWrite`). Each update
- * is a full snapshot; a new turn clears it. Never part of the timeline. */
+ * Codex `turn/plan/updated`, ACP `plan`, Claude Code `TodoWrite`, Pi's
+ * `@tintinweb/pi-tasks` task tools). Each update is a full snapshot; a new
+ * turn clears it, and Pi re-reports tasks still open when its next turn
+ * starts. Never part of the timeline. */
 export type RuntimePlan = { turnId: string; explanation?: string; steps: RuntimePlanStep[]; updatedAt: string };
 export type NativeQueueItem = { id: string; text: string; status: string };
 /** One prompt waiting in the daemon's follow-up queue (`followups.updated`). */

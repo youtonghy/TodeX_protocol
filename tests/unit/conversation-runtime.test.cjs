@@ -1075,6 +1075,20 @@ test('plan.updated keeps the latest plan of the current turn out of the timeline
   assert.equal(update.state.plan, null);
 });
 
+test('Pi tasks still open carry into the next turn through its re-reported plan', () => {
+  const steps = [{ text: 'Start the server', status: 'in_progress' }, { text: 'Run the matrix', status: 'pending' }];
+  let update = apply(empty(), event(1, 'turn.started', { turnId: 't1' }),
+    event(2, 'plan.updated', { provider: 'pi', turnId: 't1', steps, plan: [] }),
+    event(3, 'turn.completed', { turnId: 't1' }),
+    event(4, 'turn.started', { turnId: 't2' }),
+    event(5, 'plan.updated', { provider: 'pi', turnId: 't2', steps, plan: [] }));
+  assert.equal(update.state.plan.turnId, 't2');
+  assert.deepEqual(update.state.plan.steps, steps);
+  // A finished list is not re-reported, so the next turn shows none.
+  update = apply(update.state, event(6, 'turn.completed', { turnId: 't2' }), event(7, 'turn.started', { turnId: 't3' }));
+  assert.equal(update.state.plan, null);
+});
+
 test('plan.updated from older backends reads the raw Codex and ACP plan', () => {
   let state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'plan.updated', { provider: 'codex', plan: [{ step: 'One', status: 'inProgress' }, { step: 'Two', status: 'pending' }] })).state;

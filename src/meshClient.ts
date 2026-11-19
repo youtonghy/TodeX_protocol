@@ -32,7 +32,51 @@ export type StoredMeshGroup = {
   /** This device's member id. */
   deviceId: string;
   joinedAt: number;
+  /** Set while this device leaves (or, as the last device, dissolves) the
+   * group: the final roster is signed and stored in `chain`, but not every
+   * node has confirmed it yet. The record, and the node profiles, stay so
+   * the roster is pushed again whenever a node reconnects; the group is
+   * forgotten once the leave is delivered (`leaveDelivered`). */
+  leaving?: MeshLeave;
 };
+
+export type MeshLeave = {
+  at: number;
+  /** Nodes of the roster this device left. */
+  nodeCount: number;
+  /** Nodes that have not confirmed the final roster. */
+  pendingNodes: string[];
+  /** Names of the roster's nodes, for showing the pending ones (a
+   * dissolved roster no longer lists them). */
+  nodeNames: Record<string, string>;
+  /** Other devices stay in the group: one node holding the roster is
+   * enough, as they carry it to the rest. Otherwise (dissolving) every
+   * node must confirm. */
+  othersCarry: boolean;
+};
+
+/** The leave after the final roster went out to the roster's `nodes`, of
+ * which `confirmed` accepted it. */
+export function startLeave(nodes: ReadonlyArray<{ id: string; name: string }>, othersCarry: boolean, confirmed: ReadonlySet<string>, at = Date.now()): MeshLeave {
+  return {
+    at,
+    othersCarry,
+    nodeCount: nodes.length,
+    pendingNodes: nodes.filter((node) => !confirmed.has(node.id)).map((node) => node.id),
+    nodeNames: Object.fromEntries(nodes.map((node) => [node.id, node.name])),
+  };
+}
+
+/** `leave` once node `nodeId` confirmed the final roster. */
+export function confirmLeave(leave: MeshLeave, nodeId: string): MeshLeave {
+  return { ...leave, pendingNodes: leave.pendingNodes.filter((id) => id !== nodeId) };
+}
+
+/** Whether a leave reached enough nodes for this device to forget the
+ * group: every node, or (other devices remain) any one of them. */
+export function leaveDelivered(leave: MeshLeave): boolean {
+  return leave.pendingNodes.length === 0 || (leave.othersCarry && leave.pendingNodes.length < leave.nodeCount);
+}
 
 export function normalizeStoredMeshGroups(value: unknown): StoredMeshGroup[] {
   if (!Array.isArray(value)) return [];
@@ -49,8 +93,17 @@ export function normalizeStoredMeshGroups(value: unknown): StoredMeshGroup[] {
         : {},
       deviceId: item.deviceId,
       joinedAt: typeof item.joinedAt === 'number' ? item.joinedAt : Date.now(),
+      ...(isLeave(item.leaving) ? { leaving: item.leaving } : {}),
     }];
   });
+}
+
+function isLeave(value: unknown): value is MeshLeave {
+  const leave = value as MeshLeave | null | undefined;
+  return Boolean(leave) && typeof leave!.at === 'number' && typeof leave!.othersCarry === 'boolean' && typeof leave!.nodeCount === 'number'
+    && Array.isArray(leave!.pendingNodes) && leave!.pendingNodes.every((id) => typeof id === 'string')
+    && Boolean(leave!.nodeNames) && typeof leave!.nodeNames === 'object'
+    && Object.values(leave!.nodeNames).every((name) => typeof name === 'string');
 }
 
 function isDoc(value: unknown): value is MeshSignedDoc {

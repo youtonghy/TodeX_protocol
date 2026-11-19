@@ -69,3 +69,26 @@ test('addresses: what worked, pinned, beacons, announced; never a relay address'
   assert.deepEqual(client.rememberUrl(g, node.id, 'http://10.0.0.9:7345').nodeUrls[node.id], ['http://10.0.0.9:7345', 'http://192.168.1.5:7345']);
   assert.deepEqual(client.normalizeStoredMeshGroups([null, { groupId: 1 }, g]).length, 1);
 });
+
+test('a leave is delivered once every node, or with other devices any node, confirms it', () => {
+  const nodes = [{ id: 'n1', name: 'nas' }, { id: 'n2', name: 'mini' }];
+  const dissolve = client.startLeave(nodes, false, new Set(['n1']), 7);
+  assert.deepEqual(dissolve, { at: 7, othersCarry: false, nodeCount: 2, pendingNodes: ['n2'], nodeNames: { n1: 'nas', n2: 'mini' } });
+  assert.equal(client.leaveDelivered(dissolve), false);
+  assert.equal(client.leaveDelivered(client.confirmLeave(dissolve, 'n2')), true);
+  // Other devices carry the roster on: one node is enough.
+  const leave = client.startLeave(nodes, true, new Set(), 7);
+  assert.equal(client.leaveDelivered(leave), false);
+  assert.equal(client.leaveDelivered(client.confirmLeave(leave, 'n2')), true);
+  // A group without nodes has nothing to deliver.
+  assert.equal(client.leaveDelivered(client.startLeave([], false, new Set())), true);
+});
+
+test('a stored leave survives a reload and a malformed one is dropped', () => {
+  const { withNode, self } = group();
+  const leaving = { at: 3, othersCarry: false, nodeCount: 1, pendingNodes: ['n'], nodeNames: { n: 'nas' } };
+  const [kept] = client.normalizeStoredMeshGroups([stored(withNode, self.id, { leaving })]);
+  assert.deepEqual(kept.leaving, leaving);
+  const [dropped] = client.normalizeStoredMeshGroups([stored(withNode, self.id, { leaving: { at: 'x' } })]);
+  assert.equal('leaving' in dropped, false);
+});

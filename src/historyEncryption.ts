@@ -739,6 +739,9 @@ export type HistoryRewrapOptions = {
   sourceSeed: Uint8Array;
   /** Recipient that receives the new wraps. */
   targetPublicKey: Uint8Array;
+  /** The rid the caller expects `targetPublicKey` to have (a grant's `rid`).
+   * A mismatch aborts before anything is unwrapped or sent. */
+  expectedTargetRid?: string;
   /** Omitted for the recovery self-grant; with it the last batch is sent
    * with `complete: true`. */
   grantId?: string;
@@ -759,6 +762,10 @@ export async function rewrapHistoryKeys(options: HistoryRewrapOptions): Promise<
   const source = historyRecipientKeyPairFromSeed(options.sourceSeed);
   const sourceRid = encodeBase64Url(historyRecipientId(source.publicKey));
   const targetRid = encodeBase64Url(historyRecipientId(options.targetPublicKey));
+  if (options.expectedTargetRid !== undefined && options.expectedTargetRid !== targetRid) {
+    source.secretKey.fill(0);
+    throw new Error('历史记录接收方公钥与编号不一致');
+  }
   const progress: HistoryRewrapProgress = { processed: 0, added: 0, skipped: 0, ...(options.cursor ? { cursor: options.cursor } : {}) };
   const checkAbort = () => {
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');

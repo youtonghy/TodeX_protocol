@@ -63,6 +63,9 @@ export function generateHistoryRecipientKeyPair(): HistoryRecipientKeyPair {
 
 export function historyRecipientKeyPairFromSeed(seed: Uint8Array): HistoryRecipientKeyPair {
   requireLength(seed, HISTORY_SECRET_KEY_LENGTH, '历史记录私钥长度无效');
+  // An all-zero seed is what a zeroed (wiped) key buffer looks like; its key
+  // pair is public knowledge, so never derive or register one from it.
+  if (seed.every((byte) => byte === 0)) throw new Error('历史记录私钥无效');
   const { publicKey } = ml_kem768_x25519.keygen(seed);
   return { secretKey: Uint8Array.from(seed), publicKey };
 }

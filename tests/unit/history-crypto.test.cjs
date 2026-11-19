@@ -37,6 +37,10 @@ test('the backend vector derives the same public key and recipient id', () => {
   assert.equal(Buffer.from(historyRecipientId(publicKey)).toString('base64url'), vector.ridText);
 });
 
+test('an all-zero (wiped) seed never yields a key pair', () => {
+  assert.throws(() => historyRecipientKeyPairFromSeed(new Uint8Array(32)), /私钥无效/);
+});
+
 test('the backend vector wrapped key unwraps to the DEK and re-encodes identically', () => {
   const wrapped = decodeHistoryWrappedKey(vector.wrap.json);
   assert.equal(toHex(wrapped.kemCt), vector.wrap.kemCt);

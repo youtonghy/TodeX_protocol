@@ -371,6 +371,13 @@ test('grant re-wrap walks keys.list pages, re-wraps for the target and resumes f
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(rewrapHistoryKeys({ send, sourceSeed: source.secretKey, targetPublicKey: target.publicKey, signal: controller.signal }), /Abort/);
+
+  // A target key that does not hash to the grant's rid is refused up front.
+  sent.length = 0;
+  await assert.rejects(rewrapHistoryKeys({ send, sourceSeed: source.secretKey, targetPublicKey: target.publicKey, grantId: 'grt_1', expectedTargetRid: sourceRid }), /不一致/);
+  assert.deepEqual(sent, []);
+  const matched = await rewrapHistoryKeys({ send, sourceSeed: source.secretKey, targetPublicKey: target.publicKey, grantId: 'grt_1', expectedTargetRid: targetRid });
+  assert.equal(matched.processed, 3);
 });
 
 test('historyWrapsFetcher speaks history.keys.wraps', async () => {

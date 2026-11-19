@@ -723,7 +723,9 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
     timeline.set(next);
     if (next.supersedes?.length) timeline.dropSuperseded();
   }
-  if (type === 'permission.requested' || type === 'tool.awaitingApproval') {
+  // An envelope whose content failed authentication (`detailCorrupt`) is
+  // not trusted to ask for anything.
+  if ((type === 'permission.requested' || type === 'tool.awaitingApproval') && payload.detailCorrupt !== true) {
     const id = string(payload.permissionId ?? payload.requestId);
     const scope = permissionScope(payload);
     if (id) state.pendingPermissions = [...state.pendingPermissions.filter(item => item.id !== id),
@@ -976,7 +978,7 @@ export function hydrateConversationRuntimeEvents(
 
 /** Row fields that describe how a projection built the row rather than what
  * it shows; an older projection must not copy them onto a newer row. */
-const PROJECTION_FLAGS: ReadonlySet<string> = new Set(['detailStub', 'detailLocked', 'streamedText']);
+const PROJECTION_FLAGS: ReadonlySet<string> = new Set(['detailStub', 'detailLocked', 'detailCorrupt', 'streamedText']);
 
 /** Merge a row projected from an earlier history page into the loaded row of
  * the same id. Streamed text continues the earlier text; any other newer row

@@ -367,7 +367,7 @@ export class HistoryDecryptor {
    * message referring to it and each message is decrypted on its own, so
    * without this a ~1 MiB frame is opened and inflated once per event. Reused
    * only for a byte-identical frame under the same conversation. */
-  private recentFrames: { scope: string; frame: HistoryFrame; items: Promise<unknown[] | null> }[] = [];
+  private recentFrames: { scope: string; frame: HistoryFrame; items: Promise<unknown[] | FrameFailure> }[] = [];
 
   constructor(options: HistoryDecryptorOptions) {
     this.fetchWraps = options.fetchWraps;
@@ -467,7 +467,7 @@ export class HistoryDecryptor {
   }
 
   private async openEvents<E extends HistoryWireEvent>(events: readonly E[], options: { frames?: HistoryFrames; detail: HistoryDetail; conversationId?: string }): Promise<E[]> {
-    const opened = new Map<string, Promise<unknown[] | null>>();
+    const opened = new Map<string, Promise<unknown[] | FrameFailure>>();
     const frames = options.frames ?? {};
     return Promise.all(events.map(async (event) => {
       const payload = record(event.payload);
@@ -478,11 +478,13 @@ export class HistoryDecryptor {
       if (!frameRef) return this.withPayload(event, payload, this.openEventLevel(scope, enc, options.detail));
       const frameId = pickFrame(frameRef, frames, options.detail);
       const index = frameRef.i;
-      if (!frameId || typeof index !== 'number' || !Number.isInteger(index) || index < 0) return this.withPayload(event, payload, null);
+      // A frame the page did not carry cannot be read here (not damaged).
+      if (!frameId) return this.withPayload(event, payload, 'locked');
+      if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return this.withPayload(event, payload, 'corrupt');
       let items = opened.get(frameId);
       if (!items) opened.set(frameId, items = this.openFrame(scope, frames[frameId]));
-      const item = (await items)?.[index];
-      return this.withPayload(event, payload, record(item));
+      const result = await items;
+      return this.withPayload(event, payload, Array.isArray(result) ? record(result[index]) ?? 'corrupt' : result);
     }));
   }
 
@@ -495,45 +497,49 @@ export class HistoryDecryptor {
     });
   }
 
-  private openEventLevel(scope: string, enc: Record<string, unknown>, detail: HistoryDetail): Record<string, unknown> | null {
-    if (enc.v !== 1 || typeof enc.kid !== 'string' || typeof enc.c !== 'string' || typeof enc.n !== 'number') return null;
+  private openEventLevel(scope: string, enc: Record<string, unknown>, detail: HistoryDetail): Opened {
+    if (enc.v !== 1 || typeof enc.kid !== 'string' || typeof enc.c !== 'string' || typeof enc.n !== 'number') return 'corrupt';
     const summary = typeof enc.s === 'string' ? enc.s : undefined;
     const full = typeof enc.f === 'string' ? enc.f : undefined;
     // `s` omitted means summary and full are the same stream-2 ciphertext.
     const useFull = full !== undefined && (detail === 'full' || summary === undefined);
     const ciphertext = useFull ? full : summary;
+    if (!ciphertext) return 'corrupt';
     const key = this.cachedKey(scope, enc.kid);
-    if (!ciphertext || !key) return null;
+    if (!key) return 'locked';
     try {
       const plaintext = openHistoryContent(key, enc.c, useFull ? HistoryContentStream.EventFull : HistoryContentStream.EventSummary, enc.n, decodeBase64UrlBytes(ciphertext));
-      return record(JSON.parse(decoder.decode(plaintext)));
+      return record(JSON.parse(decoder.decode(plaintext))) ?? 'corrupt';
     } catch {
-      return null;
+      // The key is here, so the ciphertext failed authentication (or does
+      // not hold a JSON object): it was damaged or forged.
+      return 'corrupt';
     }
   }
 
-  private openFrame(scope: string, frame: HistoryFrame | undefined): Promise<unknown[] | null> {
-    if (!frame) return Promise.resolve(null);
+  private openFrame(scope: string, frame: HistoryFrame | undefined): Promise<unknown[] | FrameFailure> {
+    if (!frame) return Promise.resolve('locked');
     const hit = this.recentFrames.find((entry) => entry.scope === scope && sameFrame(entry.frame, frame));
     if (hit) return hit.items;
     const items = this.openFrameUncached(scope, frame);
     // A frame that could not be opened (key not here yet) is asked again.
     void items.then((opened) => {
-      if (!opened) this.recentFrames = this.recentFrames.filter((entry) => entry.items !== items);
+      if (opened === 'locked') this.recentFrames = this.recentFrames.filter((entry) => entry.items !== items);
     });
     this.recentFrames = [{ scope, frame, items }, ...this.recentFrames].slice(0, RECENT_FRAMES);
     return items;
   }
 
-  private async openFrameUncached(scope: string, frame: HistoryFrame): Promise<unknown[] | null> {
+  private async openFrameUncached(scope: string, frame: HistoryFrame): Promise<unknown[] | FrameFailure> {
+    if (frame.stream !== HistoryContentStream.FrameSummary && frame.stream !== HistoryContentStream.FrameFull) return 'corrupt';
     const key = this.cachedKey(scope, frame.kid);
-    if (!key || (frame.stream !== HistoryContentStream.FrameSummary && frame.stream !== HistoryContentStream.FrameFull)) return null;
+    if (!key) return 'locked';
     try {
       const compressed = openHistoryContent(key, frame.c, frame.stream, frame.counter, decodeBase64UrlBytes(frame.ct));
       const items: unknown = JSON.parse(decoder.decode(await this.inflate(compressed)));
-      return Array.isArray(items) ? items : null;
+      return Array.isArray(items) ? items : 'corrupt';
     } catch {
-      return null;
+      return 'corrupt';
     }
   }
 
@@ -543,10 +549,14 @@ export class HistoryDecryptor {
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  private withPayload<E extends HistoryWireEvent>(event: E, payload: Record<string, unknown>, plaintext: Record<string, unknown> | null): E {
-    if (plaintext) return { ...event, payload: plaintext };
+  /** The opened payload, or the plaintext envelope marked `detailLocked`
+   * (no key on this device yet) and, when the key was there but the content
+   * failed to open, also `detailCorrupt`: such an envelope is not
+   * authenticated and must not drive state (conversationRuntime). */
+  private withPayload<E extends HistoryWireEvent>(event: E, payload: Record<string, unknown>, opened: Opened): E {
+    if (typeof opened === 'object') return { ...event, payload: opened };
     const { $enc: _enc, ...envelope } = payload;
-    return { ...event, payload: { ...envelope, detailLocked: true } };
+    return { ...event, payload: { ...envelope, detailLocked: true, ...(opened === 'corrupt' ? { detailCorrupt: true } : {}) } };
   }
 
   /** Kids an event needs under `detail`. */
@@ -638,6 +648,10 @@ export class HistoryDecryptor {
 }
 
 /** Opened frames kept for reuse across separately decrypted messages. */
+/** Why an encrypted event could not be read: no key on this device yet, or
+ * a key that does not open it (damaged or forged content). */
+type FrameFailure = 'locked' | 'corrupt';
+type Opened = Record<string, unknown> | FrameFailure;
 const RECENT_FRAMES = 2;
 
 function sameFrame(a: HistoryFrame, b: HistoryFrame): boolean {

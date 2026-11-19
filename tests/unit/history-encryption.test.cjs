@@ -146,8 +146,10 @@ test('no wrap for this device, wrong recipient and tampering lock events without
   const result = await decryptor.decryptEvents([good, tampered, wrongCounter, locked], { detail: 'full' });
   assert.deepEqual(result.map((event) => event.sequence), [1, 2, 3, 4]);
   assert.deepEqual(result[0].payload, { turnId: 't', text: 'ok' });
-  assert.deepEqual(result[1].payload, { turnId: 't', role: 'assistant', detailLocked: true });
-  assert.deepEqual(result[2].payload, { turnId: 't', detailLocked: true });
+  // Tampered or moved ciphertext under a key this device holds is damaged;
+  // a kid it holds no wrap for is only locked.
+  assert.deepEqual(result[1].payload, { turnId: 't', role: 'assistant', detailLocked: true, detailCorrupt: true });
+  assert.deepEqual(result[2].payload, { turnId: 't', detailLocked: true, detailCorrupt: true });
   assert.deepEqual(result[3].payload, { turnId: 't', messageId: 'm', detailLocked: true });
 
   // A kid without a wrap is not asked for again until its TTL passes.
@@ -234,6 +236,47 @@ test('locked events project one quiet notice per turn and never append', () => {
   assert.equal(rows[0].subtitle, '此设备尚未获授权查看这段历史');
   assert.equal(state.appliedSequence, 5);
   assert.equal(state.activeTurnId, '');
+});
+
+test('a ciphertext the key does not open is marked corrupt, not just locked', async () => {
+  const device = generateHistoryRecipientKeyPair();
+  const key = newHistorySegmentKey();
+  const unknown = newHistorySegmentKey();
+  const ring = keyring();
+  ring.grant(key, device.publicKey);
+  const decryptor = new HistoryDecryptor({ seeds: [device.secretKey], fetchWraps: ring.fetchWraps });
+  const good = eventLevel(key, 1, { turnId: 't1', permissionId: 'p1' }, null, { turnId: 't1', permissionId: 'p1', scope: 'turn' });
+  // Same key and envelope, but the content sealed for another sequence.
+  const moved = eventLevel(key, 2, { turnId: 't1', permissionId: 'p2' }, null, { turnId: 't1', permissionId: 'p2' });
+  moved.payload.$enc.f = good.payload.$enc.f;
+  const noKey = eventLevel(unknown, 3, { turnId: 't1' }, null, { turnId: 't1', delta: { text: 'x' } });
+  const page = await decryptor.decryptPage({ conversationId: CONVERSATION, events: [good, moved, noKey] }, 'full');
+  assert.equal(page.events[0].payload.scope, 'turn');
+  assert.deepEqual(page.events[1].payload, { turnId: 't1', permissionId: 'p2', detailLocked: true, detailCorrupt: true });
+  assert.deepEqual(page.events[2].payload, { turnId: 't1', detailLocked: true });
+
+  // A frame that fails to open is corrupt too; one the page lacks is only locked.
+  const frames = { ff: { kid: b64(key.kid), stream: 4, counter: 8, c: CONVERSATION, ct: b64(sealHistoryContent(key, CONVERSATION, 4, 9, zlib.deflateRawSync(Buffer.from('[]')))) } };
+  const framed = (sequence, id) => ({ eventId: `f${sequence}`, conversationId: CONVERSATION, sequence, time: 't', type: 'tool.updated',
+    payload: { turnId: 't1', $enc: { v: 1, kid: b64(key.kid), c: CONVERSATION, n: sequence, fr: { f: id, i: 0 } } } });
+  const framePage = await decryptor.decryptPage({ conversationId: CONVERSATION, events: [framed(4, 'ff'), framed(5, 'missing')], frames }, 'full');
+  assert.equal(framePage.events[0].payload.detailCorrupt, true);
+  assert.equal(framePage.events[1].payload.detailCorrupt, undefined);
+  assert.equal(framePage.events[1].payload.detailLocked, true);
+});
+
+test('a corrupt approval request never becomes a pending approval and shows as damaged', () => {
+  const event = (sequence, type, payload) => ({ schemaVersion: 1, eventId: `e${sequence}`, conversationId: CONVERSATION, sequence, time: '2026-10-06T00:00:00Z', type, payload });
+  const { state } = applyConversationRuntimeEvents(createConversationRuntime(CONVERSATION, 'ws'), [
+    event(1, 'turn.started', { turnId: 't1' }),
+    event(2, 'permission.requested', { turnId: 't1', permissionId: 'forged', detailLocked: true, detailCorrupt: true }),
+    event(3, 'permission.requested', { turnId: 't1', permissionId: 'locked', detailLocked: true }),
+  ]);
+  assert.deepEqual(state.pendingPermissions.map((item) => item.id), ['locked']);
+  const damaged = state.timeline.filter((entry) => entry.detailCorrupt);
+  assert.equal(damaged.length, 1);
+  assert.equal(damaged[0].detailLocked, true);
+  assert.equal(damaged[0].subtitle, '这段历史未通过完整性校验，内容已隐藏');
 });
 
 test('retry carries the latest user message of the newest-first timeline', () => {

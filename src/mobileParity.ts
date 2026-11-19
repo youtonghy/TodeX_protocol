@@ -797,6 +797,9 @@ export type TimelineEntry = {
    * (`payload.detailLocked`, docs/history-encryption.md §5.3): one quiet
    * notice per turn instead of the content. */
   detailLocked?: boolean;
+  /** With `detailLocked`: the key was there but the content failed
+   * authentication (damaged or forged), not merely unreadable yet. */
+  detailCorrupt?: boolean;
   /** Progress block ids a final answer was streamed under (`block.supersedes`). */
   supersedes?: string[];
   /** Subagent run the row belongs to (providers tag events emitted for a
@@ -1339,6 +1342,17 @@ export function classifyV2ConversationEvent(
   // plaintext envelope fields and project as usual.
   if (payload.detailLocked === true && (block || role === 'user' || role === 'human'
     || /^(?:message|thought|tool|subagent|assistant|reasoning|permission)\./.test(type) || type === 'provider.event')) {
+    if (payload.detailCorrupt === true) {
+      return {
+        ...base,
+        id: `v2-corrupt-${conversationId}-${turnId || 'turnless'}`,
+        kind: 'system',
+        title: '历史已损坏',
+        subtitle: '这段历史未通过完整性校验，内容已隐藏',
+        detailLocked: true,
+        detailCorrupt: true,
+      };
+    }
     return {
       ...base,
       id: `v2-locked-${conversationId}-${turnId || 'turnless'}`,

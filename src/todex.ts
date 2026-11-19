@@ -869,6 +869,17 @@ export function parseWorkspaceSyncResponse(value: unknown): WorkspaceRecord[] {
     .filter((workspace): workspace is WorkspaceRecord => Boolean(workspace));
 }
 
+/** Workspaces the backend reports deleted (`deleted` of a `GET`/`PUT
+ * /v2/workspaces` answer), as tombstones without a backend connection; null
+ * when the answer has no `deleted` list (an older backend that does not
+ * report deletions, so another device's delete cannot reach this one). */
+export function parseWorkspaceSyncDeleted(value: unknown): WorkspaceTombstone[] | null {
+  if (!isObject(value) || !Array.isArray(value.deleted)) return null;
+  return value.deleted
+    .map(normalizeWorkspaceTombstone)
+    .filter((tombstone): tombstone is WorkspaceTombstone => Boolean(tombstone));
+}
+
 export function parseWorkspaceSyncRejected(value: unknown): WorkspaceSyncRejection[] {
   const rawRejected = isObject(value) && Array.isArray(value.rejected) ? value.rejected : [];
   const rejections: WorkspaceSyncRejection[] = [];

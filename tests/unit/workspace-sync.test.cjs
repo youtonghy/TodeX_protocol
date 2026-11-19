@@ -242,3 +242,13 @@ test('remapWorkspaceScopedRecords returns the same array when no workspace id mo
   const workspaces = [workspace()];
   assert.equal(todex.remapWorkspaceScopedRecords(records, workspaces, workspaces), records);
 });
+
+test('parseWorkspaceSyncDeleted reads the backend\'s deletions, and tells an older backend apart', () => {
+  const deleted = todex.parseWorkspaceSyncDeleted({
+    workspaces: [],
+    deleted: [{ id: 'ws_1', path: '/w/app', deletedAt: 1700 }, { id: 'ws_2', path: '' , deletedAt: 1 }, 'junk'],
+  });
+  assert.deepEqual(deleted, [{ id: 'ws_1', path: '/w/app', backendConnectionId: null, deletedAt: 1700 }]);
+  assert.deepEqual(todex.parseWorkspaceSyncDeleted({ workspaces: [], deleted: [] }), []);
+  assert.equal(todex.parseWorkspaceSyncDeleted({ workspaces: [] }), null);
+});

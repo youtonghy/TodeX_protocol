@@ -85,6 +85,11 @@ export type SshConnectionSettings = {
   serverAliveInterval: number;
   /** Unanswered probes before ssh closes the connection. */
   serverAliveCountMax: number;
+  /**
+   * Trust a host key on first contact (`StrictHostKeyChecking=accept-new`);
+   * changed keys are still refused. Absent from backends that predate it.
+   */
+  acceptNewHostKeys?: boolean;
 };
 
 /**

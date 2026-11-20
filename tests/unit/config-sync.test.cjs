@@ -248,6 +248,29 @@ test('settings sync writes changed values, keeps excluded keys, and is a no-op t
   assert.deepEqual(second.entries.filter(entry => entry.status !== 'same').map(entry => entry.key), []);
 });
 
+test('the default host key trust neither differs from nor reaches an older backend', async () => {
+  const source = fakeBackend({
+    sshSettings: { serverAliveEnabled: true, serverAliveInterval: 30, serverAliveCountMax: 3, acceptNewHostKeys: true },
+  });
+  const target = fakeBackend();
+  const plan = await planBetween(source, target, ['settings']);
+  assert.equal(plan.entries.find(entry => entry.key === 'settings:sshSettings').status, 'same');
+
+  source.state.sshSettings.serverAliveInterval = 60;
+  const writes = [];
+  const set = target.api.setSshSettings;
+  target.api.setSshSettings = async (value) => { writes.push(structuredClone(value)); return set(value); };
+  const first = await syncAll(source, target, ['settings']);
+  assert.ok(first.results.every(result => result.ok), JSON.stringify(first.results));
+  assert.deepEqual(writes, [{ serverAliveEnabled: true, serverAliveInterval: 60, serverAliveCountMax: 3 }]);
+
+  // Turning it off is a real difference and is written.
+  source.state.sshSettings.acceptNewHostKeys = false;
+  writes.length = 0;
+  await syncAll(source, target, ['settings']);
+  assert.equal(writes[0].acceptNewHostKeys, false);
+});
+
 test('the output filter syncs only what an older target knows', async () => {
   const oldShape = { privateKey: true, publicKey: true, credential: true, bankCard: true, idCard: true };
   const source = fakeBackend({

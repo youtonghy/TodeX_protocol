@@ -290,9 +290,21 @@ const collectAccounts: Collector = async ({ api }, snapshot) => {
   }
 };
 
+/**
+ * `acceptNewHostKeys: true` is the default on backends that know it and the
+ * behaviour-free absence on those that do not, so it is left out: the two
+ * then compare equal, and a write never sends an older backend a field its
+ * strict settings body would reject.
+ */
+function withoutDefaultHostKeyTrust<T extends { acceptNewHostKeys?: boolean }>(settings: T): T {
+  if (settings.acceptNewHostKeys !== true) return settings;
+  const { acceptNewHostKeys: _default, ...rest } = settings;
+  return rest as T;
+}
+
 const collectSettings: Collector = async ({ api }, snapshot) => {
   const backendWide: Array<[ConfigSyncItemKind, () => Promise<unknown>]> = [
-    ['sshSettings', () => api.getSshSettings()],
+    ['sshSettings', async () => withoutDefaultHostKeyTrust(await api.getSshSettings())],
     ['outputFilter', () => api.getAgentOutputFilter()],
     ['agentLocal', () => api.getAgentLocal()],
     ['historyCleanup', async () => (await api.getHistoryCleanupPolicy()).policy],

@@ -133,6 +133,8 @@ export type ProviderCapabilities = {
   nativeMcp: boolean;
   managedMcp: boolean;
   modelSelection: boolean;
+  /** The daemon verifies the official Claude Code egress before calling it. */
+  claudeRegionPreflight?: boolean;
   /** Missing on older backends; clients must treat absence as unsupported. */
   imageInput?: boolean;
   imageInputMode?: 'always' | 'model' | 'profile' | 'none';
@@ -1781,6 +1783,11 @@ export class V2ApiClient {
 
   async getProviderQuotas(): Promise<ProviderQuotasResponse> {
     return this.request('/v2/providers/quota');
+  }
+
+  /** Verify Claude egress before displaying its latest account quota snapshot. */
+  async getClaudeProviderQuota(): Promise<ProviderQuotaSnapshot> {
+    return this.request('/v2/providers/claude-code/quota');
   }
 
   async listAgentProviders(agent?: ManagedProviderAgent): Promise<AgentProvidersResponse> {

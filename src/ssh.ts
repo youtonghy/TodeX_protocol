@@ -278,6 +278,49 @@ export type SshKeyImportInput = { name: string; privateKey: string; publicKey?: 
 
 export type SshKeyGenerateInput = { name: string; algorithm: SshKeyAlgorithm; comment?: string; passphrase?: string };
 
+/**
+ * Body of `POST /v2/ssh/keys/{name}/deploy`: installs the key on a managed
+ * host, switches the host to it and optionally turns off the server's
+ * password login. `password` signs in to a password host and doubles as its
+ * sudo password.
+ */
+export type SshKeyDeployInput = { alias: string; password?: string; disablePasswordLogin?: boolean };
+
+export type SshKeyDeployStage = 'install' | 'verify';
+
+export type SshPasswordLoginReason =
+  | 'notVerified'
+  | 'unsupportedOs'
+  | 'noSshd'
+  | 'configInvalid'
+  | 'restartFailed'
+  | 'stillEnabled'
+  | 'needsRoot'
+  | 'connection'
+  | 'other';
+
+export type SshPasswordLoginOutcome = {
+  status: 'disabled' | 'skipped' | 'failed';
+  reason?: SshPasswordLoginReason;
+  detail?: string;
+};
+
+export type SshKeyDeployResult = {
+  ok: boolean;
+  durationMs: number;
+  /** Failed step: signing in / writing the key, or the key's own login. */
+  stage?: SshKeyDeployStage;
+  failure?: SshFailureKind;
+  detail?: string;
+  alreadyInstalled: boolean;
+  /** False for encrypted keys outside the agent, which are switched untried. */
+  verified: boolean;
+  /** The host as saved afterwards. */
+  host?: ManagedHost;
+  /** Present when `disablePasswordLogin` was requested and the key deployed. */
+  passwordLogin?: SshPasswordLoginOutcome;
+};
+
 /** Same rule the backend enforces for files written to `~/.ssh/<name>`. */
 const SSH_KEY_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
 

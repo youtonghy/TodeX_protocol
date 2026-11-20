@@ -26,6 +26,8 @@ import type {
   SshIpPool,
   SshIpPoolConfig,
   SshKey,
+  SshKeyDeployInput,
+  SshKeyDeployResult,
   SshKeyGenerateInput,
   SshKeyImportInput,
   SshKeysResponse,
@@ -2446,6 +2448,11 @@ export class V2ApiClient {
   async generateSshKey(input: SshKeyGenerateInput): Promise<{ key: SshKey }> {
     // RSA-4096 generation can take several seconds on slow hosts.
     return this.request('/v2/ssh/keys/generate', { method: 'POST', body: JSON.stringify(input) }, Math.max(this.timeout, 60_000));
+  }
+
+  async deploySshKey(name: string, input: SshKeyDeployInput): Promise<SshKeyDeployResult> {
+    // Signing in, a key check and an sshd restart each take up to tens of seconds.
+    return this.request(`/v2/ssh/keys/${encodeURIComponent(name)}/deploy`, { method: 'POST', body: JSON.stringify(input) }, Math.max(this.timeout, 180_000));
   }
 
   async listRemoteConnections(): Promise<{ connections: RemoteConnection[] }> {

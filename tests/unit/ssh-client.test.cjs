@@ -110,6 +110,7 @@ test('FTP site and key routes match the contract', async () => {
   await api.listSshKeys();
   await api.importSshKey({ name: 'work', privateKey: 'PRIVATE', passphrase: 'pw' });
   await api.generateSshKey({ name: 'id_new', algorithm: 'ed25519', comment: 'me@host' });
+  await api.deploySshKey('id_new', { alias: 'prod', password: 'pw', disablePasswordLogin: true });
   assert.deepEqual(calls.map((call) => `${call.method} ${call.url.pathname}`), [
     'POST /v2/ftp/sites',
     'PUT /v2/ftp/sites/site%2F1',
@@ -117,10 +118,12 @@ test('FTP site and key routes match the contract', async () => {
     'GET /v2/ssh/keys',
     'POST /v2/ssh/keys/import',
     'POST /v2/ssh/keys/generate',
+    'POST /v2/ssh/keys/id_new/deploy',
   ]);
   assert.deepEqual(calls[0].body, site);
   assert.deepEqual(calls[4].body, { name: 'work', privateKey: 'PRIVATE', passphrase: 'pw' });
   assert.deepEqual(calls[5].body, { name: 'id_new', algorithm: 'ed25519', comment: 'me@host' });
+  assert.deepEqual(calls[6].body, { alias: 'prod', password: 'pw', disablePasswordLogin: true });
 });
 
 test('remote connection file operations encode ids and query paths', async () => {

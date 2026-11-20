@@ -1,38 +1,42 @@
 # TodeX Protocol
 
-Shared TypeScript protocol layer for the TodeX desktop and web clients, extracted from the retired `TodeX_app` (React Native) repository.
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
-## Consumers
+The shared client side of TodeX: everything a TodeX app needs to talk to a TodeX backend (`todex-agentd`) safely. [TodeX Desktop](https://github.com/youtonghy/TodeX_desktop), [TodeX Web](https://github.com/youtonghy/TodeX_web) and [TodeX Native](https://github.com/youtonghy/TodeX_native) all build on it, so pairing, encryption and conversations behave the same in every client.
 
-`TodeX_desktop` and `TodeX_web` compile these sources directly through `@todex/protocol/*` path aliases:
+## What it provides
 
-- `tsconfig.web.json` → `"@todex/protocol/*": ["./../TodeX_protocol/src/*"]`
-- `vite.config.ts` / `electron.vite.config.ts` / `vitest.config.ts` → `'@todex/protocol': resolve(..., '../TodeX_protocol/src')`
+- **Device pairing**: the pairing flow where a user compares a code between the client and the backend. Approval enrolls the device's signing key and pins the backend's transport key in one step; there is no manual key import. Includes key fingerprints for display and clear error codes for each failure.
+- **Encrypted transport**: every request and the live connection to a paired backend are encrypted (X25519 or post-quantum ML-KEM-768), loopback included. The client refuses plaintext to remote hosts, asks for re-pairing when the backend's key or policy changes, and retries clock-skew and busy responses safely.
+- **End-to-end encrypted history**: reading and writing encrypted conversation history, granting access to new devices, and 24-word / QR recovery keys.
+- **Backend client**: a typed client for the backend's `/v2` API and live conversation events, with connection probes, diagnostics for common connection errors and jittered reconnect delays.
+- **Conversation runtime**: turning the backend's event stream into what the apps display: messages, tool steps, approvals, plans, terminal output, with realtime events batched per animation frame.
+- **Backend groups**: signed member lists, invites and join codes, presence, relays and the order a client tries a group member's addresses in.
+- **Shared app logic**: config sync, Agent Calling, agent desktop tools, SSH, path mappings, `@` reference menus, plan review, Markdown and other helpers the clients have in common.
 
-Keep this repository checked out as a sibling directory (`../TodeX_protocol`) of the clients. The sources are consumed as TypeScript — there is no build artifact or npm publish step.
+It is platform-agnostic TypeScript with no UI, DOM, Electron or React Native dependencies.
 
-## Layout
+## Use it in a client
 
-- `src/` — platform-agnostic protocol sources (`v2`, `todex`, `transport`, `transportCrypto` (`parsePairingAddress`: a pairing link or URL yields only the server address, never a key; base64url helpers; the `todex.crypto.v1` frames are removed), `historyCrypto`, `historyEncryption` (end-to-end history, always on: `HistoryDecryptor`, §7 command frames, grant re-wrap, the `HISTORY_READ_ONLY` / `HISTORY_KEY_REQUIRED` codes; spec in `TodeX_backend/docs/history-encryption.md`), `recoveryKey` (BIP39 24-word / QR recovery key), `qrCode` (local QR encoder), `deviceAuth`, `conversationRuntime`, `frameBatch` (coalesces realtime conversation events into one projection per animation frame), `mobileParity`, `connectionProbe`, `connectionError`, `backoff` (jittered retry delays), and supporting modules). `netinfo.d.ts` is an ambient declaration kept for the consumers' NetInfo stubs; no source imports NetInfo any more.
-- `secureChannel` / `secureTransport` — transport v2 (spec: `transport-v2.md`). `secureChannel` is the pure reference implementation shared with the backend and TodexCore: key schedule, sealed records, REST record streams and inner request/response heads, the WebSocket hello handshake, and device pairing v3 (commitment, transcript, code, derived keys). Pairing binds the server's transport key: `parseDevicePairingTransport` validates the create response's `transportProtocol` / `transportPublicKey` (`none` only on loopback), the transcript covers them, and `verifyDevicePairingCredential` checks the approved credential and returns the only protocol/key a client may pin (together with `transportVerified = true`); `transportFingerprint` renders `XXXX-XXXX-XXXX-XXXX` for display. There is no manual key import. `secureTransport` is the single business-facing entry point (`createSecureTransport` → `fetch` / `fetchStream` / `openSocket`) and applies the client rules: pinned key verified by pairing → v2 everywhere (REST via `POST /v2/sealed`), a pin without `transportVerified` → `TransportRepairRequiredError` on every host (re-pair), unpinned remote host → `EncryptionRequiredError`, unpinned loopback → plaintext; `secureTransportRefusal` names the reason. `fetch`/`WebSocket` and the device-auth signer are injected. `verifyTransportPolicy` is the connect-time check against `/v2/transport-policy` (a different required protocol, including `none`, asks for re-pairing; a backend without `transportVersion: 2` is outdated, one without `sealedRevision: 2` raises `BackendUpgradeRequiredError`), `cachedSecureTransport` keeps one instance per backend profile, and `toFetchResponse` adapts an opened response to a standard `Response`. Sealed REST is revision 2: each response body starts with a 32-byte `response_nonce` and is sealed with `k_down = HKDF-Expand(prk, "todex.transport.v2/rest/down" || response_nonce)` (`deriveRestTransportKeys` / `deriveRestDownKey`); only `200` + `application/vnd.todex.sealed; r=2` is opened, a sealed answer without `r=2` raises `BackendUpgradeRequiredError`. Inside the tunnel, `503 TRANSPORT_BUSY` is retried once after `Retry-After` (at most 5 s) and `401 AUTH_TIMESTAMP_REJECTED` records the backend's clock offset from `serverTime` (`backendClockOffsetMs`) and re-signs once, both with a fresh signature. Device pairing v3 also binds the device name (`normalizeDevicePairingName`, `devicePairingNameFailure`). `V2ApiClient` and `probeBackendConnection` send every request through a `SecureTransport`; `socketVerification` round-trips a `server.ping` as the first sealed frame of a new socket. `devicePairing` runs the pairing v3 HTTP flow (`beginDevicePairing` → create, reveal, `poll` / `cancel`; `fetchBackendDeployment` for the approval hint) for every client: `fetch` is injectable, a fetch without a body stream (React Native) is read whole, and errors are `DevicePairingError` / `DevicePairingRetryableError` with a `code` that each client maps to its own wording through the `message` option.
-- `mesh` — device groups (spec: `TodeX_backend/docs/mesh-v1.md`): signed roster chains (`createMeshGenesis`, `appendMeshRoster`, `verifyMeshChain`, the fork rule `meshChainWins`), node info (`verifyMeshNodeInfo`), the joining device's history-key signature, join codes and the node-join proofs, invites (`encodeMeshInvite` / `parseMeshInvite`, addresses only) and the `mesh.*` command frames; nodes' pinned `addresses` and relay settings (`relay`, `relayTarget`), presence (`parseMeshPresence`) and relay tickets and addresses (`meshRelayTicket`, `meshRelayUrl`, `meshRelayExpiry`). `devicePairing` takes `options.mesh` (`deviceJoin` or `nodeJoin`): the same pairing v3 flow, plus the group fields; a node join is trusted only after the credential's `joinProof` verifies.
-- `meshClient` — a device group as a client keeps it: the stored record (`normalizeStoredMeshGroups`, `storedChain`), merging a node's answer (`mergeNodeState`: the fork rule, node infos, removal, whether to push back) and the order a node's addresses are tried in (`candidateUrls`, `beaconUrls`, `rememberUrl`; relay addresses never count). Desktop, web and native share it.
-- `tests/unit/` — `node --test` suites run against `tsc` output in `dist/unit/lib/`.
-- `tests/fixtures/transport-v2.json` — cross-implementation transport v2 vectors (both protocols, WebSocket frames, REST streams, failure cases, pairing v3 with the bound transport key, approval credential, fingerprint, tampered-key and `none` cases). Regenerate deterministically with `node scripts/generate-transport-v2-vectors.cjs`; the backend and TodexCore copy it verbatim.
-- `tests/fixtures/mesh-v1.json` — mesh v1 vectors (chains with additions, a removal and a recovery-signed version, invalid chains, node info, history-key binding, join code proofs). Regenerate with `node scripts/generate-mesh-v1-vectors.cjs` after `npm run test:unit`; the backend copies it verbatim.
-- `scripts/check-protocol.cjs` — protocol consistency check against the compiled `todex.js`.
+The clients compile these sources directly; there is no package to publish or install. Check this repository out next to the client:
 
-## Commands
+```
+parent/
+  TodeX_desktop/   (or TodeX_web, TodeX_native)
+  TodeX_protocol/
+```
+
+The clients import it as `@todex/protocol/*` through a path alias to `../TodeX_protocol/src`. Desktop's CI checks out `main` of this repository, so push protocol changes before the client changes that need them.
+
+## Development
 
 ```bash
 npm install
-npm run test:unit       # compile src/*.ts with tsc, run tests/unit/*.test.cjs
-npm run check:protocol  # protocol helper consistency check
-npm run typecheck       # tsc --noEmit
+npm test                # compile and run the unit tests
+npm run check:protocol  # protocol consistency check
+npm run typecheck
 ```
 
-## Rules for contributors
+Changes on the wire must stay compatible with [TodeX Backend](https://github.com/youtonghy/TodeX_backend). Cross-implementation test vectors live in `tests/fixtures/` (transport v2 and backend groups) and are shared verbatim with the backend.
 
-- `src/` must stay platform-agnostic: no `react-native`, `expo-*`, DOM, or Electron imports. `@noble/*` dependencies are provided by the consuming clients (and declared here for standalone tests).
-- Do not import `@react-native-community/netinfo` again outside a guarded dynamic `import()`; consumers only stub it. (The plaintext `V2ConversationSocket` that used it is gone: clients reach `/v2/ws` through `SecureTransport.openSocket`.)
-- Wire format changes must stay backward compatible with `TodeX_backend`; see `docs/conversation-runtime.md` in that repository.
+Module-by-module notes, fixture regeneration and contributor rules: [docs/MODULES.md](docs/MODULES.md).

@@ -4,6 +4,7 @@ import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { decodeBase64Url, deviceIdForPublicKey, encodeBase64Url } from './deviceAuth';
 import { HISTORY_PUBLIC_KEY_LENGTH, historyRecipientKeyPairFromSeed } from './historyCrypto';
+import { isLoopbackUrl } from './loopback';
 import { MAX_QR_BYTES } from './qrCode';
 import { devicePairingNameFailure } from './secureChannel';
 
@@ -55,6 +56,14 @@ export const MESH_MAX_PINNED_ADDRESSES = 16;
 /** An `http(s)://` address a node may be pinned at. */
 export function isMeshAddress(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 512 && /^https?:\/\/[^\s]+$/.test(value);
+}
+/** A mesh address worth handing to another device: pinned in the roster or
+ * put in an invite. A loopback address only reaches a node from the machine
+ * that stored it (an SSH tunnel's local end, a container's published port),
+ * and on any other device it names that device's own backend. Rosters that
+ * already pin one stay valid (`isMeshAddress` checks those). */
+export function isShareableMeshAddress(value: unknown): value is string {
+  return isMeshAddress(value) && !isLoopbackUrl(value);
 }
 export type MeshRecovery = { signingKey: string; historyKey: string };
 export type MeshRosterBody = {

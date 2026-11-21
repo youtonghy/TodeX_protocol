@@ -70,6 +70,25 @@ test('addresses: what worked, pinned, beacons, announced; never a relay address'
   assert.deepEqual(client.normalizeStoredMeshGroups([null, { groupId: 1 }, g]).length, 1);
 });
 
+test('loopback addresses are candidates only when this device stored them', () => {
+  const { withNode, self, node, info } = group();
+  const parsed = mesh.verifyMeshNodeInfo(info, node.publicKey);
+  // A tunnel's local end this device connected through stays a candidate.
+  const own = stored(withNode, self.id, { nodeUrls: { [node.id]: ['http://127.0.0.1:7345'] } });
+  assert.deepEqual(client.candidateUrls(own, parsed, node.id), ['http://127.0.0.1:7345', 'http://10.0.0.9:7345']);
+  // One another device pinned, or the node announced, names this machine.
+  const shared = client.candidateUrls(stored(withNode, self.id), { ...parsed, urls: ['http://localhost:7345', ...parsed.urls] }, node.id, {
+    pinned: ['http://127.0.0.1:7345', 'http://[::1]:7345', 'http://203.0.113.7:7345'],
+  });
+  assert.deepEqual(shared, ['http://203.0.113.7:7345', 'http://10.0.0.9:7345']);
+  assert.ok(mesh.isShareableMeshAddress('http://203.0.113.7:7345'));
+  assert.ok(!mesh.isShareableMeshAddress('http://127.0.0.1:7345'));
+  assert.ok(!mesh.isShareableMeshAddress('http://localhost:7345'));
+  assert.ok(!mesh.isShareableMeshAddress('ftp://x'));
+  // Roster validation is unchanged: a chain that pins one still verifies.
+  assert.ok(mesh.isMeshAddress('http://127.0.0.1:7345'));
+});
+
 test('a leave is delivered once every node, or with other devices any node, confirms it', () => {
   const nodes = [{ id: 'n1', name: 'nas' }, { id: 'n2', name: 'mini' }];
   const dissolve = client.startLeave(nodes, false, new Set(['n1']), 7);

@@ -14,6 +14,7 @@ import {
   type MeshNodeInfo,
   type MeshSignedDoc,
 } from './mesh';
+import { isLoopbackUrl } from './loopback';
 import { normalizeServerUrl } from './todex';
 
 /** Addresses kept per node. */
@@ -221,14 +222,18 @@ export function mergeNodeState(
 
 /** Addresses to try for a node, best first: those that worked, the ones a
  * user pinned in the roster, the ones its LAN beacon showed, then what the
- * node announces. Relay addresses are never candidates. */
+ * node announces. Relay addresses are never candidates; a loopback address
+ * is one only when this device stored it itself. */
 export function candidateUrls(
   group: StoredMeshGroup,
   info: MeshNodeInfo | undefined,
   nodeId: string,
   extra: { pinned?: readonly string[]; beacons?: readonly string[] } = {},
 ): string[] {
-  const urls = [...(group.nodeUrls[nodeId] ?? []), ...(extra.pinned ?? []), ...(extra.beacons ?? []), ...(info?.urls ?? [])]
+  // Loopback addresses from the group (pinned, announced) were stored on
+  // another machine: here they name this machine's own backend.
+  const shared = (urls: readonly string[] = []) => urls.filter((url) => !isLoopbackUrl(url));
+  const urls = [...(group.nodeUrls[nodeId] ?? []), ...shared(extra.pinned), ...(extra.beacons ?? []), ...shared(info?.urls)]
     .filter((url) => meshRelayExpiry(url) === null)
     .map((url) => normalizeServerUrl(url));
   return [...new Set(urls.filter(Boolean))].slice(0, MAX_NODE_URLS);

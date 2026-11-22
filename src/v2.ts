@@ -1013,12 +1013,21 @@ export type AgentScope = {
 /** How permission requests of an agent call or API-key conversation are answered. */
 export type AgentCallingApproval = 'ask' | 'auto-approve' | 'reject';
 
+/**
+ * The permission mode of a conversation an agent starts through `todex_agents`:
+ * `full-access` whatever the calling turn's mode, or `inherit` (at most the
+ * calling turn's mode).
+ */
+export type AgentCallingChildPermission = 'full-access' | 'inherit';
+
 /** `GET|PUT /v2/agent-calling`. A 404 means the daemon predates Agent Calling. */
 export type AgentCallingSettings = {
   scope: AgentScope;
   mcp: {
     enabled: boolean;
     approval: AgentCallingApproval;
+    /** Absent from daemons that predate the setting (their children inherit the calling turn's mode). */
+    childPermission?: AgentCallingChildPermission;
     /** The `todex_agents` MCP server would be injected now (enabled and at least one agent allowed). */
     injected: boolean;
   };
@@ -1042,7 +1051,7 @@ export type AgentCallingSettings = {
 /** `PUT /v2/agent-calling`; absent fields stay as they are. */
 export type AgentCallingUpdate = {
   scope?: AgentScope;
-  mcp?: { enabled?: boolean; approval?: AgentCallingApproval };
+  mcp?: { enabled?: boolean; approval?: AgentCallingApproval; childPermission?: AgentCallingChildPermission };
 };
 
 /** `PUT /v2/agent-calling/api-listener`; takes effect after a backend restart. */

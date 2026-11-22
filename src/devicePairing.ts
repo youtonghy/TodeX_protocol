@@ -6,6 +6,7 @@ import {
   DEVICE_PAIRING_V3_NONCE_LENGTH,
   DevicePairingTransportError,
   deriveDevicePairingV3Material,
+  devicePairingNameFailure,
   devicePairingV3Commitment,
   normalizeDevicePairingName,
   parseDevicePairingTransport,
@@ -45,8 +46,10 @@ export type DevicePairingMesh =
   | { kind: 'nodeJoin'; groupId: string; joinCode: string };
 
 /** What an approved group join adds; `nodeId`/`nodePublicKey` only for a
- * node join, after its `joinProof` verified. */
-export type DevicePairingMeshResult = { groupId: string; nodeId?: string; nodePublicKey?: string };
+ * node join, after its `joinProof` verified. `nodeName` is the node's own
+ * display name when it sends a valid one (newer backends): cosmetic, the
+ * proof does not cover it. */
+export type DevicePairingMeshResult = { groupId: string; nodeId?: string; nodePublicKey?: string; nodeName?: string };
 
 export type DevicePairingRequest = {
   requestId: string;
@@ -505,7 +508,10 @@ export async function beginDevicePairing(
               }
               return {
                 status: 'approved', deviceId: payload.deviceId, pin,
-                mesh: { groupId: mesh.groupId, nodeId: payload.nodeId as string, nodePublicKey: payload.nodePublicKey as string },
+                mesh: {
+                  groupId: mesh.groupId, nodeId: payload.nodeId as string, nodePublicKey: payload.nodePublicKey as string,
+                  ...(typeof payload.nodeName === 'string' && devicePairingNameFailure(payload.nodeName) === null ? { nodeName: payload.nodeName } : {}),
+                },
               };
             } finally {
               plaintext.fill(0);

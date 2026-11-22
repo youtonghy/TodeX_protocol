@@ -107,6 +107,7 @@ function fakeBackend({ steps = ['approved'], transport, wrap = (response) => res
         const codeKey = mesh.meshJoinCodeKey(node.code);
         Object.assign(extra, {
           nodeId: node.nodeId, nodePublicKey: node.publicKey,
+          ...(node.name !== undefined ? { nodeName: node.name } : {}),
           joinProof: node.joinProof ?? mesh.meshNodeJoinServerProof(codeKey, sha256(state.transcript), decodeBase64Url(node.publicKey)),
         });
       }
@@ -209,6 +210,20 @@ test('a node join proves the code both ways and returns the node key', async () 
   const result = await request.poll();
   assert.equal(result.status, 'approved');
   assert.deepEqual(result.mesh, { groupId: 'grp_AAAAAAAAAAAAAAAAAAAAAA', nodeId: node.nodeId, nodePublicKey: node.publicKey });
+});
+
+test('a node join passes on the node name it sends, dropping an invalid one', async () => {
+  const code = 'ABCD-EFGH-IJKL-MNOP';
+  for (const [name, expected] of [['gs-dev', 'gs-dev'], [' bad\u202e ', undefined]]) {
+    const node = { ...meshNode(code), name };
+    const backend = fakeBackend({ node });
+    const request = await beginDevicePairing(SERVER_URL, 'Mac', generateDeviceIdentity(), undefined, {
+      fetchImpl: backend.fetchImpl, mesh: { kind: 'nodeJoin', groupId: 'grp_AAAAAAAAAAAAAAAAAAAAAA', joinCode: code },
+    });
+    const result = await request.poll();
+    assert.equal(result.status, 'approved');
+    assert.equal(result.mesh.nodeName, expected);
+  }
 });
 
 test('a node that does not know the code is not trusted', async () => {

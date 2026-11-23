@@ -126,6 +126,12 @@ test('node entries keep pinned addresses and relay settings; relay tickets match
   assert.deepEqual(node.addresses, ['https://nas.example.net:7345']);
   assert.equal(node.relay, 'preferred');
   assert.equal(node.relayTarget, false);
+  assert.equal(node.hub, true);
+  assert.deepEqual(mesh.meshHubs(chain), [node.id]);
+  // Before the recovery version the node was not a hub.
+  const earlier = mesh.verifyMeshChain(fixture.chain.slice(0, 3));
+  assert.equal(earlier.head.members.find((member) => member.kind === 'node').hub, undefined);
+  assert.deepEqual(mesh.meshHubs(earlier), []);
   const ticket = fixture.relayTicket;
   assert.equal(mesh.meshRelayExpiry(mesh.meshRelayUrl('http://10.0.0.2:7345', ticket.targetNodeId, ticket.ticket)), ticket.expiresAt);
   assert.equal(mesh.meshRelayExpiry('http://10.0.0.2:7345'), null);

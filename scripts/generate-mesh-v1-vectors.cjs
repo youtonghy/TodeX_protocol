@@ -45,8 +45,9 @@ const c2 = mesh.verifyMeshChain(v2);
 // The second device removes the creator.
 const v3 = mesh.appendMeshRoster(c2, { signerSecretKey: secondSecret, members: [node, second], now: NOW + 3 });
 const c3 = mesh.verifyMeshChain(v3);
-// The recovery key signs the next version and re-adds nobody.
-const v4 = mesh.appendMeshRoster(c3, { signerSecretKey: signingSeed, signer: 'recovery', members: [node, second], name: 'Home (recovered)', now: NOW + 4 });
+// The recovery key signs the next version, re-adds nobody and makes the node a hub.
+const hubNode = { ...node, hub: true };
+const v4 = mesh.appendMeshRoster(c3, { signerSecretKey: signingSeed, signer: 'recovery', members: [hubNode, second], name: 'Home (recovered)', now: NOW + 4 });
 const c4 = mesh.verifyMeshChain(v4);
 
 // Invalid chains, each must be refused.
@@ -63,6 +64,13 @@ const removedSigner = [...v3, mesh.signMeshDoc(mesh.MESH_ROSTER_DOMAIN, {
 const tampered = v2.map((doc) => ({ ...doc }));
 tampered[1] = { ...tampered[1], body: encodeBase64Url(new TextEncoder().encode(Buffer.from(tampered[1].body, 'base64url').toString('utf8').replace('"Phone"', '"Phonf"'))) };
 const reordered = [v2[1], v2[0]];
+// Signed by a device of the group, but a hub that does not relay, and a device marked as a hub.
+const nextBody = (members) => ({
+  type: 'todex.mesh.roster', v: 1, groupId: c3.groupId, version: 4, prev: encodeBase64Url(c3.headHash), name: 'Home',
+  signer: second.id, signedAt: NOW + 4, recovery, members,
+});
+const hubDenied = [...v3, mesh.signMeshDoc(mesh.MESH_ROSTER_DOMAIN, nextBody([{ ...node, hub: true, relay: 'denied' }, second]), secondSecret)];
+const deviceHub = [...v3, mesh.signMeshDoc(mesh.MESH_ROSTER_DOMAIN, nextBody([node, { ...second, hub: true }]), secondSecret)];
 
 const nodeInfoBody = {
   type: 'todex.mesh.node-info', v: 1, nodeId: node.id, publicKey: node.publicKey, seq: NOW + 10, name: 'nas',
@@ -84,7 +92,7 @@ const fixture = {
   versions: [g, c2, c3, c4].map((chain) => ({ version: chain.head.version, head: encodeBase64Url(chain.headHash), members: chain.head.members.map((m) => m.id) })),
   memberIds: { creator: creator.id, second: second.id, node: node.id },
   recovery: { seed: hex(recoverySeed), signingKey: recovery.signingKey, historyKey: recovery.historyKey },
-  invalidChains: { forged, removedSigner, tampered, reordered, empty: [] },
+  invalidChains: { forged, removedSigner, tampered, reordered, hubDenied, deviceHub, empty: [] },
   nodeInfo: { doc: nodeInfo, publicKey: node.publicKey, body: nodeInfoBody },
   historyKeyBinding: {
     devicePublicKey: second.publicKey, groupId: c4.groupId, historyKey: second.historyKey,

@@ -49,6 +49,9 @@ export type MeshMember = {
   relay?: MeshRelayRole;
   /** Nodes: `false` when no member may reach the node through a relay. */
   relayTarget?: boolean;
+  /** Nodes: a hub, the node every other member reaches first for the
+   * group's state and addresses, and relays through first. Never `denied`. */
+  hub?: true;
 };
 export type MeshRelayRole = 'preferred' | 'allowed' | 'denied';
 export const MESH_MAX_PINNED_ADDRESSES = 16;
@@ -211,12 +214,15 @@ function readRoster(value: Record<string, unknown>): MeshRosterBody {
     const addresses = member.addresses ?? [];
     const relay = member.relay;
     const relayTarget = member.relayTarget;
-    if (kind === 'device' && (member.addresses !== undefined || relay !== undefined || relayTarget !== undefined)) {
+    const hub = member.hub;
+    if (kind === 'device' && (member.addresses !== undefined || relay !== undefined || relayTarget !== undefined || hub !== undefined)) {
       fail('only nodes carry addresses and relay settings');
     }
     if (!Array.isArray(addresses) || addresses.length > MESH_MAX_PINNED_ADDRESSES || !addresses.every(isMeshAddress)) fail('invalid pinned address');
     if (relay !== undefined && relay !== 'preferred' && relay !== 'allowed' && relay !== 'denied') fail('invalid relay role');
     if (relayTarget !== undefined && typeof relayTarget !== 'boolean') fail('invalid relay target');
+    if (hub !== undefined && hub !== true) fail('invalid hub flag');
+    if (hub === true && relay === 'denied') fail('a hub relays');
     return {
       id: member.id as string, kind, name: member.name as string, publicKey: member.publicKey as string,
       ...(kind === 'device' ? { historyKey: member.historyKey as string } : {}),
@@ -224,6 +230,7 @@ function readRoster(value: Record<string, unknown>): MeshRosterBody {
       ...((addresses as string[]).length ? { addresses: addresses as string[] } : {}),
       ...(relay !== undefined ? { relay: relay as MeshRelayRole } : {}),
       ...(relayTarget !== undefined ? { relayTarget: relayTarget as boolean } : {}),
+      ...(hub === true ? { hub: true as const } : {}),
     };
   });
   if (!members.some((member) => member.kind === 'device')) fail('roster must list a device');
@@ -297,6 +304,11 @@ export function meshChainWins(candidate: MeshChain, current: MeshChain): boolean
 
 export function meshChainHead(chain: MeshChain): string {
   return encodeBase64Url(chain.headHash);
+}
+
+/** The ids of the group's hub nodes, in roster order. */
+export function meshHubs(chain: MeshChain): string[] {
+  return chain.head.members.filter((member) => member.kind === 'node' && member.hub === true).map((member) => member.id);
 }
 
 /** A device entry for `secretKey`'s public key. */

@@ -39,6 +39,28 @@ test('candidates list direct addresses, then relays the roster allows, preferred
   assert.equal(candidates[1].url, mesh.meshRelayUrl('http://203.0.113.9:7345', target.id, ticketFor(r2.id)));
 });
 
+test('hubs come before preferred relays', () => {
+  const { chain, target, r1, r2 } = group((members) => {
+    members[2] = { ...members[2], hub: true };
+    members[3] = { ...members[3], relay: 'preferred' };
+  });
+  const candidates = paths.meshPathCandidates({
+    chain, targetNodeId: target.id, urls: [],
+    relays: [{ nodeId: r2.id, url: 'http://203.0.113.9:7345' }, { nodeId: r1.id, url: 'http://203.0.113.8:7345' }],
+    relayEnabled: true, ticketFor,
+  });
+  assert.deepEqual(candidates.map((item) => item.via), [r1.id, r2.id]);
+  assert.deepEqual(mesh.meshHubs(chain), [r1.id]);
+  // Relaying off still leaves out a hub's relay path.
+  assert.equal(paths.meshPathCandidates({ chain, targetNodeId: target.id, urls: [], relays: [{ nodeId: r1.id, url: 'http://203.0.113.8:7345' }], relayEnabled: false, ticketFor }).length, 0);
+});
+
+test('a hub that does not relay, or a device marked as a hub, is refused', () => {
+  assert.throws(() => group((members) => { members[2] = { ...members[2], hub: true, relay: 'denied' }; }), mesh.MeshError);
+  assert.throws(() => group((members) => { members[0] = { ...members[0], hub: true }; }), mesh.MeshError);
+  assert.throws(() => group((members) => { members[2] = { ...members[2], hub: false }; }), mesh.MeshError);
+});
+
 test('no relay paths when relaying is off, refused by the target, or the relay is denied', () => {
   const relays = (r1, r2) => [{ nodeId: r1.id, url: 'http://203.0.113.8:7345' }, { nodeId: r2.id, url: 'http://203.0.113.9:7345' }];
   const off = group();
@@ -107,5 +129,25 @@ test('a client moves only to a clearly faster path, and not twice within two min
   // Nothing answers: stay.
   assert.equal(pick({ direct: [null], relay: [null] }, 'direct'), null);
   assert.equal(paths.meshPathKeyOf('http://10.0.0.7:7345/'), 'http://10.0.0.7:7345');
+});
+
+test('a relay counts as 1.5 times its time plus 40 ms, and a relayed client takes a direct path that costs no more at once', () => {
+  const samples = (entries) => new Map(Object.entries(entries));
+  const pick = (entries, currentKey, now = 1_000_000, lastSwitchAt = 0) => paths.pickMeshPath({ currentKey, samples: samples(entries), now, lastSwitchAt });
+  const relay = 'relay:node_r';
+  assert.equal(paths.meshPathCost(relay, [100, 100, 100]), 190);
+  assert.equal(paths.meshPathCost('http://10.0.0.7:7345', [100, 100, 100]), 100);
+  assert.equal(paths.meshPathCost(relay, [100, 100, null]), null);
+  // On a relay: a direct path within the margin is taken at once, even right after a move.
+  assert.equal(pick({ [relay]: [100, 100, 100], direct: [180, 180, 180] }, relay, 1_000_000, 1_000_000 - 1_000), 'direct');
+  assert.equal(pick({ [relay]: [100, 100, 100], direct: [200, 200, 200] }, relay, 1_000_000, 1_000_000 - 1_000), null);
+  // On a direct path, the same pair does not send the client back to the relay.
+  assert.equal(pick({ [relay]: [100, 100, 100], direct: [180, 180, 180] }, 'direct'), null);
+  // Only a relay faster even with the margin wins over a direct path.
+  assert.equal(pick({ [relay]: [100, 100, 100], direct: [400, 400, 400] }, 'direct'), relay);
+  // The first answer may come through a relay; with nothing current the cheapest wins.
+  assert.equal(pick({ [relay]: [100], direct: [150] }, null), 'direct');
+  // Between two relays, the plain 30% / 40 ms rule.
+  assert.equal(pick({ [relay]: [200, 200, 200], 'relay:node_s': [100, 100, 100] }, relay), 'relay:node_s');
   assert.equal(paths.meshPathKeyOf('http://203.0.113.9:7345/v2/mesh/relay/x/t', 'node_r'), 'relay:node_r');
 });

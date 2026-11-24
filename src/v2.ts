@@ -372,6 +372,8 @@ export type ManagedCliProvider =
 export type CliVersionStatus = 'upToDate' | 'updateAvailable' | 'ahead' | 'unknown' | 'notInstalled' | 'external';
 export type CliUpgradeStatus = 'running' | 'succeeded' | 'failed';
 export type CliOperationAction = 'install' | 'upgrade';
+/** Why a missing managed CLI cannot be installed from TodeX. */
+export type CliInstallUnavailableReason = 'unsupportedPlatform' | 'authDisabled' | 'npmMissing' | 'nodeMissing';
 
 type CliVersionInfoBase = {
   name: string;
@@ -392,6 +394,10 @@ export type CliVersionInfo = CliVersionInfoBase & ({
   upgradeSupported: boolean;
   /** Missing on older backends; clients must treat absence as unsupported. */
   installSupported?: boolean;
+  /** Set when a missing CLI cannot be installed; absent on older backends
+   * and whenever install is possible, running, or not applicable. Unknown
+   * future values should be shown with a generic message. */
+  installUnavailableReason?: CliInstallUnavailableReason | (string & {});
 } | {
   id: string;
   kind: 'external';

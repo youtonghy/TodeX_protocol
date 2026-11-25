@@ -111,3 +111,40 @@ test('a stored leave survives a reload and a malformed one is dropped', () => {
   const [dropped] = client.normalizeStoredMeshGroups([stored(withNode, self.id, { leaving: { at: 'x' } })]);
   assert.equal('leaving' in dropped, false);
 });
+
+function countingVerifiers() {
+  const calls = { chain: 0, nodeInfo: 0 };
+  return {
+    calls,
+    verify: {
+      chain: (docs) => { calls.chain += 1; return mesh.verifyMeshChain(docs); },
+      nodeInfo: (doc, publicKey) => { calls.nodeInfo += 1; return mesh.verifyMeshNodeInfo(doc, publicKey); },
+    },
+  };
+}
+
+test('a merge verifies through the verifiers it is given, with the same outcome', () => {
+  const { withNode, self, node, info } = group();
+  const { calls, verify } = countingVerifiers();
+  const remote = { nodeId: node.id, nodeInfo: info, chain: withNode.docs, nodeInfos: [] };
+  const counted = client.mergeNodeState(stored(withNode, self.id), remote, verify);
+  const plain = client.mergeNodeState(stored(withNode, self.id), remote);
+  assert.deepEqual(counted, plain);
+  assert.equal(calls.chain, 2, 'the stored chain and the remote one');
+  assert.ok(calls.nodeInfo >= 1);
+  assert.equal(counted.group.nodeInfos[node.id], info);
+});
+
+test('node info already stored as it is is not verified again', () => {
+  const { withNode, self, node, info } = group();
+  const { calls, verify } = countingVerifiers();
+  const synced = stored(withNode, self.id, { nodeInfos: { [node.id]: info } });
+  const outcome = client.mergeNodeState(synced, { nodeId: node.id, nodeInfo: { ...info }, chain: withNode.docs, nodeInfos: [{ ...info }] }, verify);
+  assert.equal(calls.nodeInfo, 0);
+  assert.equal(outcome.changed, false);
+  // Same body, other signature: verified (and rejected).
+  const forged = { body: info.body, sig: mesh.signMeshDoc(mesh.MESH_NODE_INFO_DOMAIN, { x: 1 }, seed(9)).sig };
+  const again = client.mergeNodeState(synced, { nodeId: node.id, nodeInfo: forged, chain: withNode.docs }, verify);
+  assert.ok(calls.nodeInfo > 0);
+  assert.equal(again.group.nodeInfos[node.id], info);
+});

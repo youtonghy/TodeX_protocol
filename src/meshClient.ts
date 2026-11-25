@@ -20,6 +20,28 @@ import { normalizeServerUrl } from './todex';
 /** Addresses kept per node. */
 const MAX_NODE_URLS = 16;
 
+/**
+ * How a merge verifies chains and node infos. Every check is plain-JavaScript
+ * ed25519, so a client that syncs often may pass verifiers that remember
+ * results by content (a verdict depends only on the documents and the key);
+ * the default checks each time.
+ */
+export type MeshVerifiers = {
+  chain: (docs: readonly MeshSignedDoc[]) => MeshChain;
+  nodeInfo: (doc: MeshSignedDoc, publicKey: string) => MeshNodeInfo;
+};
+
+const VERIFY: MeshVerifiers = { chain: verifyMeshChain, nodeInfo: verifyMeshNodeInfo };
+
+function chainOf(docs: readonly MeshSignedDoc[], groupId: string, verify: MeshVerifiers): MeshChain | null {
+  try {
+    const chain = verify.chain(docs);
+    return chain.groupId === groupId ? chain : null;
+  } catch {
+    return null;
+  }
+}
+
 export type StoredMeshGroup = {
   groupId: string;
   /** From the invite until the first chain arrives. */
@@ -113,14 +135,8 @@ function isDoc(value: unknown): value is MeshSignedDoc {
 
 /** The verified chain of a stored group; `null` while it has none or when
  * the stored one no longer verifies. */
-export function storedChain(group: StoredMeshGroup): MeshChain | null {
-  if (!group.chain.length) return null;
-  try {
-    const chain = verifyMeshChain(group.chain);
-    return chain.groupId === group.groupId ? chain : null;
-  } catch {
-    return null;
-  }
+export function storedChain(group: StoredMeshGroup, verify: MeshVerifiers = VERIFY): MeshChain | null {
+  return group.chain.length ? chainOf(group.chain, group.groupId, verify) : null;
 }
 
 /** Verified info of every node of `chain` (highest `seq`). */
@@ -140,14 +156,21 @@ export function nodeInfosOf(group: StoredMeshGroup, chain: MeshChain): Map<strin
 }
 
 /** Keeps the higher-`seq` verified info per node; returns whether any changed. */
-export function mergeNodeInfos(group: StoredMeshGroup, chain: MeshChain, docs: readonly MeshSignedDoc[]): boolean {
+export function mergeNodeInfos(
+  group: StoredMeshGroup,
+  chain: MeshChain,
+  docs: readonly MeshSignedDoc[],
+  verify: MeshVerifiers = VERIFY,
+): boolean {
   let changed = false;
   for (const doc of docs) {
+    // A document already stored as it is cannot raise any node's seq.
+    if (Object.values(group.nodeInfos).some((current) => current.body === doc.body && current.sig === doc.sig)) continue;
     for (const member of chain.head.members) {
       if (member.kind !== 'node') continue;
       let info: MeshNodeInfo;
       try {
-        info = verifyMeshNodeInfo(doc, member.publicKey);
+        info = verify.nodeInfo(doc, member.publicKey);
       } catch {
         continue;
       }
@@ -155,7 +178,7 @@ export function mergeNodeInfos(group: StoredMeshGroup, chain: MeshChain, docs: r
       let currentSeq = -1;
       if (current) {
         try {
-          currentSeq = verifyMeshNodeInfo(current, member.publicKey).seq;
+          currentSeq = verify.nodeInfo(current, member.publicKey).seq;
         } catch {
           currentSeq = -1;
         }
@@ -189,19 +212,12 @@ export type MeshSyncOutcome = {
 export function mergeNodeState(
   stored: StoredMeshGroup,
   remote: { nodeId: string; nodeInfo: MeshSignedDoc; chain?: MeshSignedDoc[]; nodeInfos?: MeshSignedDoc[] },
+  verify: MeshVerifiers = VERIFY,
 ): MeshSyncOutcome {
   const group: StoredMeshGroup = { ...stored, nodeInfos: { ...stored.nodeInfos }, nodeUrls: { ...stored.nodeUrls } };
   let changed = false;
-  let local = storedChain(group);
-  let remoteChain: MeshChain | null = null;
-  if (remote.chain?.length) {
-    try {
-      const candidate = verifyMeshChain(remote.chain);
-      if (candidate.groupId === group.groupId) remoteChain = candidate;
-    } catch {
-      remoteChain = null;
-    }
-  }
+  let local = storedChain(group, verify);
+  const remoteChain = remote.chain?.length ? chainOf(remote.chain, group.groupId, verify) : null;
   if (remoteChain && (local ? meshChainWins(remoteChain, local) : remoteChain.head.members.some((member) => member.id === group.deviceId))) {
     group.chain = remoteChain.docs;
     group.name = remoteChain.head.name;
@@ -209,7 +225,7 @@ export function mergeNodeState(
     changed = true;
   }
   if (!local) return { group, changed, push: false, removed: false };
-  if (mergeNodeInfos(group, local, [remote.nodeInfo, ...(remote.nodeInfos ?? [])])) changed = true;
+  if (mergeNodeInfos(group, local, [remote.nodeInfo, ...(remote.nodeInfos ?? [])], verify)) changed = true;
   const removed = !local.head.members.some((member) => member.id === group.deviceId && member.kind === 'device');
   const listsNode = local.head.members.some((member) => member.id === remote.nodeId);
   // The node is behind (or not in the group yet) or misses some node info.

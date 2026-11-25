@@ -260,18 +260,32 @@ export class InvalidPinnedKeyError extends ConnectionError {
   }
 }
 
-/** Runs one throwaway key agreement against the pinned key; throws `InvalidPinnedKeyError`. */
+/** Pinned keys a throwaway key agreement has accepted (`protocol\0key`); a key's usability never changes. */
+const usablePinnedKeys = new Set<string>();
+const USABLE_PINNED_KEYS_MAX = 64;
+
+/**
+ * Runs one throwaway key agreement against the pinned key; throws
+ * `InvalidPinnedKeyError`. A key that passed once is not checked again: the
+ * check runs on every connect, and on a phone the key agreement (X25519, or
+ * ML-KEM-768 encapsulation) is plain JavaScript.
+ */
 export function assertPinnedKeyUsable(profile: SecureTransportProfile): void {
   const protocol = pinnedProtocol(profile);
   if (!protocol) return;
+  const key = profile.encryptionPublicKey.trim();
+  const id = `${protocol}\0${key}`;
+  if (usablePinnedKeys.has(id)) return;
   let shared: Uint8Array | undefined;
   try {
-    shared = clientHandshake(protocol, decodeBase64UrlBytes(profile.encryptionPublicKey.trim())).shared;
+    shared = clientHandshake(protocol, decodeBase64UrlBytes(key)).shared;
   } catch {
     throw new InvalidPinnedKeyError(protocol);
   } finally {
     shared?.fill(0);
   }
+  if (usablePinnedKeys.size >= USABLE_PINNED_KEYS_MAX) usablePinnedKeys.clear();
+  usablePinnedKeys.add(id);
 }
 
 function pinnedProtocol(profile: SecureTransportProfile): SecureTransportProtocol | null {

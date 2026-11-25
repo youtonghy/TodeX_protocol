@@ -649,7 +649,8 @@ export class RecordStreamDecoder {
     return this.sawFinal;
   }
 
-  push(chunk: Uint8Array): Uint8Array[] {
+  /** `endOfStream`: `chunk` is the last of the stream, so a record that ends it should be the final one. */
+  push(chunk: Uint8Array, endOfStream = false): Uint8Array[] {
     if (chunk.length === 0) return [];
     if (this.sawFinal) throw new TransportCryptoError('bytes after final record');
     // Records are opened in place from the caller's chunk; only a partial
@@ -669,7 +670,7 @@ export class RecordStreamDecoder {
         offset += 4 + length;
         // The final flag is authenticated, and a streaming reader cannot know
         // whether more bytes follow, so `openEither` learns it from the tag.
-        const plaintext = this.openEither(ciphertext);
+        const plaintext = this.openEither(ciphertext, endOfStream && offset === buffer.length);
         out.push(plaintext.plaintext);
         if (plaintext.final) {
           this.sawFinal = true;
@@ -698,24 +699,25 @@ export class RecordStreamDecoder {
     wipe(this.buffer);
   }
 
-  private openEither(ciphertext: Uint8Array): { plaintext: Uint8Array; final: boolean } {
-    // Each record authenticates exactly one `final` value. Trying `final = 0`
-    // then `final = 1` with the same counter is safe: the counter advances
-    // only on success and a forged record fails both.
+  private openEither(ciphertext: Uint8Array, likelyFinal: boolean): { plaintext: Uint8Array; final: boolean } {
+    // Each record authenticates exactly one `final` value. Trying both with
+    // the same counter is safe: the counter advances only on success and a
+    // forged record fails both. The likely value goes first, since a wrong
+    // guess costs a whole extra Poly1305 pass over the record.
     const counter = this.cipher.nextCounter;
     try {
-      return { plaintext: this.cipher.open(counter, ciphertext, false), final: false };
+      return { plaintext: this.cipher.open(counter, ciphertext, likelyFinal), final: likelyFinal };
     } catch {
-      // Fall through: the record may be the final one.
+      // Fall through: the record carries the other flag, or is forged.
     }
-    return { plaintext: this.cipher.open(counter, ciphertext, true), final: true };
+    return { plaintext: this.cipher.open(counter, ciphertext, !likelyFinal), final: !likelyFinal };
   }
 }
 
 /** One-shot open of a complete record stream. */
 export function openRecordStream(cipher: RecordCipher, stream: Uint8Array): Uint8Array {
   const decoder = new RecordStreamDecoder(cipher);
-  const parts = decoder.push(stream);
+  const parts = decoder.push(stream, true);
   decoder.finish();
   // Each record's plaintext is a fresh array: a single record needs no copy.
   return parts.length === 1 ? parts[0] : concat(...parts);

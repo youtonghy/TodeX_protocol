@@ -566,6 +566,36 @@ test('record streams reject truncation, trailing bytes and missing final across 
   assert.equal(openRecordStream(new RecordCipher(key, th, DOWN), empty).length, 0);
 });
 
+test('a one-shot open authenticates each record once, the last one as final', () => {
+  const key = new Uint8Array(32).fill(4);
+  const th = new Uint8Array(32).fill(5);
+  const countingCipher = () => {
+    const cipher = new RecordCipher(key, th, DOWN);
+    const open = cipher.open.bind(cipher);
+    const calls = [];
+    cipher.open = (counter, ciphertext, final) => {
+      calls.push(final);
+      return open(counter, ciphertext, final);
+    };
+    return { cipher, calls };
+  };
+
+  const stream = sealRecordStream(new RecordCipher(key, th, DOWN), new Uint8Array(70000).fill(6));
+  const two = countingCipher();
+  assert.equal(openRecordStream(two.cipher, stream).length, 70000);
+  assert.deepEqual(two.calls, [false, true], 'no failed attempt on either record');
+
+  const small = sealRecordStream(new RecordCipher(key, th, DOWN), utf8('{"ok":true}'));
+  const one = countingCipher();
+  assert.equal(new TextDecoder().decode(openRecordStream(one.cipher, small)), '{"ok":true}');
+  assert.deepEqual(one.calls, [true]);
+
+  // A stream cut after a non-final record still fails, after trying both flags.
+  const cut = countingCipher();
+  assert.throws(() => openRecordStream(cut.cipher, stream.subarray(0, 4 + 65536 + 16)), TransportCryptoError);
+  assert.deepEqual(cut.calls, [true, false]);
+});
+
 test('oversized WebSocket plaintext is rejected before sealing without consuming a counter', () => {
   const vector = fixture.protocols[0];
   const session = createWsChannel({

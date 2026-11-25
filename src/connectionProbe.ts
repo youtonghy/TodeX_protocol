@@ -130,6 +130,22 @@ function classifyHttp(status: number, endpoint: string, body?: Uint8Array): Conn
   return error;
 }
 
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+/** Holds a request's outcome, so one the probe never reads cannot reject unhandled. */
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then(
+    (value): Settled<T> => ({ ok: true, value }),
+    (error: unknown): Settled<T> => ({ ok: false, error }),
+  );
+}
+
+async function unsettle<T>(settled: Promise<Settled<T>>): Promise<T> {
+  const outcome = await settled;
+  if (outcome.ok) return outcome.value;
+  throw outcome.error;
+}
+
 const isOk = (response: SecureResponse) => response.status >= 200 && response.status < 300;
 const json = (response: SecureResponse) => JSON.parse(new TextDecoder().decode(response.body)) as unknown;
 
@@ -160,8 +176,15 @@ export async function probeBackendConnection(options: {
   const { transport } = options;
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
 
+  // The three reads are independent, so they go out together: each is a
+  // round trip of its own (one `POST /v2/sealed`), which a relayed path pays
+  // twice over. Results are still judged in order, so the first failing
+  // endpoint is the one reported, as when they ran one after another.
+  const versionRead = settle(probeGet(transport, '/v2/version', timeoutMs));
+  const healthRead = settle(probeGet(transport, '/health', timeoutMs));
+  const providersRead = settle(probeGet(transport, '/v2/providers', timeoutMs));
   try {
-    const versionResponse = await probeGet(transport, '/v2/version', timeoutMs);
+    const versionResponse = await unsettle(versionRead);
     if (!isOk(versionResponse)) {
       const error = classifyHttp(versionResponse.status, '/v2/version', versionResponse.body);
       return { ...empty, error, code: error.code };
@@ -185,13 +208,13 @@ export async function probeBackendConnection(options: {
       return { ...empty, version, error, code: error.code };
     }
 
-    const healthResponse = await probeGet(transport, '/health', timeoutMs);
+    const healthResponse = await unsettle(healthRead);
     if (!isOk(healthResponse)) {
       const error = classifyHttp(healthResponse.status, '/health', healthResponse.body);
       return { ...empty, version, error, code: error.code };
     }
 
-    const providersResponse = await probeGet(transport, '/v2/providers', timeoutMs);
+    const providersResponse = await unsettle(providersRead);
     if (!isOk(providersResponse)) {
       const error = classifyHttp(providersResponse.status, '/v2/providers', providersResponse.body);
       return { ...empty, version, error, code: error.code };

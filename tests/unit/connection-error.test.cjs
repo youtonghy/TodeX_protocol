@@ -86,6 +86,67 @@ function fakeTransport(responses) {
   };
 }
 
+test('probeBackendConnection sends its three reads at once and reports the first failing one', async () => {
+  const { probeBackendConnection } = require(path.join(compiledDir, 'lib', 'connectionProbe.js'));
+  const answers = {
+    '/v2/version': { status: 200, body: { name: 'todex-agentd', version: '1.0.0' } },
+    '/health': { status: 200, body: {} },
+    '/v2/providers': { status: 200, body: { providers: [{ id: 'codex' }] } },
+  };
+  const gated = responses => {
+    const sent = [];
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    return {
+      sent,
+      release: () => release(),
+      transport: {
+        fetch: async request => {
+          sent.push(request.path);
+          await gate;
+          const entry = responses[request.path];
+          if (entry instanceof Error) throw entry;
+          return { status: entry.status, headers: {}, body: new TextEncoder().encode(JSON.stringify(entry.body ?? {})) };
+        },
+      },
+    };
+  };
+
+  const ok = gated(answers);
+  const pending = probeBackendConnection({ serverUrl: 'http://127.0.0.1:7345', transport: ok.transport });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual([...ok.sent].sort(), ['/health', '/v2/providers', '/v2/version'], 'all three before any answer');
+  ok.release();
+  const result = await pending;
+  assert.equal(result.ok, true);
+  assert.equal(result.version.version, '1.0.0');
+  assert.deepEqual(result.providers, [{ id: 'codex' }]);
+
+  // Version and health both fail: version is reported, and the unread
+  // failures do not reject unhandled.
+  const failing = gated({
+    ...answers,
+    '/v2/version': { status: 500, body: { code: 'INTERNAL', message: 'version down' } },
+    '/health': new Error('socket closed'),
+    '/v2/providers': new Error('socket closed'),
+  });
+  const failed = probeBackendConnection({ serverUrl: 'http://127.0.0.1:7345', transport: failing.transport });
+  failing.release();
+  const outcome = await failed;
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error.type, 'SERVER_ERROR');
+  assert.match(outcome.error.technicalDetails, /version down/);
+
+  // Health fails after version answered: health is reported, with the version kept.
+  const healthDown = gated({ ...answers, '/health': { status: 503, body: {} } });
+  const down = probeBackendConnection({ serverUrl: 'http://127.0.0.1:7345', transport: healthDown.transport });
+  healthDown.release();
+  const downOutcome = await down;
+  assert.equal(downOutcome.ok, false);
+  assert.equal(downOutcome.version.version, '1.0.0');
+  assert.equal(downOutcome.error.httpStatus, 503);
+});
+
 test('probeBackendConnection separates 401 from 403', async () => {
   const { probeBackendConnection } = require(path.join(compiledDir, 'lib', 'connectionProbe.js'));
   const unauthenticated = await probeBackendConnection({

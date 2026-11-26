@@ -37,7 +37,7 @@ import type {
 } from './ssh';
 import type { AgentBrowserEngine, AgentBrowserHostApproval, AgentBrowserHosts, AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
 import type { AgentCallEventType } from './agentCalling';
-import type { PromptUploadChunkResult } from './promptUploads';
+import type { PromptLinkRequest, PromptUploadChunkResult } from './promptUploads';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -2549,6 +2549,18 @@ export class V2ApiClient {
     if (conversationId) query.set('conversationId', conversationId);
     return this.request(`/v2/uploads?${query}`, {
       method: 'PUT', body: bytes as Uint8Array<ArrayBuffer>,
+    }, timeoutMs);
+  }
+
+  /**
+   * Registers a file the client has on the daemon's machine
+   * (`POST /v2/uploads/link`), so a prompt can name it in place. Only IPC and
+   * direct loopback clients may; any failure (another machine behind a
+   * loopback tunnel, an older daemon) means the file must be uploaded.
+   */
+  async linkPromptFile(request: PromptLinkRequest, timeoutMs?: number): Promise<PromptUploadChunkResult> {
+    return this.request('/v2/uploads/link', {
+      method: 'POST', body: JSON.stringify(request),
     }, timeoutMs);
   }
 

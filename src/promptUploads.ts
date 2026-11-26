@@ -2,9 +2,13 @@
  * Prompt attachments uploaded to the daemon (`PUT /v2/uploads`): the
  * composer sends dropped and pasted files, and long pasted text as
  * Markdown, to `/tmp/todex/file` on the backend's machine and names the
- * returned path in the prompt.
+ * returned path in the prompt. A client on the daemon's own machine may
+ * instead register a file it already has on disk (`POST /v2/uploads/link`),
+ * so the prompt names the original file and nothing is copied.
  */
 
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import type { PromptContentRef } from './v2';
 
 /** Chunk size and per-file limit of `PUT /v2/uploads`. */
@@ -30,6 +34,27 @@ export type PromptUploadChunkResult = {
   mimeType: string;
   sizeBytes: number;
 };
+
+/** How much of a file `POST /v2/uploads/link` fingerprints (the daemon's
+ * `LINK_FINGERPRINT_BYTES`); the whole file when it is smaller. */
+export const PROMPT_LINK_FINGERPRINT_BYTES = 64 * 1024;
+
+/** `POST /v2/uploads/link`: a file on the client's disk, which the daemon
+ * checks is the same file on its own machine. */
+export type PromptLinkRequest = {
+  /** Absolute path, as the daemon sees it (mapped into a container). */
+  path: string;
+  sizeBytes: number;
+  /** {@link promptLinkFingerprint} of the file's head. */
+  headSha256: string;
+  conversationId?: string;
+};
+
+/** Lowercase hex SHA-256 of `head`, the file's first
+ * {@link PROMPT_LINK_FINGERPRINT_BYTES} (longer input is cut). */
+export function promptLinkFingerprint(head: Uint8Array): string {
+  return bytesToHex(sha256(head.subarray(0, PROMPT_LINK_FINGERPRINT_BYTES)));
+}
 
 /** Characters as the user counts them: code points, not UTF-16 units. */
 export function textLength(text: string): number {

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   pastedTextDisposition, textLength, isPromptUploadUnsupported, uploadedPromptContent,
   PASTED_TEXT_CAPSULE_MAX_CHARS, PROMPT_IMAGE_BUDGET_BYTES,
+  promptLinkFingerprint, PROMPT_LINK_FINGERPRINT_BYTES,
 } = require('../../dist/unit/lib/promptUploads.js');
 const { promptContentFromAttachments } = require('../../dist/unit/lib/conversationCommands.js');
 const { V2ApiClient } = require('../../dist/unit/lib/v2.js');
@@ -53,4 +54,26 @@ test('upload chunks are raw PUTs that carry the upload id after the first', asyn
   assert.equal(calls[0].type, 'application/octet-stream');
   assert.match(calls[0].url, /\/v2\/uploads\?name=a\+b\.md&offset=0$/);
   assert.match(calls[1].url, /\/v2\/uploads\?name=a\+b\.md&offset=3&uploadId=u1$/);
+});
+
+test('link fingerprints hash only the head of the file', () => {
+  const { createHash } = require('node:crypto');
+  const hex = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  assert.equal(promptLinkFingerprint(new TextEncoder().encode('hello')), hex('hello'));
+  const large = new Uint8Array(PROMPT_LINK_FINGERPRINT_BYTES + 10).fill(7);
+  assert.equal(promptLinkFingerprint(large), hex(large.subarray(0, PROMPT_LINK_FINGERPRINT_BYTES)));
+});
+
+test('links are signed JSON POSTs', async () => {
+  const calls = [];
+  const client = new V2ApiClient({ serverUrl: 'http://127.0.0.1:7345', fetchImpl: async (url, init) => {
+    calls.push({ url: String(url), method: init.method, type: init.headers['content-type'], body: init.body });
+    return new Response(JSON.stringify({ uploadId: 'l1', path: '/Users/a/x.png', name: 'x.png', mimeType: 'image/png', sizeBytes: 3 }), { status: 200, headers: { 'content-type': 'application/json' } });
+  } });
+  const linked = await client.linkPromptFile({ path: '/Users/a/x.png', sizeBytes: 3, headSha256: 'ab' });
+  assert.equal(linked.path, '/Users/a/x.png');
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].type, 'application/json');
+  assert.match(calls[0].url, /\/v2\/uploads\/link$/);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[0].body)), { path: '/Users/a/x.png', sizeBytes: 3, headSha256: 'ab' });
 });

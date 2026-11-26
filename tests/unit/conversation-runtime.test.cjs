@@ -154,6 +154,17 @@ test('permission projection restores only unresolved requests and closes them on
   assert.deepEqual(completed.state.pendingPermissions, []);
 });
 
+test('a prompt asked from an agent tool call outlives its turn until resolved', () => {
+  const update = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'permission.requested', { turnId: 't', permissionId: 'grant', kind: 'ssh_host', lifetime: 'call' }),
+    event(3, 'permission.requested', { turnId: 't', permissionId: 'tool' }),
+    event(4, 'turn.completed', { turnId: 't' }));
+  assert.deepEqual(update.state.pendingPermissions.map(p => p.id), ['grant']);
+  assert.equal(update.state.status, 'completed');
+  const resolved = apply(update.state, event(5, 'permission.resolved', { permissionId: 'grant' }));
+  assert.deepEqual(resolved.state.pendingPermissions, []);
+});
+
 function usage(sequence, turnId, cumulative, last = cumulative) {
   return event(sequence, 'usage.updated', { provider: 'codex', turnId, usage: { cumulative, last }, contextWindow: 100 });
 }

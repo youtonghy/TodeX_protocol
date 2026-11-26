@@ -738,7 +738,11 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
     if (!state.pendingPermissions.some(item => item.scope !== 'session') && state.status === 'waitingPermission') state.status = state.activeTurnId ? 'running' : 'idle';
   }
   if (['turn.completed', 'turn.cancelled', 'turn.interrupted', 'turn.failed'].includes(type)) {
-    state.pendingPermissions = state.pendingPermissions.filter(item => item.scope === 'session' || (explicitTurnId && item.turnId !== explicitTurnId));
+    // A prompt asked from inside an agent tool call (`lifetime: 'call'`, e.g.
+    // an SSH host grant) lives as long as that call, which can outlast the
+    // turn (a background subagent); only its `permission.resolved` ends it.
+    state.pendingPermissions = state.pendingPermissions.filter(item => item.scope === 'session'
+      || item.payload.lifetime === 'call' || (explicitTurnId && item.turnId !== explicitTurnId));
     if (!explicitTurnId || !state.activeTurnId || explicitTurnId === state.activeTurnId) {
       state.activeTurnId = '';
       state.status = type === 'turn.failed' || (type === 'turn.completed' && payload.stopReason === 'error') ? 'failed' : type === 'turn.cancelled' ? 'cancelled' : type === 'turn.interrupted' ? 'interrupted' : 'completed';

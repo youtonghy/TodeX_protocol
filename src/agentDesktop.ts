@@ -10,6 +10,11 @@
  *   (`agentBrowser.watch` → {@link AgentBrowserFrame}).
  * - Computer Use (`computer_*`) controls the host itself; the person at the
  *   host grants each conversation there.
+ * - The agent camera (`camera_*`) records a camera on the host that the user
+ *   allowed in settings. Any paired device approves each use on a card with a
+ *   live preview ({@link DESKTOP_CAMERA_KIND}), choosing the camera and how
+ *   frames are captured. Frames are JPEG files the agent reads, never images
+ *   sent to clients beyond previews.
  *
  * Desktops used to run the browser as *executors*; daemons still answer
  * their `executor.register` harmlessly.
@@ -30,6 +35,9 @@ export type AgentBrowserTool = typeof AGENT_BROWSER_TOOLS[number];
 
 export const AGENT_COMPUTER_TOOLS = ['computer_observe', 'computer_act', 'computer_done'] as const;
 export type AgentComputerTool = typeof AGENT_COMPUTER_TOOLS[number];
+
+export const AGENT_CAMERA_TOOLS = ['camera_list', 'camera_start', 'camera_stop'] as const;
+export type AgentCameraTool = typeof AGENT_CAMERA_TOOLS[number];
 
 
 /** Whether the daemon's host can run Computer Use. */
@@ -149,6 +157,83 @@ export type AgentDesktopSettings = {
   computerEngines?: { agentDesktop: AgentDesktopEngineStatus };
   /** Absent from daemons where the browser still ran on desktops. */
   browser?: AgentBrowserStatus;
+  /** Agents also get the `camera_*` tools (needs `enabled`). Off by default; absent from daemons without the camera. */
+  cameraEnabled?: boolean;
+  /** Absent from daemons without the camera. */
+  camera?: AgentCameraStatus;
+};
+
+// ---- Agent camera ------------------------------------------------------------
+
+/**
+ * How a camera session keeps frames. `fixed`: evenly spaced at
+ * {@link AgentCameraCapture.fps}. `dynamic`: only while the picture changes,
+ * more the more it changes; {@link AgentCameraCapture.sensitivity} (1–100)
+ * sets how small a change counts (higher keeps more).
+ */
+export type AgentCameraCaptureMode = 'fixed' | 'dynamic';
+
+export type AgentCameraCapture = {
+  mode: AgentCameraCaptureMode;
+  /** Frames per second (`fixed`). */
+  fps: number;
+  /** 1–100 (`dynamic`). */
+  sensitivity: number;
+};
+
+/** The macOS (TCC) camera permission of the TodeX backend on its host. */
+export type AgentCameraPermission = 'granted' | 'denied' | 'restricted' | 'notDetermined';
+
+export type AgentCameraDevice = {
+  id: string;
+  name: string;
+  /** Plugged in now. */
+  connected: boolean;
+  /** Agents may use it. */
+  allowed: boolean;
+  /** A session is recording it. */
+  inUse: boolean;
+};
+
+export type AgentCameraLimits = {
+  fps: { min: number; max: number };
+  sensitivity: { min: number; max: number };
+  maxSeconds: { min: number; max: number };
+  maxFrames: { min: number; max: number };
+};
+
+/** {@link AgentDesktopSettings.camera}. */
+export type AgentCameraStatus = {
+  /** The host can use cameras at all (macOS only for now). */
+  supported: boolean;
+  reason?: string | null;
+  host: string;
+  platform: string;
+  permission: AgentCameraPermission;
+  /** macOS's prompt is on the host's screen; poll while set. */
+  permissionRequest: boolean;
+  /** Connected cameras, then allowed ones that are unplugged. */
+  devices: AgentCameraDevice[];
+  /** Offered first on approval cards. */
+  defaultDevice?: string | null;
+  /** What approval cards start with. */
+  capture: AgentCameraCapture;
+  /** Every session stops after this long ... */
+  maxSeconds: number;
+  /** ... or this many frames. */
+  maxFrames: number;
+  limits: AgentCameraLimits;
+};
+
+/** `PUT /v2/agent-desktop/camera`; absent fields stay. Returns {@link AgentDesktopSettings}. */
+export type AgentCameraSettingsUpdate = {
+  enabled?: boolean;
+  /** Device ids agents may use (replaces the list). */
+  allowed?: string[];
+  defaultDevice?: string | null;
+  capture?: AgentCameraCapture;
+  maxSeconds?: number;
+  maxFrames?: number;
 };
 
 /** An app on the daemon's host. `id` is what `computer_act open_app` takes
@@ -410,6 +495,108 @@ export const DESKTOP_BROWSER_HOST_KIND = 'desktop_browser_host';
 export const DESKTOP_COMPUTER_APP_KIND = 'desktop_computer_app';
 /** A sensitive Computer Use action (password field); any device. */
 export const DESKTOP_COMPUTER_ACTION_KIND = 'desktop_computer_action';
+/**
+ * `permission.requested.kind` of a `camera_start`; any device. Options:
+ * `once`, `conversation` (until the conversation ends or it is revoked),
+ * `reject`. An allow may carry {@link DesktopCameraChoice} as `data`.
+ * While it is open, `getCameraFrame(conversationId, deviceId)` previews any
+ * camera in {@link DesktopCameraDetails.devices}.
+ */
+export const DESKTOP_CAMERA_KIND = 'desktop_camera';
+
+/** `details` of a {@link DESKTOP_CAMERA_KIND} permission. */
+export type DesktopCameraDetails = {
+  /** The computer the cameras are on. */
+  host: string;
+  /** Allowed, connected cameras the person may pick from. */
+  devices: { id: string; name: string }[];
+  /** Preselected: the agent's pick or the default. */
+  deviceId: string;
+  capture: AgentCameraCapture;
+  maxSeconds: number;
+  maxFrames: number;
+  limits: Pick<AgentCameraLimits, 'fps' | 'sensitivity'>;
+};
+
+/** `data` of an allow answer to a {@link DESKTOP_CAMERA_KIND} card. */
+export type DesktopCameraChoice = {
+  deviceId: string;
+  capture: AgentCameraCapture;
+};
+
+/** `desktop.camera.grant`: a `camera_start` was allowed, or the conversation's camera taken back. */
+export type DesktopCameraGrantEvent = {
+  status: 'granted' | 'revoked';
+  /** `once`, or `conversation` (later starts on that camera skip the card). */
+  scope?: 'once' | 'conversation';
+  deviceId?: string;
+  deviceName?: string;
+  capture?: AgentCameraCapture;
+  approvedBy?: string;
+  /** `user`, `settings`. */
+  reason?: string;
+};
+
+/**
+ * Why a camera session ended: `agent` (camera_stop), `time_limit`,
+ * `frame_limit`, `turn_ended`, `revoked`, `user` (stop button),
+ * `camera_lost`, `failed`.
+ */
+export type DesktopCameraEndReason =
+  | 'agent' | 'time_limit' | 'frame_limit' | 'turn_ended' | 'revoked' | 'user' | 'camera_lost' | 'failed';
+
+/** `desktop.camera.session`: a camera session started or ended. */
+export type DesktopCameraSessionEvent =
+  | {
+    status: 'started';
+    sessionId: string;
+    deviceId: string;
+    deviceName: string;
+    capture: AgentCameraCapture;
+    maxSeconds: number;
+    maxFrames: number;
+    /** Where the frames go, on the backend's computer. */
+    directory: string;
+  }
+  | {
+    status: 'ended';
+    sessionId: string;
+    reason: DesktopCameraEndReason;
+    frames: number;
+    durationMs: number;
+    directory: string;
+  };
+
+/** A running session's progress in {@link CameraFrame}. */
+export type AgentCameraProgress = {
+  frames: number;
+  elapsedMs: number;
+  /** How much the picture changes now, in kbps. */
+  changeKbps: number;
+  /** Frames per second being kept now (0 while still, in dynamic capture). */
+  rateFps: number;
+};
+
+/**
+ * `GET /v2/conversations/{id}/agent-desktop/camera[?deviceId]`: the
+ * conversation's recording camera, or a camera its open card offers (404
+ * otherwise). `GET /v2/agent-desktop/camera/preview?deviceId` (settings) has
+ * no `session`. Polling keeps the camera on; it turns off a few seconds after
+ * the last poll unless a session records it.
+ */
+export type CameraFrame = {
+  mimeType: string;
+  dataUrl: string;
+  deviceId: string;
+  session?: {
+    sessionId: string;
+    deviceName: string;
+    capture: AgentCameraCapture;
+    maxSeconds: number;
+    maxFrames: number;
+    progress: AgentCameraProgress;
+  };
+};
 
 /**
  * `desktop.computer.grant`: the conversation's Computer Use grant, which the
@@ -483,6 +670,10 @@ export type AgentShot = { shotId: string; mimeType: string; dataUrl: string };
 
 export function isAgentComputerTool(value: unknown): value is AgentComputerTool {
   return typeof value === 'string' && (AGENT_COMPUTER_TOOLS as readonly string[]).includes(value);
+}
+
+export function isAgentCameraTool(value: unknown): value is AgentCameraTool {
+  return typeof value === 'string' && (AGENT_CAMERA_TOOLS as readonly string[]).includes(value);
 }
 
 export function isAgentBrowserTool(value: unknown): value is AgentBrowserTool {

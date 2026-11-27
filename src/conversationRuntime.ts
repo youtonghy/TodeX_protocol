@@ -4,7 +4,7 @@ import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryE
 import { assistantSegmentBase, classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 import { SSH_EXEC_RUN_LIMIT, parseAgentOutputRedactions, parseSshExecRedactedValues, parseSshExecTransfer, type SshExecLogin, type SshExecOutputChunk, type SshExecRun, type SshLoginOutcome } from './ssh';
-import type { DesktopBrowserActionEvent, DesktopComputerActionEvent } from './agentDesktop';
+import type { AgentCameraCapture, DesktopBrowserActionEvent, DesktopCameraEndReason, DesktopComputerActionEvent } from './agentDesktop';
 import { AGENT_CALL_STATUSES, isActiveAgentCallStatus, type AgentCallError, type AgentCallSession, type AgentCallStatus, type AgentCallTurn } from './agentCalling';
 export type { AgentCallError, AgentCallSession, AgentCallStatus, AgentCallTurn } from './agentCalling';
 
@@ -110,6 +110,9 @@ export type ConversationRuntime = {
   /** Computer Use: whether the conversation holds the screen, and its
    * newest actions (`desktop.computer.*`). History pages do not extend it. */
   desktopComputer: DesktopComputerState;
+  /** Agent camera: the session recording now, if any, and how the last one
+   * ended (`desktop.camera.*`). */
+  desktopCamera: DesktopCameraState;
   compaction: RuntimeCompaction;
   /** `null` when none is set, or none was seen in the loaded history. */
   goal: RuntimeGoal | null;
@@ -169,7 +172,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
   return {
     conversationId, workspaceId, appliedSequence, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
-    subagents: [], agentCalls: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, goal: null, plan: null, memoryEntries: [],
+    subagents: [], agentCalls: [], sshExecs: [], desktopBrowser: { granted: false, actions: [] }, desktopComputer: { active: false, actions: [] }, desktopCamera: { active: false }, compaction: { status: 'idle', recommended: false, updatedAt: '' }, goal: null, plan: null, memoryEntries: [],
     messageCategories: {}, assistantSegmentStart: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false, followUps: EMPTY_FOLLOW_UP_QUEUE,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
@@ -818,6 +821,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent, time
   if (type === 'ssh.login.requested' || type === 'ssh.login.resolved') projectSshLogin(state, type, payload);
   if (type === 'desktop.browser.action' || type === 'desktop.browser.grant' || type === 'desktop.browser.tab') projectDesktopBrowser(state, type, payload, event.time);
   if (type === 'desktop.computer.action' || type === 'desktop.computer.session' || type === 'desktop.computer.grant') projectDesktopComputer(state, type, payload, event.time);
+  if (type === 'desktop.camera.session') projectDesktopCamera(state, payload, event.time);
   if (type === 'memory.updated' || type === 'memory.created') {
     const id = string(payload.memoryId ?? payload.id);
     const content = string(payload.content ?? payload.text);
@@ -1076,6 +1080,55 @@ function projectDesktopBrowser(state: ConversationRuntime, type: string, payload
     deviceName: string(payload.deviceName) || state.desktopBrowser.deviceName,
     actions: [...state.desktopBrowser.actions, action].slice(-DESKTOP_BROWSER_ACTION_LIMIT),
   };
+}
+
+export type DesktopCameraState = {
+  /** A camera session is recording for the conversation. */
+  active: boolean;
+  sessionId?: string;
+  deviceId?: string;
+  deviceName?: string;
+  capture?: AgentCameraCapture;
+  maxSeconds?: number;
+  maxFrames?: number;
+  /** When the running session started. */
+  startedAt?: string;
+  /** The newest session that ended. */
+  lastEnded?: { sessionId: string; reason: DesktopCameraEndReason | string; frames: number; durationMs: number; time: string };
+};
+
+function projectDesktopCamera(state: ConversationRuntime, payload: RecordValue, time: string): void {
+  const sessionId = string(payload.sessionId);
+  if (!sessionId) return;
+  if (payload.status === 'started') {
+    const capture = object(payload.capture);
+    state.desktopCamera = {
+      active: true,
+      sessionId,
+      deviceId: string(payload.deviceId) || undefined,
+      deviceName: string(payload.deviceName) || undefined,
+      capture: capture.mode === 'fixed' || capture.mode === 'dynamic'
+        ? { mode: capture.mode, fps: Number(capture.fps) || 1, sensitivity: Number(capture.sensitivity) || 50 }
+        : undefined,
+      maxSeconds: typeof payload.maxSeconds === 'number' ? payload.maxSeconds : undefined,
+      maxFrames: typeof payload.maxFrames === 'number' ? payload.maxFrames : undefined,
+      startedAt: time,
+      lastEnded: state.desktopCamera.lastEnded,
+    };
+    return;
+  }
+  if (payload.status !== 'ended') return;
+  const ended = {
+    sessionId,
+    reason: string(payload.reason),
+    frames: typeof payload.frames === 'number' ? payload.frames : 0,
+    durationMs: typeof payload.durationMs === 'number' ? payload.durationMs : 0,
+    time,
+  };
+  // An older session's end must not stop the view of a newer one.
+  state.desktopCamera = state.desktopCamera.sessionId === sessionId || !state.desktopCamera.active
+    ? { ...state.desktopCamera, active: false, lastEnded: ended }
+    : { ...state.desktopCamera, lastEnded: ended };
 }
 
 export type DesktopComputerState = {

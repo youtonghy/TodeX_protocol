@@ -69,3 +69,23 @@ test('computer tool names are MCP- and model-API-safe', () => {
     assert.equal(desktop.isAgentBrowserTool(tool), false);
   }
 });
+
+test('camera tool names are MCP- and model-API-safe and distinct', () => {
+  for (const tool of desktop.AGENT_CAMERA_TOOLS) {
+    assert.match(tool, /^[a-zA-Z0-9_-]{1,64}$/);
+    assert.ok(`mcp__${desktop.AGENT_DESKTOP_SERVER}__${tool}`.length <= 64);
+    assert.ok(desktop.isAgentCameraTool(tool));
+    assert.equal(desktop.isAgentComputerTool(tool), false);
+    assert.equal(desktop.isAgentBrowserTool(tool), false);
+  }
+  assert.equal(desktop.DESKTOP_CAMERA_KIND, 'desktop_camera');
+});
+
+test('a camera card answer carries the chosen camera and capture settings', () => {
+  const { permissionDecision } = require(path.join(compiledDir, 'todex.js'));
+  const choice = { deviceId: 'cam-desk', capture: { mode: 'dynamic', fps: 1, sensitivity: 70 } };
+  assert.deepEqual(
+    permissionDecision({ optionId: 'conversation', name: 'Allow for this conversation', kind: 'allow_always' }, choice),
+    { outcome: 'allow_always', optionId: 'conversation', data: choice },
+  );
+});

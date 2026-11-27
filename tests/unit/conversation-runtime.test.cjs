@@ -960,6 +960,34 @@ test('computer use sessions and actions collect without touching the timeline', 
   assert.equal(ended.desktopComputer.actions.length, 1);
 });
 
+test('camera sessions project without touching the timeline', () => {
+  const started = (sequence, sessionId) => event(sequence, 'desktop.camera.session', {
+    status: 'started', sessionId, deviceId: 'cam-desk', deviceName: 'Desk camera',
+    capture: { mode: 'fixed', fps: 2, sensitivity: 50 }, maxSeconds: 600, maxFrames: 600, directory: '/tmp/todex/file/x',
+  });
+  const ended = (sequence, sessionId, extra = {}) => event(sequence, 'desktop.camera.session', {
+    status: 'ended', sessionId, reason: 'agent', frames: 12, durationMs: 9000, directory: '/tmp/todex/file/x', ...extra,
+  });
+  const recording = apply(empty(), event(1, 'desktop.camera.grant', { status: 'granted', scope: 'once' }), started(2, 'cam_a')).state;
+  assert.equal(recording.timeline.length, 0);
+  assert.equal(recording.desktopCamera.active, true);
+  assert.equal(recording.desktopCamera.sessionId, 'cam_a');
+  assert.equal(recording.desktopCamera.deviceName, 'Desk camera');
+  assert.deepEqual(recording.desktopCamera.capture, { mode: 'fixed', fps: 2, sensitivity: 50 });
+  const stopped = apply(recording, ended(3, 'cam_a')).state;
+  assert.equal(stopped.desktopCamera.active, false);
+  assert.deepEqual(
+    { ...stopped.desktopCamera.lastEnded, time: undefined },
+    { sessionId: 'cam_a', reason: 'agent', frames: 12, durationMs: 9000, time: undefined },
+  );
+  // A late end of an older session leaves a newer recording alone.
+  const newer = apply(stopped, started(4, 'cam_b'), ended(5, 'cam_a', { reason: 'turn_ended' })).state;
+  assert.equal(newer.desktopCamera.active, true);
+  assert.equal(newer.desktopCamera.sessionId, 'cam_b');
+  // Events without a session id are ignored.
+  assert.equal(apply(empty(), event(1, 'desktop.camera.session', { status: 'started' })).state.desktopCamera.active, false);
+});
+
 test('capping keeps the newest rows and raises the floor below every kept row', () => {
   const events = [event(1, 'turn.started', { turnId: 't' }),
     event(2, 'message.delta', { text: 'First', turnId: 't' }),

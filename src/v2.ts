@@ -35,7 +35,7 @@ import type {
   SshLoginAnswerInput,
   SshTestResult,
 } from './ssh';
-import type { AgentBrowserEngine, AgentBrowserHostApproval, AgentBrowserHosts, AgentBrowserProfile, AgentBrowserProfiles, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, ComputerFrame, HostApps } from './agentDesktop';
+import type { AgentBrowserEngine, AgentBrowserHostApproval, AgentBrowserHosts, AgentBrowserProfile, AgentBrowserProfiles, AgentCameraSettingsUpdate, AgentComputerEngine, AgentComputerPermission, AgentDesktopSettings, AgentShot, CameraFrame, ComputerFrame, HostApps } from './agentDesktop';
 import type { AgentCallEventType } from './agentCalling';
 import type { PromptLinkRequest, PromptUploadChunkResult } from './promptUploads';
 
@@ -2203,6 +2203,33 @@ export class V2ApiClient {
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop/frame`);
   }
 
+  /**
+   * The agent camera's switch, allowed cameras and defaults. Turning it off, or taking a camera
+   * off the list, ends the sessions and grants it covered. 404 from daemons without the camera.
+   */
+  async setAgentCameraSettings(update: AgentCameraSettingsUpdate): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop/camera', { method: 'PUT', body: JSON.stringify(update) });
+  }
+
+  /** Shows macOS's camera prompt on the daemon's host when never answered; poll `camera.permissionRequest`. */
+  async requestCameraPermission(): Promise<AgentDesktopSettings> {
+    return this.request('/v2/agent-desktop/camera/permission', { method: 'POST' });
+  }
+
+  /** What a connected camera on the daemon's host sees now (settings). Polling keeps it on. */
+  async getCameraPreview(deviceId: string): Promise<CameraFrame> {
+    return this.request(`/v2/agent-desktop/camera/preview?deviceId=${encodeURIComponent(deviceId)}`);
+  }
+
+  /**
+   * The conversation's recording camera with its progress, or `deviceId` while its camera card
+   * offers it; 404 (`ConnectionError.httpStatus`) otherwise. Polling keeps the camera on.
+   */
+  async getCameraFrame(conversationId: string, deviceId?: string): Promise<CameraFrame> {
+    const query = deviceId ? `?deviceId=${encodeURIComponent(deviceId)}` : '';
+    return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop/camera${query}`);
+  }
+
   /** The conversation's browser tab now (the live stream's polling fallback); 404 without a tab. */
   async getBrowserFrame(conversationId: string): Promise<ComputerFrame> {
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop/frame?capability=browser`);
@@ -2261,8 +2288,12 @@ export class V2ApiClient {
     return this.request(`/v2/agent-browser/hosts/${encodeURIComponent(host)}`, { method: 'DELETE' });
   }
 
-  /** Stops the agent's desktop browser and/or Computer Use for one conversation; its next tool call asks again. */
-  async revokeAgentDesktop(conversationId: string, capability?: 'browser' | 'screen'): Promise<{ conversationId: string; revoked: boolean }> {
+  /**
+   * Stops the agent's desktop browser, Computer Use and/or camera (all without `capability`) for
+   * one conversation; its next tool call asks again. A recording camera session ends and keeps
+   * its frames.
+   */
+  async revokeAgentDesktop(conversationId: string, capability?: 'browser' | 'screen' | 'camera'): Promise<{ conversationId: string; revoked: boolean }> {
     const query = capability ? `?capability=${capability}` : '';
     return this.request(`/v2/conversations/${encodeURIComponent(conversationId)}/agent-desktop${query}`, { method: 'DELETE' });
   }

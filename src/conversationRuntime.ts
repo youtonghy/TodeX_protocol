@@ -3,7 +3,7 @@ import { canonicalConversationEventType, contextCompactionStatus, normalizeConve
 import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun, SubagentStatus } from './v2';
 import { assistantSegmentBase, classifyV2ConversationEvent, contextUsageFromV2Event, coveredAssistantSegmentIds, coveredAssistantSegmentPrefixIds, isStepProgressEntry, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
-import { SSH_EXEC_RUN_LIMIT, parseAgentOutputRedactions, parseSshExecRedactedValues, type SshExecLogin, type SshExecOutputChunk, type SshExecRun, type SshLoginOutcome } from './ssh';
+import { SSH_EXEC_RUN_LIMIT, parseAgentOutputRedactions, parseSshExecRedactedValues, parseSshExecTransfer, type SshExecLogin, type SshExecOutputChunk, type SshExecRun, type SshLoginOutcome } from './ssh';
 import type { DesktopBrowserActionEvent, DesktopComputerActionEvent } from './agentDesktop';
 import { AGENT_CALL_STATUSES, isActiveAgentCallStatus, type AgentCallError, type AgentCallSession, type AgentCallStatus, type AgentCallTurn } from './agentCalling';
 export type { AgentCallError, AgentCallSession, AgentCallStatus, AgentCallTurn } from './agentCalling';
@@ -1126,9 +1126,11 @@ function projectSshExec(state: ConversationRuntime, phase: string, payload: Reco
   // Output or completion whose start lies below the loaded window still gets
   // a run; paging in the start fills the command (see mergeEarlierSshExec).
   const base: SshExecRun = previous ?? { id, host: '', command: '', status: 'running', output: [] };
+  const transfer = parseSshExecTransfer(payload.transfer, base.transfer);
   let run: SshExecRun = { ...base,
     host: string(payload.host) || base.host,
-    turnId: string(payload.turnId) || base.turnId };
+    turnId: string(payload.turnId) || base.turnId,
+    ...(transfer ? { transfer } : {}) };
   if (phase === 'started') {
     run = { ...run, command: string(payload.command) || run.command, cwd: string(payload.cwd) || run.cwd, startedAt: run.startedAt ?? time };
   } else if (phase === 'output') {
@@ -1313,6 +1315,10 @@ function mergeEarlierSshExec(older: SshExecRun, newer: SshExecRun): SshExecRun {
     command: newer.command || older.command,
     cwd: newer.cwd ?? older.cwd,
     startedAt: older.startedAt ?? newer.startedAt,
+    // The start's paths under the completion's size and hashes.
+    ...(newer.transfer ?? older.transfer
+      ? { transfer: newer.transfer && older.transfer ? { ...older.transfer, ...newer.transfer } : (newer.transfer ?? older.transfer) }
+      : {}),
     // A request whose resolution is loaded but not the request itself.
     ...(newer.login ?? older.login ? { login: newer.login ?? older.login } : {}),
     output: appendSshExecOutput(older.output, newer.output) };

@@ -501,6 +501,45 @@ export function maskSshExecOutput(
     return segments;
   });
 }
+/** A file an agent copied with `ssh_upload` / `ssh_download`, as
+ * `ssh.exec.*` events carry it in `transfer`. The size and hashes come with
+ * a successful completion only. */
+export type SshExecTransfer = {
+  direction: 'upload' | 'download';
+  /** Absolute path on the TodeX machine. */
+  localPath: string;
+  remotePath: string;
+  sizeBytes?: number;
+  sha256?: string;
+  /** The host's own hash of the file; absent when it has no checksum tool. */
+  remoteSha256?: string;
+  /** An existing file was replaced. */
+  replaced?: boolean;
+};
+
+/** Reads an event's `transfer`; later fields fill in what `previous` lacks. */
+export function parseSshExecTransfer(value: unknown, previous?: SshExecTransfer): SshExecTransfer | undefined {
+  if (!value || typeof value !== 'object') return previous;
+  const record = value as Record<string, unknown>;
+  const direction = record.direction === 'upload' || record.direction === 'download' ? record.direction : previous?.direction;
+  if (!direction) return previous;
+  const text = (key: string) => (typeof record[key] === 'string' && record[key] ? record[key] as string : undefined);
+  const transfer: SshExecTransfer = {
+    direction,
+    localPath: text('localPath') ?? previous?.localPath ?? '',
+    remotePath: text('remotePath') ?? previous?.remotePath ?? '',
+  };
+  const size = typeof record.sizeBytes === 'number' && Number.isFinite(record.sizeBytes) ? record.sizeBytes : previous?.sizeBytes;
+  if (size !== undefined) transfer.sizeBytes = size;
+  const sha256 = text('sha256') ?? previous?.sha256;
+  if (sha256) transfer.sha256 = sha256;
+  const remoteSha256 = text('remoteSha256') ?? previous?.remoteSha256;
+  if (remoteSha256) transfer.remoteSha256 = remoteSha256;
+  const replaced = typeof record.replaced === 'boolean' ? record.replaced : previous?.replaced;
+  if (replaced !== undefined) transfer.replaced = replaced;
+  return transfer;
+}
+
 export type SshExecRun = {
   /** The backend `execId`. */
   id: string;
@@ -529,6 +568,8 @@ export type SshExecRun = {
   /** The login this call asked for when ssh could not authenticate on its
    * own (`ssh.login.*`); calls that joined another call's request have none. */
   login?: SshExecLogin;
+  /** Set for `ssh_upload` / `ssh_download`; `command` then describes the copy. */
+  transfer?: SshExecTransfer;
 };
 
 /** How an agent's login request ended (`ssh.login.resolved`). */

@@ -820,6 +820,34 @@ test('agent ssh_exec calls collect per execId without touching the timeline', ()
   assert.deepEqual(paged.sshExecs.map(run => run.id), ['a', 'b']);
 });
 
+test('agent file transfers ride ssh.exec runs with their paths, size and hashes', () => {
+  const hash = 'ab'.repeat(32);
+  const events = [
+    event(1, 'ssh.exec.started', { execId: 'u', host: 'web', command: 'upload app → web:/opt/app', transfer: { direction: 'upload', localPath: '/w/app', remotePath: '/opt/app' } }),
+    event(2, 'ssh.exec.started', { execId: 'd', host: 'web', command: 'download web:/x → x', transfer: { direction: 'download', localPath: '/w/x', remotePath: '/x' } }),
+    event(3, 'ssh.exec.output', { execId: 'd', stream: 'stderr', data: '/x does not exist\n' }),
+    event(4, 'ssh.exec.completed', { execId: 'u', host: 'web', durationMs: 900, truncated: false, outputTruncated: false, transfer: { direction: 'upload', localPath: '/w/app', remotePath: '/opt/app', sizeBytes: 24398200, sha256: hash, remoteSha256: hash, verified: 'sha256', replaced: true } }),
+    event(5, 'ssh.exec.completed', { execId: 'd', host: 'web', durationMs: 5, failure: 'other', transfer: { direction: 'download', localPath: '/w/x', remotePath: '/x' } }),
+    event(6, 'ssh.exec.started', { execId: 'e', host: 'web', command: 'ls', transfer: { direction: 'sideways' } }),
+  ];
+  const state = apply(empty(), ...events).state;
+  const [upload, download, exec] = state.sshExecs;
+  assert.deepEqual(upload.transfer, { direction: 'upload', localPath: '/w/app', remotePath: '/opt/app', sizeBytes: 24398200, sha256: hash, remoteSha256: hash, replaced: true });
+  assert.equal(upload.status, 'completed');
+  assert.equal(upload.exitCode, undefined);
+  assert.equal(download.status, 'failed');
+  assert.deepEqual(download.transfer, { direction: 'download', localPath: '/w/x', remotePath: '/x' });
+  assert.equal('transfer' in exec, false, 'an unknown direction is no transfer');
+
+  // The completion alone (start paged out) still has the paths; paging the
+  // start in keeps the completion's size and hashes.
+  let paged = apply(runtime.createConversationRuntime('c', 'w', 3), ...events.slice(3, 4)).state;
+  assert.equal(paged.sshExecs[0].transfer.sizeBytes, 24398200);
+  paged = runtime.prependConversationRuntimeEvents(paged, events.slice(0, 1));
+  assert.deepEqual(paged.sshExecs[0].transfer, upload.transfer);
+  assert.equal(paged.sshExecs[0].command, 'upload app → web:/opt/app');
+});
+
 test('an agent login request attaches to the call that asked for it', () => {
   const ssh = require(path.join(__dirname, '../../dist/unit/lib/ssh.js'));
   const expiresAt = new Date(Date.now() + 60_000).toISOString();

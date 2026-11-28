@@ -1559,6 +1559,69 @@ export function capConversationRuntimeTimeline(
   };
 }
 
+/** One permission the journal requested and never resolved, as
+ * `conversation.subscribe` reports it (TodeX_backend docs/API.md): its id,
+ * its request's own sequence (absent in history sealed before the daemon
+ * kept it), its scope, and whether it can still be answered here. */
+export type SubscribedPermission = { permissionId: string; sequence?: number; scope?: string; answerable: boolean };
+/** The control state a subscribe result carries for a client that loaded
+ * only the journal's tail: the dialogs still waiting and the newest
+ * `goal.updated` (which may clear the goal). */
+export type SubscribeControlState = { pendingPermissions: SubscribedPermission[]; goalSequence?: number };
+const sequenceOf = (value: unknown): number | undefined => (typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined);
+/** Reads a `conversation.subscribe` result's control state; `null` from a
+ * daemon that reports none (an older one): show only what the window holds. */
+export function parseSubscribeControlState(result: unknown): SubscribeControlState | null {
+  const value = object(result);
+  if (!Array.isArray(value.pendingPermissions)) return null;
+  const pendingPermissions = value.pendingPermissions.flatMap((entry): SubscribedPermission[] => {
+    const item = object(entry);
+    const permissionId = string(item.permissionId);
+    if (!permissionId) return [];
+    const sequence = sequenceOf(item.sequence);
+    const scope = string(item.scope);
+    return [{ permissionId, ...(sequence ? { sequence } : {}), ...(scope ? { scope } : {}), answerable: item.answerable === true }];
+  });
+  const goalSequence = sequenceOf(value.goalSequence);
+  return { pendingPermissions, ...(goalSequence ? { goalSequence } : {}) };
+}
+
+const CONTROL_EVENT_TYPES = new Set(['permission.requested', 'tool.awaitingApproval', 'goal.updated']);
+/** Adopt the dialogs still waiting and the goal whose events lie below a
+ * lazily loaded window (read back by the sequences `conversation.subscribe`
+ * reported). Only those two are taken: every other event is ignored, so old
+ * history cannot bring settled state back. A permission the runtime already
+ * holds keeps its newer copy, one for a retired or stopped runtime is
+ * dropped, and the goal is taken only while the runtime has none (the caller
+ * passes a goal event only when the window held no `goal.updated` of its
+ * own). Requests for the running turn put it back to `waitingPermission`.
+ * The caller also leaves out permissions it saw resolved meanwhile: the
+ * runtime keeps no record of those. */
+export function adoptConversationRuntimeControlEvents(
+  previous: ConversationRuntime,
+  events: readonly ConversationEvent[],
+): ConversationRuntime {
+  const accepted = events.map(normalizeConversationEvent).filter((event): event is ConversationEvent =>
+    event !== null && event.conversationId === previous.conversationId && CONTROL_EVENT_TYPES.has(canonicalConversationEventType(event)));
+  if (!accepted.length) return previous;
+  const scratch = projectScratchRuntime(previous, accepted);
+  const known = new Set(previous.pendingPermissions.map(item => item.id));
+  const stopped = (runtimeId: string) => previous.retiredRuntimeIds.includes(runtimeId)
+    || (previous.providerRuntime?.runtimeId === runtimeId && previous.providerRuntime.status === 'stopped');
+  const adopted = scratch.pendingPermissions.filter(item => !known.has(item.id) && !(item.runtimeId && stopped(item.runtimeId)));
+  const goalEvent = accepted.some(event => canonicalConversationEventType(event) === 'goal.updated');
+  const goal = previous.goal === null && goalEvent ? scratch.goal : previous.goal;
+  if (!adopted.length && goal === previous.goal) return previous;
+  const waiting = previous.status === 'running' && adopted.some(item => item.scope !== 'session'
+    && (!item.turnId || item.turnId === previous.activeTurnId));
+  return {
+    ...previous,
+    pendingPermissions: [...previous.pendingPermissions, ...adopted],
+    goal,
+    ...(waiting ? { status: 'waitingPermission' as const } : {}),
+  };
+}
+
 /** Adopt a still-running turn whose `turn.started` lies below a lazily loaded
  * window. Only the turn's own state (id, running status and the configuration
  * it started with) is taken from the start event; timeline rows, usage and

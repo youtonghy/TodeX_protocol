@@ -1173,3 +1173,51 @@ test('goal.updated sets and clears the conversation goal', () => {
   update = apply(update.state, event(3, 'goal.updated', { provider: 'codex', goal: null }));
   assert.equal(update.state.goal, null);
 });
+
+test('a subscribe result\'s control state parses, and an older daemon\'s reads as none', () => {
+  assert.deepEqual(runtime.parseSubscribeControlState({
+    pendingPermissions: [{ permissionId: 'p1', sequence: 80, scope: 'session', answerable: true }, { permissionId: 'p2', answerable: false }, { sequence: 3 }],
+    goalSequence: 90,
+  }), {
+    pendingPermissions: [{ permissionId: 'p1', sequence: 80, scope: 'session', answerable: true }, { permissionId: 'p2', answerable: false }],
+    goalSequence: 90,
+  });
+  assert.deepEqual(runtime.parseSubscribeControlState({ pendingPermissions: [] }), { pendingPermissions: [] });
+  assert.equal(runtime.parseSubscribeControlState({ subscribed: true }), null);
+});
+
+test('permissions and the goal below a lazily loaded window are adopted, and nothing else', () => {
+  // The window starts at 150, inside a running turn.
+  let state = runtime.createConversationRuntime('c', 'w', 150);
+  state = apply(state, event(151, 'turn.started', { turnId: 't2' }), event(152, 'message.delta', { text: 'working', turnId: 't2' })).state;
+  assert.equal(state.status, 'running');
+  const call = event(80, 'permission.requested', { permissionId: 'p-call', turnId: 't1', lifetime: 'call', options: [] });
+  const goal = event(90, 'goal.updated', { goal: { objective: 'ship it', status: 'active' } });
+  const unrelated = event(85, 'message.delta', { text: 'old', turnId: 't1' });
+  const adopted = runtime.adoptConversationRuntimeControlEvents(state, [call, goal, unrelated]);
+  assert.deepEqual(adopted.pendingPermissions.map(item => item.id), ['p-call']);
+  assert.equal(adopted.pendingPermissions[0].payload.lifetime, 'call');
+  assert.equal(adopted.goal.objective, 'ship it');
+  assert.equal(adopted.timeline.length, state.timeline.length, 'no rows from below the window');
+  assert.equal(adopted.appliedSequence, state.appliedSequence);
+  // An earlier turn's call does not hold up the running one.
+  assert.equal(adopted.status, 'running');
+  // Adopted again: nothing changes, the same object comes back.
+  assert.equal(runtime.adoptConversationRuntimeControlEvents(adopted, [call, goal]), adopted);
+  // A request for the running turn puts it back to waiting.
+  const current = event(120, 'permission.requested', { permissionId: 'p-now', turnId: 't2', options: [] });
+  assert.equal(runtime.adoptConversationRuntimeControlEvents(state, [current]).status, 'waitingPermission');
+  // The answer arrives live and removes the adopted dialog.
+  const answered = apply(adopted, event(153, 'permission.resolved', { permissionId: 'p-call' })).state;
+  assert.deepEqual(answered.pendingPermissions, []);
+});
+
+test('a goal the window already holds wins, and a stopped runtime\'s dialog is not adopted', () => {
+  let state = runtime.createConversationRuntime('c', 'w', 150);
+  state = apply(state, event(151, 'goal.updated', { goal: { objective: 'newer', status: 'paused' } })).state;
+  const older = event(90, 'goal.updated', { goal: { objective: 'older', status: 'active' } });
+  assert.equal(runtime.adoptConversationRuntimeControlEvents(state, [older]), state);
+  const retired = { ...runtime.createConversationRuntime('c', 'w', 150), retiredRuntimeIds: ['r-old'] };
+  const dialog = event(70, 'permission.requested', { permissionId: 'p-old', runtimeId: 'r-old', scope: 'session', options: [] });
+  assert.equal(runtime.adoptConversationRuntimeControlEvents(retired, [dialog]), retired);
+});

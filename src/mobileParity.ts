@@ -21,6 +21,7 @@ import type {
 import { canonicalConversationEventType, normalizeConversationEvent, toAgentEventEnvelope } from './v2';
 import { isLoopbackHostname, isLoopbackUrl } from './loopback';
 import { planReviewText } from './planReview';
+import { readSequenceOf } from './readPositions';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -347,6 +348,8 @@ export type ConversationRecord = {
   reasoningEffort?: string | null;
   v2ConversationId?: string;
   lastSequence?: number;
+  /** The backend's shared read position (manifest `readSequence`). */
+  readSequence?: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -418,6 +421,7 @@ export function normalizeConversationRecord(
   const model = readString(raw, ['model', 'modelId', 'model_id']) || options.fallbackModel?.trim() || '';
   const rawReasoning = readString(raw, ['reasoningEffort', 'reasoning_effort', 'reasoningLevel', 'reasoning_level']);
   const sequence = readNumber(raw, ['lastSequence', 'last_sequence', 'sequence'], Number.NaN);
+  const readSequence = readSequenceOf(raw.readSequence);
   const backendConnectionId = readString(raw, ['backendConnectionId', 'backend_connection_id'])
     || options.backendConnectionId
     || null;
@@ -445,6 +449,7 @@ export function normalizeConversationRecord(
     reasoningEffort: normalizeConversationReasoningEffort(rawReasoning),
     v2ConversationId: v2ConversationId || undefined,
     lastSequence: Number.isFinite(sequence) ? sequence : undefined,
+    ...(readSequence !== undefined ? { readSequence } : {}),
     createdAt,
     updatedAt,
   };
@@ -491,6 +496,7 @@ export function conversationFromManifest(
     providerProfile: manifest.providerProfile,
     v2ConversationId: manifest.id,
     lastSequence: manifest.lastSequence,
+    ...(readSequenceOf(manifest.readSequence) !== undefined ? { readSequence: manifest.readSequence } : {}),
     createdAt: parseTimestamp(manifest.createdAt, now),
     updatedAt: parseTimestamp(manifest.updatedAt, now),
   };

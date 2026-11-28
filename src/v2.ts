@@ -1002,6 +1002,10 @@ export type ConversationManifest = {
    * when false. Clients must only treat a conversation as private when the
    * manifest echoes this (older daemons ignore the create field). */
   ephemeral?: boolean;
+  /** Newest event any of the owner's devices has seen (`conversation.read`,
+   * backends with `readSync`; see readPositions.ts). Omitted until first
+   * set: such a conversation counts as read. */
+  readSequence?: number;
 };
 
 // ---- Agent Calling (`/v2/agent-calling`, `/v2/api-keys`) -------------------

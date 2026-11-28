@@ -24,6 +24,9 @@ export type ServerVersionInfo = {
   mesh?: number;
   /** `true` when, in a group, the backend can be a hub (mesh v1 "Hub"). */
   meshHub?: boolean;
+  /** `1` when conversations carry a shared read position (`readSequence`,
+   * `conversation.read`; readPositions.ts). */
+  readSync?: number;
 };
 
 export type BackendProbeResult = {
@@ -202,6 +205,7 @@ export async function probeBackendConnection(options: {
       pathMappings: parsePathMappings(versionJson.pathMappings),
       ...(typeof versionJson.mesh === 'number' ? { mesh: versionJson.mesh } : {}),
       ...(versionJson.meshHub === true ? { meshHub: true } : {}),
+      ...(typeof versionJson.readSync === 'number' ? { readSync: versionJson.readSync } : {}),
     };
     if (version.name && version.name !== 'todex-agentd') {
       const error = ConnectionError.protocolMismatch(`unexpected server name ${version.name}`);

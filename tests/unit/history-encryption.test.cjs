@@ -88,6 +88,28 @@ test('event-level ciphertext opens per detail; plaintext events pass through in 
   assert.equal(await decryptor.decryptPage(clear, 'summary'), clear);
 });
 
+test('prefetching a page fetches every slice\'s keys in one request, and the slices then fetch none', async () => {
+  const device = generateHistoryRecipientKeyPair();
+  const keys = [newHistorySegmentKey(), newHistorySegmentKey(), newHistorySegmentKey()];
+  const ring = keyring();
+  for (const key of keys) ring.grant(key, device.publicKey);
+  const decryptor = new HistoryDecryptor({ seeds: [device.secretKey], fetchWraps: ring.fetchWraps });
+  // Three segments, one per slice of two events.
+  const events = keys.flatMap((key, index) => [1, 2].map((offset) => eventLevel(key, index * 2 + offset, {}, null, { n: index * 2 + offset })));
+  await decryptor.prefetchKeys(events, { detail: 'full', conversationId: CONVERSATION });
+  assert.equal(ring.calls.length, 1);
+  assert.deepEqual(new Set(ring.calls[0].kids), new Set(keys.map((key) => b64(key.kid))));
+  const opened = [];
+  for (let start = 0; start < events.length; start += 2) {
+    opened.push(...await decryptor.decryptEvents(events.slice(start, start + 2), { detail: 'full', conversationId: CONVERSATION }));
+  }
+  assert.equal(ring.calls.length, 1);
+  assert.deepEqual(opened.map((event) => event.payload.n), [1, 2, 3, 4, 5, 6]);
+  // Nothing left to fetch: no request at all.
+  await decryptor.prefetchKeys(events, { detail: 'full', conversationId: CONVERSATION });
+  assert.equal(ring.calls.length, 1);
+});
+
 test('frame-level ciphertext is raw DEFLATE and resolves through the page frames map', async () => {
   const device = generateHistoryRecipientKeyPair();
   const key = newHistorySegmentKey();

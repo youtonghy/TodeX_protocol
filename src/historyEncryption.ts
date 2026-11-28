@@ -428,6 +428,18 @@ export class HistoryDecryptor {
 
   /** Async form for any batch: fetches missing wraps first. */
   async decryptEvents<E extends HistoryWireEvent>(events: readonly E[], options: { frames?: HistoryFrames; detail: HistoryDetail; conversationId?: string }): Promise<E[]> {
+    await this.prefetchKeys(events, options);
+    return this.openEvents(events, options);
+  }
+
+  /**
+   * Fetches the wraps `events` need and are not cached, in one request per
+   * scope (batched as `decryptEvents` does). A client that decrypts a page in
+   * slices, to give its UI thread back between them, calls this for the whole
+   * page first: otherwise each slice discovers its own missing keys, and a
+   * page whose keys are spread across slices pays a round trip per slice.
+   */
+  async prefetchKeys(events: readonly HistoryWireEvent[], options: { frames?: HistoryFrames; detail: HistoryDetail; conversationId?: string }): Promise<void> {
     const pending = new Map<string, Set<string>>();
     for (const event of events) {
       const scope = eventScope(event, options.conversationId);
@@ -439,7 +451,6 @@ export class HistoryDecryptor {
       }
     }
     await Promise.all([...pending].map(([scope, kids]) => this.ensureKeys(scope, [...kids])));
-    return this.openEvents(events, options);
   }
 
   /** Synchronous form for live frames: `null` when a wrap must be fetched

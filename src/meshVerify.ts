@@ -5,7 +5,7 @@
 // through these instead of `meshClient`'s `storedChain` / `nodeInfosOf`,
 // which check each time.
 
-import { verifyMeshChain, verifyMeshNodeInfo, type MeshChain, type MeshNodeInfo, type MeshSignedDoc } from './mesh';
+import { verifyMeshChain, verifyMeshChainSliced, verifyMeshNodeInfo, type MeshChain, type MeshNodeInfo, type MeshSignedDoc } from './mesh';
 import type { MeshVerifiers, StoredMeshGroup } from './meshClient';
 
 /** Verdicts kept by content, oldest dropped first. */
@@ -30,7 +30,18 @@ export type MeshVerifier = {
   nodeInfosOf: (group: StoredMeshGroup, chain: MeshChain) => Map<string, MeshNodeInfo>;
   /** For `mergeNodeState`, which expects a failed check to throw. */
   verifiers: MeshVerifiers;
+  /**
+   * Verifies a group's chain and its nodes' infos ahead of `storedChain` and
+   * `nodeInfosOf`, a document at a time with `pause` between, and keeps the
+   * verdicts they then return at once. A client calls it on groups it loads
+   * before anything reads them (at start-up, a chain of a few documents held
+   * the UI thread for about 250 ms in one go).
+   */
+  prime: (group: StoredMeshGroup, pause: () => Promise<void>) => Promise<void>;
 };
+
+/** `verifyMeshChainSliced`'s shape, for a client that times it. */
+export type SlicedChainVerifier = (docs: readonly MeshSignedDoc[], pause: () => Promise<void>) => Promise<MeshChain>;
 
 /**
  * Verdicts are kept by the stored object (stored chains and documents are
@@ -40,7 +51,10 @@ export type MeshVerifier = {
  * depends only on the documents (body and signature) and the key, so content
  * is a sound key; a failed verdict is kept as well.
  */
-export function createMeshVerifier(verify: MeshVerifiers = { chain: verifyMeshChain, nodeInfo: verifyMeshNodeInfo }): MeshVerifier {
+export function createMeshVerifier(
+  verify: MeshVerifiers = { chain: verifyMeshChain, nodeInfo: verifyMeshNodeInfo },
+  verifySliced: SlicedChainVerifier = verifyMeshChainSliced,
+): MeshVerifier {
   const chainsByDocs = new WeakMap<readonly MeshSignedDoc[], MeshChain | null>();
   const chainsByContent = new Map<string, MeshChain | null>();
   const infosByDoc = new WeakMap<MeshSignedDoc, Map<string, MeshNodeInfo | null>>();
@@ -116,5 +130,32 @@ export function createMeshVerifier(verify: MeshVerifiers = { chain: verifyMeshCh
     },
   };
 
-  return { storedChain, nodeInfosOf, verifiers };
+  async function prime(group: StoredMeshGroup, pause: () => Promise<void>): Promise<void> {
+    const docs = group.chain;
+    if (!docs.length) return;
+    if (chainsByDocs.get(docs) === undefined) {
+      const key = docs.map(docKey).join('\n');
+      let chain = chainsByContent.get(key);
+      if (chain === undefined) {
+        try {
+          chain = await verifySliced(docs, pause);
+        } catch {
+          chain = null;
+        }
+        // Another caller may have settled it meanwhile: the same documents, the same verdict.
+        remember(chainsByContent, CHAINS_KEPT, key, chain);
+      }
+      chainsByDocs.set(docs, chain);
+    }
+    const chain = storedChain(group);
+    if (!chain) return;
+    for (const member of chain.head.members) {
+      const doc = member.kind === 'node' ? group.nodeInfos[member.id] : undefined;
+      if (!doc || infosByDoc.get(doc)?.has(member.publicKey)) continue;
+      await pause();
+      nodeInfo(doc, member.publicKey);
+    }
+  }
+
+  return { storedChain, nodeInfosOf, verifiers, prime };
 }

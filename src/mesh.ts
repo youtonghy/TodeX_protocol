@@ -261,32 +261,66 @@ function signerKey(roster: MeshRosterBody, signer: string): Uint8Array {
 
 /** Verifies a chain from its genesis; throws `MeshError` on any rule. */
 export function verifyMeshChain(docs: readonly MeshSignedDoc[]): MeshChain {
+  const verify = meshChainVerification(docs);
+  while (!verify.done) verify.next();
+  return verify.chain();
+}
+
+/**
+ * `verifyMeshChain` a document at a time, awaiting `pause` between them: each
+ * document's signature is an Ed25519 verification in plain JavaScript (tens
+ * of milliseconds on a phone), and a client gives its UI thread back between
+ * them instead of holding it for the whole chain. The same rules and result.
+ */
+export async function verifyMeshChainSliced(docs: readonly MeshSignedDoc[], pause: () => Promise<void>): Promise<MeshChain> {
+  const verify = meshChainVerification(docs);
+  while (!verify.done) {
+    verify.next();
+    if (!verify.done) await pause();
+  }
+  return verify.chain();
+}
+
+/** The chain's rules, applied one document per `next()`; `chain()` once `done`. */
+function meshChainVerification(docs: readonly MeshSignedDoc[]): { readonly done: boolean; next: () => void; chain: () => MeshChain } {
   if (!Array.isArray(docs) || docs.length === 0 || docs.length > MESH_MAX_CHAIN) fail('chain must hold 1-4096 documents');
+  // A copy: the documents verified are the ones returned, whatever the caller does to its array meanwhile.
+  const list = [...docs];
   const bodies: MeshRosterBody[] = [];
   let groupId = '';
   let previousHash = new Uint8Array(32);
-  docs.forEach((doc, index) => {
-    const { bytes, value } = parseBody(doc);
-    const body = readRoster(value);
-    if (body.version !== index + 1) fail('roster versions are not consecutive');
-    let key: Uint8Array;
-    const previous = bodies[index - 1];
-    if (!previous) {
-      if (body.groupId !== null || body.prev !== null) fail('genesis must not name a group');
-      if (decodeCanonical(body.nonce ?? '').length !== 16) fail('genesis needs a 16-byte nonce');
-      if (body.signer === MESH_RECOVERY_SIGNER) fail('genesis must be signed by a device');
-      groupId = `grp_${encodeBase64Url(sha256(bytes).subarray(0, 16))}`;
-      key = signerKey(body, body.signer);
-    } else {
-      if (body.groupId !== groupId) fail('document belongs to another group');
-      if (body.prev !== encodeBase64Url(previousHash)) fail('document does not follow its predecessor');
-      key = signerKey(previous, body.signer);
-    }
-    verifyDoc(doc, MESH_ROSTER_DOMAIN, key);
-    previousHash = sha256(bytes);
-    bodies.push(body);
-  });
-  return { groupId, docs: [...docs], bodies, head: bodies[bodies.length - 1], headHash: previousHash };
+  return {
+    get done() {
+      return bodies.length === list.length;
+    },
+    next() {
+      const index = bodies.length;
+      const doc = list[index];
+      const { bytes, value } = parseBody(doc);
+      const body = readRoster(value);
+      if (body.version !== index + 1) fail('roster versions are not consecutive');
+      let key: Uint8Array;
+      const previous = bodies[index - 1];
+      if (!previous) {
+        if (body.groupId !== null || body.prev !== null) fail('genesis must not name a group');
+        if (decodeCanonical(body.nonce ?? '').length !== 16) fail('genesis needs a 16-byte nonce');
+        if (body.signer === MESH_RECOVERY_SIGNER) fail('genesis must be signed by a device');
+        groupId = `grp_${encodeBase64Url(sha256(bytes).subarray(0, 16))}`;
+        key = signerKey(body, body.signer);
+      } else {
+        if (body.groupId !== groupId) fail('document belongs to another group');
+        if (body.prev !== encodeBase64Url(previousHash)) fail('document does not follow its predecessor');
+        key = signerKey(previous, body.signer);
+      }
+      verifyDoc(doc, MESH_ROSTER_DOMAIN, key);
+      previousHash = sha256(bytes);
+      bodies.push(body);
+    },
+    chain() {
+      if (bodies.length !== list.length) fail('chain not verified to its end');
+      return { groupId, docs: list, bodies, head: bodies[bodies.length - 1], headHash: previousHash };
+    },
+  };
 }
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {

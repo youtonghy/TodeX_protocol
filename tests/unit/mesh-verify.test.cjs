@@ -164,3 +164,46 @@ test('mergeNodeState gives the same outcome through the remembering verifiers', 
   const remote = { nodeId: node.id, nodeInfo, chain: withNode.docs, nodeInfos: [] };
   assert.deepEqual(client.mergeNodeState(stored, remote, verifier.verifiers), client.mergeNodeState(stored, remote));
 });
+
+test('the sliced chain check gives verifyMeshChain\'s verdicts, pausing between documents', async () => {
+  const { withNode, base } = realGroup();
+  let pauses = 0;
+  const pause = async () => { pauses += 1; };
+  const sliced = await mesh.verifyMeshChainSliced(withNode.docs, pause);
+  assert.deepEqual(sliced.head, withNode.head);
+  assert.equal(sliced.groupId, withNode.groupId);
+  assert.deepEqual(sliced.headHash, withNode.headHash);
+  assert.equal(pauses, withNode.docs.length - 1);
+  await assert.rejects(mesh.verifyMeshChainSliced([...withNode.docs].reverse(), pause));
+  const last = withNode.docs[withNode.docs.length - 1];
+  const flipped = { ...last, sig: `${last.sig.slice(0, -2)}${last.sig.endsWith('AA') ? 'AB' : 'AA'}` };
+  await assert.rejects(mesh.verifyMeshChainSliced([...withNode.docs.slice(0, -1), flipped], pause), /signature/);
+  assert.deepEqual((await mesh.verifyMeshChainSliced(base.docs, pause)).head, base.head);
+});
+
+test('priming a group verifies it ahead, so storedChain and nodeInfosOf answer without checking', async () => {
+  const { stored, node } = realGroup();
+  const calls = { chain: 0, nodeInfo: 0, sliced: 0 };
+  const verifier = createMeshVerifier(
+    { chain: (docs) => { calls.chain += 1; return mesh.verifyMeshChain(docs); }, nodeInfo: (doc, key) => { calls.nodeInfo += 1; return mesh.verifyMeshNodeInfo(doc, key); } },
+    (docs, pause) => { calls.sliced += 1; return mesh.verifyMeshChainSliced(docs, pause); },
+  );
+  await verifier.prime(stored, async () => undefined);
+  assert.deepEqual(calls, { chain: 0, nodeInfo: 1, sliced: 1 });
+  const chain = verifier.storedChain(stored);
+  assert.ok(chain);
+  assert.ok(verifier.nodeInfosOf(stored, chain).get(node.id));
+  assert.deepEqual(calls, { chain: 0, nodeInfo: 1, sliced: 1 }, 'answered from the primed verdicts');
+  // Primed again: nothing left to check.
+  await verifier.prime(stored, async () => undefined);
+  assert.deepEqual(calls, { chain: 0, nodeInfo: 1, sliced: 1 });
+});
+
+test('a primed chain that does not verify reads as none', async () => {
+  const { stored } = realGroup();
+  const last = stored.chain[stored.chain.length - 1];
+  const tampered = { ...stored, chain: [...stored.chain.slice(0, -1), { ...last, sig: `${last.sig.slice(0, -2)}${last.sig.endsWith('AA') ? 'AB' : 'AA'}` }] };
+  const verifier = createMeshVerifier();
+  await verifier.prime(tampered, async () => undefined);
+  assert.equal(verifier.storedChain(tampered), null);
+});

@@ -110,6 +110,18 @@ test('prefetching a page fetches every slice\'s keys in one request, and the sli
   assert.equal(ring.calls.length, 1);
 });
 
+test('a decryptor keeps its seed\'s public key, so a client need not derive it again', () => {
+  const device = generateHistoryRecipientKeyPair();
+  const decryptor = new HistoryDecryptor({ seeds: [device.secretKey], fetchWraps: async () => ({}) });
+  assert.deepEqual(decryptor.recipientPublicKey, device.publicKey);
+  assert.equal(decryptor.recipientIds[0], b64(historyRecipientId(device.publicKey)));
+  // A copy: the caller cannot change the decryptor's.
+  decryptor.recipientPublicKey.fill(0);
+  assert.deepEqual(decryptor.recipientPublicKey, device.publicKey);
+  decryptor.clear();
+  assert.equal(decryptor.recipientPublicKey, null);
+});
+
 test('frame-level ciphertext is raw DEFLATE and resolves through the page frames map', async () => {
   const device = generateHistoryRecipientKeyPair();
   const key = newHistorySegmentKey();

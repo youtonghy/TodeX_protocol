@@ -354,7 +354,7 @@ export function historyEventsNeedDecryption(events: readonly HistoryWireEvent[])
  * or reorders events: one that cannot be opened keeps its envelope fields
  * plus `detailLocked: true` so sequences stay contiguous. */
 export class HistoryDecryptor {
-  private seeds: { seed: Uint8Array; rid: string }[] = [];
+  private seeds: { seed: Uint8Array; rid: string; publicKey: Uint8Array }[] = [];
   private readonly keys = new Map<string, CachedKey>();
   private readonly fetchWraps: HistoryWrapsFetcher;
   private readonly maxKeys: number;
@@ -381,6 +381,11 @@ export class HistoryDecryptor {
   /** Recipient ids this decryptor can open wraps for, in lookup order. */
   get recipientIds(): string[] { return this.seeds.map((entry) => entry.rid); }
 
+  /** The public key of the first seed (this device's recipient key), kept
+   * from `setSeeds`: deriving it again is a full ML-KEM-768 + X25519 key
+   * generation in plain JavaScript. `null` without a seed. */
+  get recipientPublicKey(): Uint8Array | null { return this.seeds[0]?.publicKey.slice() ?? null; }
+
   setSeeds(seeds: readonly Uint8Array[]): void {
     for (const entry of this.seeds) entry.seed.fill(0);
     const seen = new Set<string>();
@@ -389,7 +394,7 @@ export class HistoryDecryptor {
       const rid = encodeBase64Url(historyRecipientId(publicKey));
       if (seen.has(rid)) { secretKey.fill(0); return []; }
       seen.add(rid);
-      return [{ seed: secretKey, rid }];
+      return [{ seed: secretKey, rid, publicKey }];
     });
     this.forgetMissing();
   }
